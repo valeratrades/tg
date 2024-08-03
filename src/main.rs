@@ -17,7 +17,7 @@ enum Commands {
 	/// Send the message (if more than one string is provided, they are contatenated with a space)
 	///Ex
 	///```sh
-	///tg send -j "today I'm feeling blue" "//this is still a part of the message"
+	///tg send -c journal "today I'm feeling blue" "//this is still a part of the message"
 	///```
 	Send(SendArgs),
 	/// Get information about the bot

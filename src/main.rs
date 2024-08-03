@@ -1,7 +1,7 @@
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use std::env;
 use v_utils::io::ExpandedPath;
-use anyhow::Result;
 mod config;
 
 #[derive(Parser)]
@@ -24,6 +24,8 @@ enum Commands {
 	BotInfo,
 	/// List all the channels defined in the config file
 	ListChannels,
+	/// Gen aliases for sending to channels
+	GenAliases,
 }
 #[derive(Args)]
 struct SendArgs {
@@ -76,6 +78,41 @@ async fn main() -> Result<()> {
 				}
 				s.push_str(k);
 			});
+			println!("{s}");
+		}
+		Commands::GenAliases => {
+			let mut s = "!#/bin/sh\n".to_string();
+			for (key, _) in config.channels.iter() {
+				// alias to "t{first letter of the key with which the alias is not taken}"
+				let mut key_chars = key.chars();
+				loop {
+					match key_chars.next() {
+						Some(c) => {
+							let try_alias = format!("t{}", c);
+
+							let alias_already_exists = std::process::Command::new("env")
+								.arg("sh")
+								.arg("-c")
+								.arg(format!("which {} 2>/dev/null", try_alias))
+								.output()
+								.expect("Failed to execute command")
+								.status
+								.success();
+
+							if alias_already_exists {
+								continue;
+							} else {
+								s.push_str(&format!("\nalias {try_alias}=\"tg send -c {key}\""));
+								break;
+							}
+						}
+						None => {
+							eprintln!("Failed to generate alias for {key}; skipping.",);
+							continue;
+						}
+					};
+				}
+			}
 			println!("{s}");
 		}
 	};

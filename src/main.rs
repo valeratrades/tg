@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
 			println!("{s}");
 		}
 		Commands::GenAliases => {
-			let mut s = "!#/bin/sh\n".to_string();
+			let mut s = "#!/bin/sh\n".to_string();
 			for (key, _) in config.channels.iter() {
 				// alias to "t{first letter of the key with which the alias is not taken}"
 				let mut key_chars = key.chars();

@@ -8,11 +8,13 @@ anyhow = "1.0.86"
 clap = { version = "4.5.13", features = ["derive"] }
 config = "0.14.0"
 derive-new = "*"
+insta = "1.39.0"
 reqwest = "0.12.5"
 serde = "1.0.204"
 serde_json = "1.0.122"
 tokio = { version = "1.39.2", features = ["full"] }
-v_utils = { version = "^1.4.1", features = ["io"] }
+toml = "0.8.19"
+v_utils = { version = "^1.4.2", features = ["io"] }
 
 [package.metadata.cargo-machete]
 ignored = ["derive-new", "anyhow", "serde", "tokio"]

@@ -1,7 +1,7 @@
 use clap::{ArgGroup, Args, Parser, Subcommand};
-use reqwest::Error;
 use std::env;
 use v_utils::io::ExpandedPath;
+use anyhow::Result;
 mod config;
 
 #[derive(Parser)]
@@ -22,54 +22,42 @@ enum Commands {
 	Send(SendArgs),
 	/// Get information about the bot
 	BotInfo,
+	/// List all the channels defined in the config file
+	ListChannels,
 }
 #[derive(Args)]
-#[command(group(
-    ArgGroup::new("channel")
-        .required(true)
-        .args(&["wtt", "journal", "alerts"]),
-))]
 struct SendArgs {
-	/// Send message to WTT channel
+	/// Name of the channel to send the message to. Matches against the keys in the config file
 	#[arg(short, long)]
-	wtt: bool,
-	/// Send message to Journal channel
-	#[arg(short, long)]
-	journal: bool,
-	/// Send message to Alerts channel
-	#[arg(short, long)]
-	alerts: bool,
+	channel: String,
 
 	/// Message to send
 	message: Vec<String>,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
 	let cli = Cli::parse();
-	let config = config::AppConfig::read(cli.config).expect("Failed to read config file");
+	let config = config::AppConfig::read(&cli.config.0).expect("Failed to read config file");
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
 	let bot_token = env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
 
 	match cli.command {
 		Commands::Send(args) => {
-			let chat_id: isize;
-			if args.wtt {
-				chat_id = config.channels.wtt; //"-1001179171854";
-			} else if args.journal {
-				chat_id = config.channels.journal; //"-1002128875937";
-			} else if args.alerts {
-				chat_id = config.channels.alerts; //"-1001800341082";
-			} else {
-				unreachable!(); // ArgGroup should prevent this
-			}
+			let destination = match config.channels.get(&args.channel) {
+				Some(d) => d,
+				None => {
+					return Err(anyhow::anyhow!("Channel not found in {}", cli.config.display()));
+				}
+			};
 
 			let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-			let params = [("chat_id", format!("{chat_id}")), ("text", args.message.join(" "))];
+			let mut params = vec![("text", args.message.join(" "))];
+			params.extend(destination.destination_params());
 			let client = reqwest::Client::new();
 			let res = client.post(&url).form(&params).send().await?;
 
-			println!("{:#?}\nTarget: {chat_id}; Sender: {bot_token}", res.text().await?);
+			println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await?, destination);
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);
@@ -79,6 +67,16 @@ async fn main() -> Result<(), Error> {
 			let parsed_json: serde_json::Value = serde_json::from_str(&res.text().await?).expect("Failed to parse JSON");
 			let pretty_json = serde_json::to_string_pretty(&parsed_json).expect("Failed to pretty print JSON");
 			println!("{}", pretty_json);
+		}
+		Commands::ListChannels => {
+			let mut s = String::new();
+			config.channels.iter().for_each(|(k, _)| {
+				if !s.is_empty() {
+					s.push_str(", ");
+				}
+				s.push_str(k);
+			});
+			println!("{s}");
 		}
 	};
 

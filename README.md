@@ -31,7 +31,7 @@ Create a configuration file at `~/.config/tg.toml` (or specify a different path 
 [channels]
 channel1 = "1234305221"
 channel2 = "-1001234305221"
-channel3 = "1234305221/7"
+group_and_topic = "1234305221/7"
 ```
 
 Each entry under `[channels]` represents a Telegram channel or group. Channels are specified by their ID, and groups are specified by their ID followed by a thread ID separated by a `/`.

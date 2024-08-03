@@ -70,17 +70,6 @@ List all the channels defined in the configuration file:
 tg list-channels
 ```
 
-## Development
-
-### Running Tests
-
-To run the tests, use the following command:
-
-```sh
-cargo test
-```
-
-The tests include deserialization tests for different channel and group configurations and ensure the correct parsing and error handling.
 
 ### License
 

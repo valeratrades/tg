@@ -52,3 +52,7 @@ venv/
 **/Cargo.lock
 .cargo/config.toml
 .cargo/config
+
+
+
+functions.sh

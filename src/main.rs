@@ -102,7 +102,7 @@ async fn main() -> Result<()> {
 							if alias_already_exists {
 								continue;
 							} else {
-								s.push_str(&format!("\nalias {try_alias}=\"tg send -c {key}\""));
+								s.push_str(&format!("\nalias {try_alias}=\"tg send -c {key} >/dev/null\""));
 								break;
 							}
 						}

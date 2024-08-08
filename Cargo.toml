@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 clap = { version = "4.5.13", features = ["derive"] }
 config = "0.14.0"
 derive-new = "*"
+hyper = { version = "1.4.1", features = ["full"] }
 insta = "1.39.0"
 reqwest = "0.12.5"
 serde = "1.0.204"

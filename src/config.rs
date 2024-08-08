@@ -9,6 +9,7 @@ use v_utils::macros::MyConfigPrimitives;
 #[derive(Debug, Default, derive_new::new, Clone, MyConfigPrimitives)]
 pub struct AppConfig {
 	pub channels: BTreeMap<String, TelegramDestination>,
+	pub localhost_port: u16,
 }
 
 #[derive(Clone, Debug, derive_new::new, Copy, PartialEq, Eq, Serialize)]
@@ -147,15 +148,14 @@ Group {
 	#[test]
 	fn test_deserialize_channels() {
 		let toml_str = r#"
-[channels]
 wtt = "2244305221"
 journal = "-1002244305222"
 alerts = "2244305223/7"
 "#;
 
-		let config: AppConfig = toml::from_str(toml_str).unwrap();
+		let config_channels: BTreeMap<String, TelegramDestination> = toml::from_str(toml_str).unwrap();
 
-		assert_debug_snapshot!(config.channels, @r###"
+		assert_debug_snapshot!(config_channels, @r###"
   {
       "alerts": Group {
           id: 2244305223,

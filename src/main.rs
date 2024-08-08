@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 use std::env;
 use v_utils::io::ExpandedPath;
 mod config;
+mod server;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -26,6 +27,8 @@ enum Commands {
 	ListChannels,
 	/// Gen aliases for sending to channels
 	GenAliases,
+	/// Start a telegram server, compiling messages from the configured channels into markdown log files, to be viewed with $EDITOR
+	Server,
 }
 #[derive(Args)]
 struct SendArgs {
@@ -114,6 +117,9 @@ async fn main() -> Result<()> {
 				}
 			}
 			println!("{s}");
+		}
+		Commands::Server => {
+			server::run(config, bot_token).await?;
 		}
 	};
 

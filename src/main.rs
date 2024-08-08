@@ -1,7 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use std::env;
+use tokio::net::TcpStream;
 use v_utils::io::ExpandedPath;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 mod config;
 mod server;
 
@@ -45,24 +46,28 @@ async fn main() -> Result<()> {
 	let cli = Cli::parse();
 	let config = config::AppConfig::read(&cli.config.0).expect("Failed to read config file");
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
-	let bot_token = env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
+	let bot_token = std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
 
 	match cli.command {
 		Commands::Send(args) => {
-			let destination = match config.channels.get(&args.channel) {
+			let _destination = match config.channels.get(&args.channel) {
 				Some(d) => d,
 				None => {
 					return Err(anyhow::anyhow!("Channel not found in {}", cli.config.display()));
 				}
 			};
 
-			let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-			let mut params = vec![("text", args.message.join(" "))];
-			params.extend(destination.destination_params());
-			let client = reqwest::Client::new();
-			let res = client.post(&url).form(&params).send().await?;
+			let message = crate::server::Message::new(args.channel, args.message.join(" "));
+			let addr = format!("127.0.0.1:{}", config.localhost_port);
+			let mut stream = TcpStream::connect(addr).await?;
 
-			println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await?, destination);
+			let json = serde_json::to_string(&message)?;
+			stream.write_all(json.as_bytes()).await?;
+
+			let mut response = String::new();
+			stream.read_to_string(&mut response).await?;
+
+			dbg!(response.trim().to_string());
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);

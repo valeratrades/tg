@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::config::AppConfig;
+
 #[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
 pub struct Message {
 	pub destination: String,
@@ -53,4 +55,16 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String) -> Result<
 			}
 		});
 	}
+}
+
+pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str) -> Result<()> {
+	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+	let mut params = vec![("text", message.message)];
+	let destination = config.channels.get(&message.destination).expect("already checked on cli evocation");
+	params.extend(destination.destination_params());
+	let client = reqwest::Client::new();
+	let res = client.post(&url).form(&params).send().await?;
+
+	println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await?, destination);
+	Ok(())
 }

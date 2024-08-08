@@ -64,10 +64,11 @@ async fn main() -> Result<()> {
 			let json = serde_json::to_string(&message)?;
 			stream.write_all(json.as_bytes()).await?;
 
-			let mut response = String::new();
-			stream.read_to_string(&mut response).await?;
+			let mut response = [0u8; 3]; // Buffer to read "200"
+			stream.read_exact(&mut response).await?;
 
-			dbg!(response.trim().to_string());
+			let response_str = String::from_utf8_lossy(&response);
+			dbg!(&response_str);
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);

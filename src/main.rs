@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use v_utils::io::ExpandedPath;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
 mod config;
 mod server;
 
@@ -67,8 +67,7 @@ async fn main() -> Result<()> {
 			let mut response = [0u8; 3]; // Buffer to read "200"
 			stream.read_exact(&mut response).await?;
 
-			let response_str = String::from_utf8_lossy(&response);
-			dbg!(&response_str);
+			let _response_str = String::from_utf8_lossy(&response);
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);

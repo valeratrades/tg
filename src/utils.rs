@@ -5,11 +5,10 @@ fn zeta(s: f64, n: usize) -> f64 {
 	(1..=n).map(|k| 1.0 / (k as f64).powf(s)).sum()
 }
 
-#[allow(unused)]
 pub struct ZetaDistribution {
-	alpha: f64,
-	weights: Vec<f64>,
-	normalization_constant: f64,
+	pub alpha: f64,
+	pub weights: Vec<f64>,
+	pub normalization_constant: f64,
 }
 
 impl ZetaDistribution {

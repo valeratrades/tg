@@ -3,8 +3,9 @@ use clap::{Args, Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use v_utils::io::ExpandedPath;
-mod config;
+pub mod config;
 mod server;
+pub mod utils;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

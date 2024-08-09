@@ -5,12 +5,14 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+chrono = "0.4.38"
 clap = { version = "4.5.13", features = ["derive"] }
 config = "0.14.0"
 derive-new = "*"
 hyper = { version = "1.4.1", features = ["full"] }
 insta = "1.39.0"
 lazy_static = "1.5.0"
+rand = "0.8.5"
 reqwest = "0.12.5"
 serde = "1.0.204"
 serde_json = "1.0.122"
@@ -18,5 +20,9 @@ tokio = { version = "1.39.2", features = ["full"] }
 toml = "0.8.19"
 v_utils = { version = "^1.4.2", features = ["io"] }
 
+[dev-dependencies]
+insta = "1.39.0"
+
 [package.metadata.cargo-machete]
 ignored = ["derive-new", "anyhow", "serde", "tokio"]
+rand = "0.8.5"

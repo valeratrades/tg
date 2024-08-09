@@ -89,7 +89,11 @@ impl AppConfig {
 		let settings: config::Config = builder.build()?;
 		let settings: Self = settings.try_deserialize()?;
 
-		assert_eq!(format!("{}", crate::server::VAR_DIR.display()), "/var/local/tg", "VAR_DIR must be /var/local/tg (because next line)");
+		assert_eq!(
+			format!("{}", crate::server::VAR_DIR.display()),
+			"/var/local/tg",
+			"VAR_DIR must be /var/local/tg (because next line)"
+		);
 		let output = std::process::Command::new("sudo")
 			.arg("chmod")
 			.arg("a+w")
@@ -101,11 +105,10 @@ impl AppConfig {
 			let error_message = String::from_utf8_lossy(&output.stderr);
 			return Err(config::ConfigError::Foreign(Box::new(std::io::Error::new(
 				std::io::ErrorKind::Other,
-				format!("Failed to set permissions on /var/local: {}", error_message)
+				format!("Failed to set permissions on /var/local: {}", error_message),
 			))));
 		}
-		std::fs::create_dir_all(&*crate::server::VAR_DIR)
-			.map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+		std::fs::create_dir_all(*crate::server::VAR_DIR).map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
 
 		Ok(settings)
 	}

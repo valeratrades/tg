@@ -26,16 +26,17 @@ pub struct Response {
 	pub message: String,
 }
 
-pub async fn run(config: crate::config::AppConfig, bot_token: String) -> Result<()> {
+pub async fn run(config: crate::config::AppConfig, bot_token: String, config_path: &Path) -> Result<()> {
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	let listener = TcpListener::bind(&addr).await?;
 	println!("Listening on: {}", addr);
 
 	let mut join_set = JoinSet::new();
 	while let Ok((mut socket, _)) = listener.accept().await {
-		let config = config.clone();
+		let mut config = config.clone();
 		let bot_token = bot_token.clone();
 
+		let config_path = config_path.to_path_buf();
 		join_set.spawn(async move {
 			let mut buf = vec![0; 1024];
 
@@ -65,9 +66,20 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String) -> Result<
 					.write_all(message_append_repr.as_bytes())
 					.expect("Failed to write message to file");
 
-				if let Err(e) = send_message(&config, message, &bot_token).await {
-					eprintln!("Failed to send message: {}", e);
-					//TODO!!!: keep stack of messages with failed sent, then retry sending every 100s
+				let mut retry = true;
+				while retry {
+					retry = false;
+					match send_message(&config, message.clone(), &bot_token).await {
+						Ok(_) => (),
+						Err(SendError::ConfigOutOfSync) => {
+							config = crate::config::AppConfig::read(&config_path).expect("Failed to read config file");
+							retry = true;
+						},
+						Err(e) => {
+							eprintln!("Failed to send message: {}", e);
+							//TODO!!!: keep stack of messages with failed sent, then retry sending every 100s
+						}
+					}
 				}
 			}
 		});
@@ -82,16 +94,24 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String) -> Result<
 	Ok(())
 }
 
-pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str) -> Result<()> {
-	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-	let mut params = vec![("text", message.message)];
-	let destination = config.channels.get(&message.destination).expect("already checked on cli evocation");
-	params.extend(destination.destination_params());
-	let client = reqwest::Client::new();
-	let res = client.post(&url).form(&params).send().await?;
+#[derive(thiserror::Error, Debug)]
+pub enum SendError {
+	#[error("Config out of sync")]
+	ConfigOutOfSync,
+	#[error(transparent)]
+	Other(#[from] Box<dyn std::error::Error + Send + Sync>),
+}
+pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str) -> Result<(), SendError> {
+    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+    let mut params = vec![("text", message.message)];
+    let destination = config.channels.get(&message.destination)
+        .ok_or(SendError::ConfigOutOfSync)?;
+    params.extend(destination.destination_params());
+    let client = reqwest::Client::new();
+    let res = client.post(&url).form(&params).send().await.map_err(|e| SendError::Other(Box::new(e)))?;
 
-	println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await?, destination);
-	Ok(())
+    println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await.map_err(|e| SendError::Other(Box::new(e))), destination);
+    Ok(())
 }
 
 pub fn format_message_append(message: &str, time_of_last_change: Option<SystemTime>, now: SystemTime) -> String {

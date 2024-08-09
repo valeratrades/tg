@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
 			println!("{s}");
 		}
 		Commands::Server => {
-			server::run(config, bot_token).await?;
+			server::run(config, bot_token, cli.config.as_ref()).await?;
 		}
 	};
 

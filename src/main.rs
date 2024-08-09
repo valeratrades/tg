@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use v_utils::io::ExpandedPath;
+use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
 pub mod config;
 mod server;
 pub mod utils;
@@ -31,15 +31,22 @@ enum Commands {
 	GenAliases,
 	/// Start a telegram server, compiling messages from the configured channels into markdown log files, to be viewed with $EDITOR
 	Server,
+	/// Open the messages file of a channel
+	Open(OpenArgs),
 }
 #[derive(Args)]
 struct SendArgs {
 	/// Name of the channel to send the message to. Matches against the keys in the config file
 	#[arg(short, long)]
 	channel: String,
-
 	/// Message to send
 	message: Vec<String>,
+}
+
+#[derive(Args)]
+struct OpenArgs {
+	/// Name of the channel to open
+	channel: String,
 }
 
 #[tokio::main]
@@ -49,14 +56,17 @@ async fn main() -> Result<()> {
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
 	let bot_token = std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
 
+	pub fn check_channel_exists(config: &config::AppConfig, channel: &str) -> Result<()> {
+		if !config.channels.contains_key(channel) {
+			Err(anyhow::anyhow!("Channel not found in config"))
+		} else {
+			Ok(())
+		}
+	}
+
 	match cli.command {
 		Commands::Send(args) => {
-			let _destination = match config.channels.get(&args.channel) {
-				Some(d) => d,
-				None => {
-					return Err(anyhow::anyhow!("Channel not found in {}", cli.config.display()));
-				}
-			};
+			check_channel_exists(&config, &args.channel)?;
 
 			let message = crate::server::Message::new(args.channel, args.message.join(" "));
 			let addr = format!("127.0.0.1:{}", config.localhost_port);
@@ -127,7 +137,17 @@ async fn main() -> Result<()> {
 		Commands::Server => {
 			server::run(config, bot_token, cli.config.as_ref()).await?;
 		}
+		Commands::Open(args) => {
+			check_channel_exists(&config, &args.channel)?;
+
+			let path = chat_filepath(&args.channel);
+			open_with_mode(&path, OpenMode::Pager)?;
+		}
 	};
 
 	Ok(())
+}
+
+pub fn chat_filepath(destination_name: &str) -> std::path::PathBuf {
+	crate::server::VAR_DIR.join(format!("{destination_name}.toml"))
 }

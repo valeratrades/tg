@@ -19,7 +19,7 @@ serde_json = "1.0.122"
 thiserror = "1.0.63"
 tokio = { version = "1.39.2", features = ["full"] }
 toml = "0.8.19"
-v_utils = { version = "^1.4.2", features = ["io"] }
+v_utils = { version = "^1.4.4", features = ["io"] }
 
 [dev-dependencies]
 insta = "1.39.0"

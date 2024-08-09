@@ -54,7 +54,7 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 				}
 
 				// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
-				let chat_filepath = VAR_DIR.join(format!("{}.toml", &message.destination));
+				let chat_filepath = crate::chat_filepath(&message.destination);
 				let last_modified: Option<SystemTime> = chat_filepath.metadata().ok().and_then(|metadata| metadata.modified().ok());
 
 				let message_append_repr = format_message_append(&message.message, last_modified, SystemTime::now());
@@ -74,7 +74,7 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 						Err(SendError::ConfigOutOfSync) => {
 							config = crate::config::AppConfig::read(&config_path).expect("Failed to read config file");
 							retry = true;
-						},
+						}
 						Err(e) => {
 							eprintln!("Failed to send message: {}", e);
 							//TODO!!!: keep stack of messages with failed sent, then retry sending every 100s
@@ -102,16 +102,19 @@ pub enum SendError {
 	Other(#[from] Box<dyn std::error::Error + Send + Sync>),
 }
 pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str) -> Result<(), SendError> {
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-    let mut params = vec![("text", message.message)];
-    let destination = config.channels.get(&message.destination)
-        .ok_or(SendError::ConfigOutOfSync)?;
-    params.extend(destination.destination_params());
-    let client = reqwest::Client::new();
-    let res = client.post(&url).form(&params).send().await.map_err(|e| SendError::Other(Box::new(e)))?;
+	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+	let mut params = vec![("text", message.message)];
+	let destination = config.channels.get(&message.destination).ok_or(SendError::ConfigOutOfSync)?;
+	params.extend(destination.destination_params());
+	let client = reqwest::Client::new();
+	let res = client.post(&url).form(&params).send().await.map_err(|e| SendError::Other(Box::new(e)))?;
 
-    println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await.map_err(|e| SendError::Other(Box::new(e))), destination);
-    Ok(())
+	println!(
+		"{:#?}\nSender: {bot_token}\n{:#?}",
+		res.text().await.map_err(|e| SendError::Other(Box::new(e))),
+		destination
+	);
+	Ok(())
 }
 
 pub fn format_message_append(message: &str, time_of_last_change: Option<SystemTime>, now: SystemTime) -> String {
@@ -126,7 +129,8 @@ pub fn format_message_append(message: &str, time_of_last_change: Option<SystemTi
 					let last_change_local: DateTime<Local> = last_change.into();
 
 					dbg!(&now_local.format("%d/%m").to_string(), &last_change_local.format("%d/%m").to_string());
-					if now_local.format("%d/%m").to_string() == last_change_local.format("%d/%m").to_string() { //HACK
+					if now_local.format("%d/%m").to_string() == last_change_local.format("%d/%m").to_string() {
+						//HACK
 						"\n".to_string()
 					} else {
 						format!("\n    {}\n", now_local.format("%b %d"))

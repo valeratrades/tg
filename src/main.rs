@@ -46,7 +46,7 @@ struct SendArgs {
 #[derive(Args)]
 struct OpenArgs {
 	/// Name of the channel to open
-	channel: String,
+	channel: Option<String>,
 }
 
 #[tokio::main]
@@ -138,9 +138,14 @@ async fn main() -> Result<()> {
 			server::run(config, bot_token, cli.config.as_ref()).await?;
 		}
 		Commands::Open(args) => {
-			check_channel_exists(&config, &args.channel)?;
+			if let Some(c) = &args.channel {
+				check_channel_exists(&config, c)?;
+			}
 
-			let path = chat_filepath(&args.channel);
+			let path = match &args.channel {
+				Some(c) => chat_filepath(c),
+				None => crate::server::VAR_DIR.to_path_buf(),
+			};
 			open_with_mode(&path, OpenMode::Normal)?;
 		}
 	};

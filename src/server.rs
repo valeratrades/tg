@@ -134,7 +134,8 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 		let duration = now.signed_duration_since(last_write_datetime);
 
 		if duration >= TimeDelta::seconds(5 * 60) {
-			if now.format("%d/%m").to_string() == last_write_datetime.format("%d/%m").to_string() { //HACK
+			if now.format("%d/%m").to_string() == last_write_datetime.format("%d/%m").to_string() {
+				//HACK
 				prefix = "\n".to_string();
 			} else {
 				prefix = format!("\n## {}\n", now.format("%b %d"));
@@ -144,7 +145,6 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 
 	format!("{}{}\n", prefix, message)
 }
-
 
 #[cfg(test)]
 mod tests {

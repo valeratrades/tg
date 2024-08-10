@@ -149,13 +149,13 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::utils::ZetaDistribution;
+	use v_utils::distributions::ReimanZeta;
 
 	#[test]
 	fn test_format_message_append() {
 		let mut messages = Vec::new();
 
-		let zeta_dist = ZetaDistribution::new(1.0, 4320);
+		let zeta_dist = ReimanZeta::new(1.0, 4320);
 
 		let mut accumulated_offset = DateTime::UNIX_EPOCH;
 		for i in 0..10 {

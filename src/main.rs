@@ -5,7 +5,6 @@ use tokio::net::TcpStream;
 use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
 pub mod config;
 mod server;
-pub mod utils;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

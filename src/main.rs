@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
 			check_channel_exists(&config, &args.channel)?;
 
 			let path = chat_filepath(&args.channel);
-			open_with_mode(&path, OpenMode::Pager)?;
+			open_with_mode(&path, OpenMode::Normal)?;
 		}
 	};
 

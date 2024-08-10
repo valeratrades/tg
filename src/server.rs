@@ -1,14 +1,14 @@
 use crate::config::AppConfig;
 use anyhow::Result;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, TimeDelta, Utc};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
+use xattr::FileExt;
 
 lazy_static! {
 	pub static ref VAR_DIR: &'static Path = Path::new("/var/local/tg");
@@ -55,16 +55,24 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 
 				// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
 				let chat_filepath = crate::chat_filepath(&message.destination);
-				let last_modified: Option<SystemTime> = chat_filepath.metadata().ok().and_then(|metadata| metadata.modified().ok());
+				let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
+					.ok()
+					.and_then(|file| file.get_xattr("user.last_changed").ok())
+					.flatten()
+					.map(|v| String::from_utf8_lossy(&v).into_owned());
+				let last_write_datetime = last_write_tag
+					.as_deref()
+					.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+					.map(|dt| dt.with_timezone(&chrono::Utc));
 
-				let message_append_repr = format_message_append(&message.message, last_modified, SystemTime::now());
-				std::fs::OpenOptions::new()
+				let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
+				let mut file = std::fs::OpenOptions::new()
 					.create(true)
 					.append(true)
-					.open(chat_filepath)
-					.expect("config is expected to chmod parent dir to give me write access")
-					.write_all(message_append_repr.as_bytes())
-					.expect("Failed to write message to file");
+					.open(&chat_filepath)
+					.expect("config is expected to chmod parent dir to give me write access");
+				file.write_all(message_append_repr.as_bytes()).expect("Failed to write message to file");
+				file.set_xattr("user.last_changed", Utc::now().to_rfc3339().as_bytes()).expect("Failed to set xattr");
 
 				let mut retry = true;
 				while retry {
@@ -109,39 +117,34 @@ pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str)
 	let client = reqwest::Client::new();
 	let res = client.post(&url).form(&params).send().await.map_err(|e| SendError::Other(Box::new(e)))?;
 
-	println!(
-		"{:#?}\nSender: {bot_token}\n{:#?}",
-		res.text().await.map_err(|e| SendError::Other(Box::new(e))),
-		destination
-	);
+	println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await.map_err(|e| SendError::Other(Box::new(e))), destination);
 	Ok(())
 }
 
-pub fn format_message_append(message: &str, time_of_last_change: Option<SystemTime>, now: SystemTime) -> String {
-	assert!(time_of_last_change.is_none() || time_of_last_change.unwrap() < now);
-	let prefix = time_of_last_change
-		.and_then(|last_change| {
-			now.duration_since(last_change).ok().map(|duration| {
-				if duration < Duration::from_secs(5 * 60) {
-					String::new()
-				} else {
-					let now_local: DateTime<Local> = now.into();
-					let last_change_local: DateTime<Local> = last_change.into();
+/// match duration_since_last_write {
+///     < 5 minutes => append directly
+///     >= 5 minutes && same day => append with a newline before
+///     >= 5 minutes && different day => append with a newline before and after
+/// }
+pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() < now);
 
-					dbg!(&now_local.format("%d/%m").to_string(), &last_change_local.format("%d/%m").to_string());
-					if now_local.format("%d/%m").to_string() == last_change_local.format("%d/%m").to_string() {
-						//HACK
-						"\n".to_string()
-					} else {
-						format!("\n    {}\n", now_local.format("%b %d"))
-					}
-				}
-			})
-		})
-		.unwrap_or_default();
+	let mut prefix = String::new();
+	if let Some(last_write_datetime) = last_write_datetime {
+		let duration = now.signed_duration_since(last_write_datetime);
+
+		if duration >= TimeDelta::seconds(5 * 60) {
+			if now.format("%d/%m").to_string() == last_write_datetime.format("%d/%m").to_string() { //HACK
+				prefix = "\n".to_string();
+			} else {
+				prefix = format!("\n    {}\n", now.format("%b %d"));
+			}
+		}
+	}
 
 	format!("{}{}\n", prefix, message)
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -154,13 +157,12 @@ mod tests {
 
 		let zeta_dist = ZetaDistribution::new(1.0, 4320);
 
-		let mut accumulated_offset = std::time::UNIX_EPOCH;
+		let mut accumulated_offset = DateTime::UNIX_EPOCH;
 		for i in 0..10 {
-			let time_offset_mins = zeta_dist.sample(Some(i)) as u64;
-			let time_offset = Duration::from_secs(time_offset_mins * 60);
+			let time_offset_mins = zeta_dist.sample(Some(i));
+			let time_offset = TimeDelta::seconds(time_offset_mins as i64 * 60);
 			accumulated_offset += time_offset;
-			let datetime: DateTime<Local> = accumulated_offset.into();
-			let message = datetime.format("%Y-%m-%d %H:%M:%S").to_string();
+			let message = accumulated_offset.format("%Y-%m-%d %H:%M:%S").to_string(); // for ease of testing
 
 			messages.push((message, accumulated_offset));
 		}
@@ -168,9 +170,9 @@ mod tests {
 		messages.sort_by_key(|&(_, timestamp)| timestamp);
 
 		let mut formatted_messages = String::new();
-		for (i, (message, timestamp)) in messages.iter().enumerate() {
+		for (i, (m, t)) in messages.iter().enumerate() {
 			let last_change = if i == 0 { None } else { Some(messages[i - 1].1) };
-			let m = format_message_append(message, last_change, *timestamp);
+			let m = format_message_append(m, last_change, *t);
 			formatted_messages.push_str(&m);
 		}
 

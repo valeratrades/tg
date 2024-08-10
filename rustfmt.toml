@@ -1,11 +1,9 @@
-# Cornerstone options
 unstable_features = true
 hard_tabs = true
-max_width = 155
-
-# Experimental
+max_width = 190
+use_small_heuristics = "Default" # putting average line width of elements to about 55% of max_width
+reorder_imports = true
 format_strings = false
 reorder_impl_items = true
 use_field_init_shorthand = true
 use_try_shorthand = true
-# attr_fn_like_width = 150

@@ -179,7 +179,7 @@ mod tests {
 		insta::assert_snapshot!(formatted_messages, @r###"
   1970-01-01 06:30:00
 
-      Jan 03
+  ## Jan 03
   1970-01-03 15:41:00
 
   1970-01-03 15:49:00

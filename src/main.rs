@@ -149,5 +149,5 @@ async fn main() -> Result<()> {
 }
 
 pub fn chat_filepath(destination_name: &str) -> std::path::PathBuf {
-	crate::server::VAR_DIR.join(format!("{destination_name}.toml"))
+	crate::server::VAR_DIR.join(format!("{destination_name}.md"))
 }

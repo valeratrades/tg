@@ -39,6 +39,7 @@ struct SendArgs {
 	#[arg(short, long)]
 	channel: String,
 	/// Message to send
+	#[arg(allow_hyphen_values = true)]
 	message: Vec<String>,
 }
 

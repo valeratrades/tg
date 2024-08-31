@@ -1,7 +1,8 @@
-use anyhow::Result;
-use serde::{de, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap; // so snapshot tests work
 use std::{fmt, path::Path, str::FromStr};
+
+use anyhow::Result;
+use serde::{de, Deserialize, Deserializer, Serialize};
 use v_utils::macros::MyConfigPrimitives;
 
 #[derive(Debug, Default, derive_new::new, Clone, MyConfigPrimitives)]
@@ -28,8 +29,7 @@ impl TelegramDestination {
 impl<'de> Deserialize<'de> for TelegramDestination {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
-		D: Deserializer<'de>,
-	{
+		D: Deserializer<'de>, {
 		struct TelegramChatVisitor;
 
 		impl<'de> de::Visitor<'de> for TelegramChatVisitor {
@@ -41,22 +41,19 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 
 			fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
 			where
-				E: de::Error,
-			{
+				E: de::Error, {
 				parse_telegram_destination_string(value).map_err(de::Error::custom)
 			}
 
 			fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
 			where
-				E: de::Error,
-			{
+				E: de::Error, {
 				Ok(TelegramDestination::Channel(value))
 			}
 
 			fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
 			where
-				E: de::Error,
-			{
+				E: de::Error, {
 				parse_telegram_destination_string(&value.to_string()).map_err(de::Error::custom)
 			}
 		}
@@ -122,9 +119,10 @@ impl AppConfig {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use insta::assert_debug_snapshot;
 	use serde_json::from_str;
+
+	use super::*;
 
 	#[test]
 	fn test_deserialize_channel() {

@@ -1,15 +1,17 @@
-use crate::config::AppConfig;
+use std::{io::Write, path::Path};
+
 use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::{io::Write, path::Path};
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpListener,
 	task::JoinSet,
 };
 use xattr::FileExt;
+
+use crate::config::AppConfig;
 
 lazy_static! {
 	pub static ref VAR_DIR: &'static Path = Path::new("/var/local/tg");
@@ -149,8 +151,9 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use v_utils::distributions::ReimanZeta;
+
+	use super::*;
 
 	#[test]
 	fn test_format_message_append() {

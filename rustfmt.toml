@@ -7,3 +7,4 @@ format_strings = false
 reorder_impl_items = true
 use_field_init_shorthand = true
 use_try_shorthand = true
+imports_granularity = "Crate"

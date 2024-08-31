@@ -1,9 +1,7 @@
 use anyhow::Result;
 use serde::{de, Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap; // so snapshot tests work
-use std::fmt;
-use std::path::Path;
-use std::str::FromStr;
+use std::{fmt, path::Path, str::FromStr};
 use v_utils::macros::MyConfigPrimitives;
 
 #[derive(Debug, Default, derive_new::new, Clone, MyConfigPrimitives)]
@@ -64,6 +62,14 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 		}
 
 		deserializer.deserialize_any(TelegramChatVisitor)
+	}
+}
+
+impl std::str::FromStr for TelegramDestination {
+	type Err = String;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		parse_telegram_destination_string(s)
 	}
 }
 

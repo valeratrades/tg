@@ -3,11 +3,12 @@ use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::path::Path;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
-use tokio::task::JoinSet;
+use std::{io::Write, path::Path};
+use tokio::{
+	io::{AsyncReadExt, AsyncWriteExt},
+	net::TcpListener,
+	task::JoinSet,
+};
 use xattr::FileExt;
 
 lazy_static! {

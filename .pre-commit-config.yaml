@@ -1,0 +1,10 @@
+# it often says `skipped` when it actually runs and makes changes. Ignore `skipped`, assume it worked.
+repos:
+  - repo: https://github.com/valeratrades/cargo-sort
+    rev: v0.1.3
+    hooks:
+    - id: cargo-sort-workspace-grouped
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+    - id: check-yaml

@@ -1,12 +1,15 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+	io::{AsyncReadExt, AsyncWriteExt},
+	net::TcpStream,
+};
 use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
 pub mod config;
 mod server;
+use clap::{self, ArgAction::SetTrue, Parser, ValueEnum}; // 4.3.11
 
-#[derive(Parser)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
 	#[command(subcommand)]
@@ -14,7 +17,7 @@ struct Cli {
 	#[arg(long, default_value = "~/.config/tg.toml")]
 	config: ExpandedPath,
 }
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug, Clone)]
 enum Commands {
 	/// Send the message (if more than one string is provided, they are contatenated with a space)
 	///Ex
@@ -33,14 +36,38 @@ enum Commands {
 	/// Open the messages file of a channel
 	Open(OpenArgs),
 }
-#[derive(Args)]
+#[derive(Args, Debug, Clone)]
+#[group(multiple = false)]
 struct SendArgs {
-	/// Name of the channel to send the message to. Matches against the keys in the config file
-	#[arg(short, long)]
-	channel: String,
+	/// Where to send the message
+	target: TelegramTargetArgs,
 	/// Message to send
 	#[arg(allow_hyphen_values = true)]
 	message: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, derive_new::new, Copy)]
+struct TelegramTargetArgs {
+	/// Name of the channel to send the message to. Matches against the keys in the config file
+	#[arg(short='c', long="channel", action=SetTrue)]
+	_channel: (),
+
+	/// Telegram Destination, following same formats as the config file
+	#[arg(short='d', long="channel" action=SetTrue)]
+	_destination: (),
+
+	#[arg(long = "publish", num_args = 1, require_equals=true, default_value_ifs=[
+    ("_channel", "true", "channel"),
+    ("_destination", "true", "destination")
+  ])]
+	pub target: PossibleTargets,
+}
+
+#[derive(ValueEnum, Copy, Clone, Debug)]
+#[value(rename_all = "kebab-case")]
+enum PossibleTargets {
+	Channel,
+	Destination,
 }
 
 #[derive(Args)]

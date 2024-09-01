@@ -48,7 +48,8 @@ pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 				}
 
 				let received = String::from_utf8_lossy(&buf[0..n]);
-				let message = serde_json::from_str::<Message>(&received).expect("Only the app should send messages");
+				dbg!(&received);
+				let message: Message = serde_json::from_str(&received).expect("Only the app should send messages");
 
 				if let Err(e) = socket.write_all(b"200").await {
 					eprintln!("Failed to send acknowledgment: {}", e);
@@ -140,6 +141,7 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 #[cfg(test)]
 mod tests {
 	use v_utils::distributions::ReimanZeta;
+	use eyre::Result;
 
 	use super::*;
 
@@ -188,5 +190,13 @@ mod tests {
 
   1970-01-03 20:36:00
   "###);
+	}
+
+	#[test]
+	fn deser_message() -> Result<()> {
+		let message_str = "{\"destination\":{\"Group\":{\"id\":2244305221,\"thread_id\":3}},\"message\":\"a message\"}";
+		let message: Message = serde_json::from_str(message_str)?;
+		insta::assert_debug_snapshot!(message, @"");
+		Ok(())
 	}
 }

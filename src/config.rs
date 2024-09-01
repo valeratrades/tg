@@ -47,7 +47,7 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: Deserializer<'de>, {
-		#[derive(Deserialize, Debug)] //dbg
+		#[derive(Deserialize)]
 		#[serde(untagged)]
 		enum TelegramDestinationHelper {
 			Channel(u64),
@@ -56,13 +56,7 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 			Signed64(i64),
 		}
 
-		let temp = serde_json::Value::deserialize(deserializer)?;
-		dbg!(&temp);
-
-		let helper = TelegramDestinationHelper::deserialize(temp).map_err(de::Error::custom)?;
-		//let helper = TelegramDestinationHelper::deserialize(deserializer)?;
-		dbg!(&helper);
-
+		let helper = TelegramDestinationHelper::deserialize(deserializer)?;
 		match helper {
 			TelegramDestinationHelper::Channel(id) => Ok(TelegramDestination::Channel(id)),
 			TelegramDestinationHelper::Group { id, thread_id } => Ok(TelegramDestination::Group { id, thread_id }),

@@ -107,7 +107,7 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 
 #[derive(thiserror::Error, Debug)]
 pub enum SendError {
-	#[error("Config out of sync")]
+	#[error("Runnnig daemon's knowledge of config is out of sync")]
 	ConfigOutOfSync,
 	#[error(transparent)]
 	Other(#[from] Box<dyn std::error::Error + Send + Sync>),

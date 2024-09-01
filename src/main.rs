@@ -7,7 +7,7 @@ use tokio::{
 use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
 pub mod config;
 mod server;
-use clap::{self, ArgAction::SetTrue, Parser, ValueEnum}; // 4.3.11
+use clap::{ArgAction::SetTrue, ValueEnum};
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -37,23 +37,24 @@ enum Commands {
 	Open(OpenArgs),
 }
 #[derive(Args, Debug, Clone)]
-#[group(multiple = false)]
 struct SendArgs {
 	/// Where to send the message
+	#[clap(flatten)]
 	target: TelegramTargetArgs,
 	/// Message to send
 	#[arg(allow_hyphen_values = true)]
 	message: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, derive_new::new, Copy)]
+#[derive(Args, Clone, Debug, Default, derive_new::new, Copy)]
+#[group(multiple = false)]
 struct TelegramTargetArgs {
 	/// Name of the channel to send the message to. Matches against the keys in the config file
 	#[arg(short='c', long="channel", action=SetTrue)]
 	_channel: (),
 
 	/// Telegram Destination, following same formats as the config file
-	#[arg(short='d', long="channel" action=SetTrue)]
+	#[arg(short='d', long="channel", action=SetTrue)]
 	_destination: (),
 
 	#[arg(long = "publish", num_args = 1, require_equals=true, default_value_ifs=[
@@ -70,7 +71,7 @@ enum PossibleTargets {
 	Destination,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Debug)]
 struct OpenArgs {
 	/// Name of the channel to open
 	channel: Option<String>,
@@ -83,7 +84,7 @@ async fn main() -> Result<()> {
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
 	let bot_token = std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
 
-	pub fn check_channel_exists(config: &config::AppConfig, channel: &str) -> Result<()> {
+	pub fn check_channel_name_in_config(config: &config::AppConfig, channel: &str) -> Result<()> {
 		if !config.channels.contains_key(channel) {
 			Err(anyhow::anyhow!("Channel not found in config"))
 		} else {
@@ -93,7 +94,7 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			check_channel_exists(&config, &args.channel)?;
+			check_channel_name_in_config(&config, &args.channel)?;
 
 			let message = crate::server::Message::new(args.channel, args.message.join(" "));
 			let addr = format!("127.0.0.1:{}", config.localhost_port);
@@ -166,7 +167,7 @@ async fn main() -> Result<()> {
 		}
 		Commands::Open(args) => {
 			if let Some(c) = &args.channel {
-				check_channel_exists(&config, c)?;
+				check_channel_name_in_config(&config, c)?;
 			}
 
 			let path = match &args.channel {

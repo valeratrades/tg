@@ -1,5 +1,5 @@
 use std::collections::BTreeMap; // so snapshot tests work
-use std::{fmt, path::Path, str::FromStr};
+use std::{path::Path, str::FromStr};
 
 use eyre::{eyre, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
@@ -12,6 +12,7 @@ pub struct AppConfig {
 }
 
 #[derive(Clone, Debug, derive_new::new, Copy, PartialEq, Eq, Serialize, Hash)]
+#[serde(untagged)]
 /// Doesn't store "-100" prefix
 pub enum TelegramDestination {
 	Channel(u64),
@@ -46,35 +47,28 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
 	where
 		D: Deserializer<'de>, {
-		struct TelegramChatVisitor;
-
-		impl<'de> de::Visitor<'de> for TelegramChatVisitor {
-			type Value = TelegramDestination;
-
-			fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-				formatter.write_str("a string or number representing a channel or group")
-			}
-
-			fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-			where
-				E: de::Error, {
-				parse_telegram_destination_str(value).map_err(de::Error::custom)
-			}
-
-			fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
-			where
-				E: de::Error, {
-				Ok(TelegramDestination::Channel(value))
-			}
-
-			fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
-			where
-				E: de::Error, {
-				parse_telegram_destination_str(&value.to_string()).map_err(de::Error::custom)
-			}
+		#[derive(Deserialize, Debug)] //dbg
+		#[serde(untagged)]
+		enum TelegramDestinationHelper {
+			Channel(u64),
+			Group { id: u64, thread_id: u64 },
+			String(String),
+			Signed64(i64),
 		}
 
-		deserializer.deserialize_any(TelegramChatVisitor)
+		let temp = serde_json::Value::deserialize(deserializer)?;
+		dbg!(&temp);
+
+		let helper = TelegramDestinationHelper::deserialize(temp).map_err(de::Error::custom)?;
+		//let helper = TelegramDestinationHelper::deserialize(deserializer)?;
+		dbg!(&helper);
+
+		match helper {
+			TelegramDestinationHelper::Channel(id) => Ok(TelegramDestination::Channel(id)),
+			TelegramDestinationHelper::Group { id, thread_id } => Ok(TelegramDestination::Group { id, thread_id }),
+			TelegramDestinationHelper::String(s) => parse_telegram_destination_str(&s).map_err(de::Error::custom),
+			TelegramDestinationHelper::Signed64(id) => parse_telegram_destination_str(&id.to_string()).map_err(de::Error::custom),
+		}
 	}
 }
 
@@ -171,19 +165,21 @@ Group {
 
 	#[test]
 	fn test_deserialize_errors() {
-		let cases = [
-			(r#""invalid""#, "invalid digit found in string"),
-			(
-				r#"2244305221.5"#,
-				"invalid type: floating point `2244305221.5`, expected a string or number representing a channel or group",
-			),
-		];
+		let input = r#""invalid""#;
+		let result: Result<TelegramDestination, _> = from_str(input);
+		insta::assert_debug_snapshot!(result, @r###"
+  Err(
+      Error("Failed to parse chat ID: invalid digit found in string", line: 0, column: 0),
+  )
+  "###);
 
-		for (json, expected_error) in cases {
-			let result: Result<TelegramDestination, _> = from_str(json);
-			assert!(result.is_err());
-			assert!(result.unwrap_err().to_string().contains(expected_error));
-		}
+		let input = r#"2244305221.5"#;
+		let result: Result<TelegramDestination, _> = from_str(input);
+		insta::assert_debug_snapshot!(result, @r###"
+  Err(
+      Error("data did not match any variant of untagged enum TelegramDestinationHelper", line: 0, column: 0),
+  )
+  "###);
 	}
 
 	#[test]

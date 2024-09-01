@@ -140,8 +140,8 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 
 #[cfg(test)]
 mod tests {
-	use v_utils::distributions::ReimanZeta;
 	use eyre::Result;
+	use v_utils::distributions::ReimanZeta;
 
 	use super::*;
 
@@ -194,9 +194,25 @@ mod tests {
 
 	#[test]
 	fn deser_message() -> Result<()> {
-		let message_str = "{\"destination\":{\"Group\":{\"id\":2244305221,\"thread_id\":3}},\"message\":\"a message\"}";
-		let message: Message = serde_json::from_str(message_str)?;
-		insta::assert_debug_snapshot!(message, @"");
+		let destination_str_source = TelegramDestination::Group { id: 2244305221, thread_id: 3 };
+		let destination_str = serde_json::to_string(&destination_str_source)?;
+		dbg!(&destination_str);
+		//let destination_str = "{\"Group\":{\"id\":2244305221,\"thread_id\":3}}";
+		let destination: TelegramDestination = serde_json::from_str(&destination_str)?;
+		let destination_reserialized = serde_json::to_string(&destination)?;
+		assert_eq!(destination_str, destination_reserialized);
+
+		let message_str = format!(r#"{{"destination":{},"message":"a message"}}"#, destination_str);
+		let message: Message = serde_json::from_str(&message_str)?;
+		insta::assert_debug_snapshot!(message, @r###"
+  Message {
+      destination: Group {
+          id: 2244305221,
+          thread_id: 3,
+      },
+      message: "a message",
+  }
+  "###);
 		Ok(())
 	}
 }

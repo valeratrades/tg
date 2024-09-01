@@ -1,9 +1,10 @@
+#![feature(try_blocks)]
 #[allow(unused_imports)] // std::str::FromStr is not detected by RA correctly
 use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
 use config::TelegramDestination;
-use eyre::{bail, Result};
+use eyre::{bail, eyre, Result};
 use server::Message;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
@@ -68,13 +69,23 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			let destination: TelegramDestination = match (&args.channel, &args.destination) {
-				(Some(channel), None) => match config.channels.get(channel) {
-					Some(d) => *d,
-					None => bail!("Channel not found in config"),
-				},
-				(None, Some(destination)) => *destination,
-				_ => bail!("One and only one of --channel and --destination must be provided"),
+			let try_extract_destination_from_args: Result<TelegramDestination> = try {
+				match (&args.channel, &args.destination) {
+					(Some(channel), None) => match config.channels.get(channel) {
+						Some(d) => *d,
+						None => Err(eyre!("Channel not found in config"))?,
+					},
+					(None, Some(destination)) => *destination,
+					_ => Err(eyre!("One and only one of --channel and --destination must be provided"))?,
+				}
+			};
+
+			let destination: TelegramDestination = match try_extract_destination_from_args {
+				Ok(d) => d,
+				Err(e) => {
+					eprintln!("{e}");
+					std::process::exit(1);
+				}
 			};
 
 			let message = Message::new(destination, args.message.join(" "));

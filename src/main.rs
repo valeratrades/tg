@@ -1,5 +1,10 @@
-use anyhow::Result;
+#[allow(unused_imports)] // std::str::FromStr is not detected by RA correctly
+use std::str::FromStr;
+
 use clap::{Args, Parser, Subcommand};
+use config::TelegramDestination;
+use eyre::{bail, Result};
+use server::Message;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpStream,
@@ -7,7 +12,6 @@ use tokio::{
 use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
 pub mod config;
 mod server;
-use clap::{self, ArgAction::SetTrue, Parser, ValueEnum}; // 4.3.11
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
@@ -37,40 +41,19 @@ enum Commands {
 	Open(OpenArgs),
 }
 #[derive(Args, Debug, Clone)]
-#[group(multiple = false)]
 struct SendArgs {
-	/// Where to send the message
-	target: TelegramTargetArgs,
+	/// Name of the channel to send the message to. Matches against the keys in the config file
+	#[arg(short, long)]
+	channel: Option<String>,
+	/// Telegram Destination, following same formats as the config file
+	#[arg(short, long)]
+	destination: Option<TelegramDestination>,
 	/// Message to send
 	#[arg(allow_hyphen_values = true)]
 	message: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, derive_new::new, Copy)]
-struct TelegramTargetArgs {
-	/// Name of the channel to send the message to. Matches against the keys in the config file
-	#[arg(short='c', long="channel", action=SetTrue)]
-	_channel: (),
-
-	/// Telegram Destination, following same formats as the config file
-	#[arg(short='d', long="channel" action=SetTrue)]
-	_destination: (),
-
-	#[arg(long = "publish", num_args = 1, require_equals=true, default_value_ifs=[
-    ("_channel", "true", "channel"),
-    ("_destination", "true", "destination")
-  ])]
-	pub target: PossibleTargets,
-}
-
-#[derive(ValueEnum, Copy, Clone, Debug)]
-#[value(rename_all = "kebab-case")]
-enum PossibleTargets {
-	Channel,
-	Destination,
-}
-
-#[derive(Args)]
+#[derive(Args, Clone, Debug)]
 struct OpenArgs {
 	/// Name of the channel to open
 	channel: Option<String>,
@@ -83,19 +66,18 @@ async fn main() -> Result<()> {
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
 	let bot_token = std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
 
-	pub fn check_channel_exists(config: &config::AppConfig, channel: &str) -> Result<()> {
-		if !config.channels.contains_key(channel) {
-			Err(anyhow::anyhow!("Channel not found in config"))
-		} else {
-			Ok(())
-		}
-	}
-
 	match cli.command {
 		Commands::Send(args) => {
-			check_channel_exists(&config, &args.channel)?;
+			let destination: TelegramDestination = match (&args.channel, &args.destination) {
+				(Some(channel), None) => match config.channels.get(channel) {
+					Some(d) => *d,
+					None => bail!("Channel not found in config"),
+				},
+				(None, Some(destination)) => *destination,
+				_ => bail!("One and only one of --channel and --destination must be provided"),
+			};
 
-			let message = crate::server::Message::new(args.channel, args.message.join(" "));
+			let message = Message::new(destination, args.message.join(" "));
 			let addr = format!("127.0.0.1:{}", config.localhost_port);
 			let mut stream = TcpStream::connect(addr).await?;
 
@@ -162,11 +144,13 @@ async fn main() -> Result<()> {
 			println!("{s}");
 		}
 		Commands::Server => {
-			server::run(config, bot_token, cli.config.as_ref()).await?;
+			server::run(config, bot_token).await?;
 		}
 		Commands::Open(args) => {
 			if let Some(c) = &args.channel {
-				check_channel_exists(&config, c)?;
+				if !config.channels.contains_key(c) {
+					bail!("Channel not found in config")
+				}
 			}
 
 			let path = match &args.channel {

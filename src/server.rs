@@ -1,7 +1,7 @@
 use std::{io::Write, path::Path};
 
-use anyhow::Result;
 use chrono::{DateTime, TimeDelta, Utc};
+use eyre::Result;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -11,7 +11,7 @@ use tokio::{
 };
 use xattr::FileExt;
 
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TelegramDestination};
 
 lazy_static! {
 	pub static ref VAR_DIR: &'static Path = Path::new("/var/local/tg");
@@ -19,7 +19,7 @@ lazy_static! {
 
 #[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
 pub struct Message {
-	pub destination: String,
+	pub destination: TelegramDestination,
 	pub message: String,
 }
 
@@ -29,17 +29,16 @@ pub struct Response {
 	pub message: String,
 }
 
-pub async fn run(config: crate::config::AppConfig, bot_token: String, config_path: &Path) -> Result<()> {
+pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	let listener = TcpListener::bind(&addr).await?;
 	println!("Listening on: {}", addr);
 
 	let mut join_set = JoinSet::new();
 	while let Ok((mut socket, _)) = listener.accept().await {
-		let mut config = config.clone();
+		let config = config.clone();
 		let bot_token = bot_token.clone();
 
-		let config_path = config_path.to_path_buf();
 		join_set.spawn(async move {
 			let mut buf = vec![0; 1024];
 
@@ -57,7 +56,7 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 				}
 
 				// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
-				let chat_filepath = crate::chat_filepath(&message.destination);
+				let chat_filepath = crate::chat_filepath(&message.destination.display(&config));
 				let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
 					.ok()
 					.and_then(|file| file.get_xattr("user.last_changed").ok())
@@ -80,12 +79,8 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 				let mut retry = true;
 				while retry {
 					retry = false;
-					match send_message(&config, message.clone(), &bot_token).await {
+					match send_message(message.clone(), &bot_token).await {
 						Ok(_) => (),
-						Err(SendError::ConfigOutOfSync) => {
-							config = crate::config::AppConfig::read(&config_path).expect("Failed to read config file");
-							retry = true;
-						}
 						Err(e) => {
 							eprintln!("Failed to send message: {}", e);
 							//TODO!!!: keep stack of messages with failed sent, then retry sending every 100s
@@ -105,22 +100,15 @@ pub async fn run(config: crate::config::AppConfig, bot_token: String, config_pat
 	Ok(())
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum SendError {
-	#[error("Config out of sync")]
-	ConfigOutOfSync,
-	#[error(transparent)]
-	Other(#[from] Box<dyn std::error::Error + Send + Sync>),
-}
-pub async fn send_message(config: &AppConfig, message: Message, bot_token: &str) -> Result<(), SendError> {
+pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
 	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 	let mut params = vec![("text", message.message)];
-	let destination = config.channels.get(&message.destination).ok_or(SendError::ConfigOutOfSync)?;
+	let destination = &message.destination;
 	params.extend(destination.destination_params());
 	let client = reqwest::Client::new();
-	let res = client.post(&url).form(&params).send().await.map_err(|e| SendError::Other(Box::new(e)))?;
+	let res = client.post(&url).form(&params).send().await?;
 
-	println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await.map_err(|e| SendError::Other(Box::new(e))), destination);
+	println!("{:#?}\nSender: {bot_token}\n{:#?}", res.text().await?, destination);
 	Ok(())
 }
 

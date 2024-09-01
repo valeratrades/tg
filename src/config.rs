@@ -1,7 +1,7 @@
 use std::collections::BTreeMap; // so snapshot tests work
 use std::{fmt, path::Path, str::FromStr};
 
-use anyhow::Result;
+use eyre::{eyre, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use v_utils::macros::MyConfigPrimitives;
 
@@ -24,6 +24,22 @@ impl TelegramDestination {
 			Self::Group { id, thread_id } => vec![("chat_id", format!("-100{id}")), ("message_thread_id", thread_id.to_string())],
 		}
 	}
+
+	pub fn display(&self, config: &AppConfig) -> String {
+		match config.channels.iter().find(|(_, &td)| td == *self) {
+			Some((key, _)) => key.clone(),
+			None => match self {
+				Self::Channel(id) => format!("{}", id),
+				Self::Group { id, thread_id } => format!("{}_slash_{}", id, thread_id),
+			},
+		}
+	}
+}
+
+impl Default for TelegramDestination {
+	fn default() -> Self {
+		Self::Channel(0)
+	}
 }
 
 impl<'de> Deserialize<'de> for TelegramDestination {
@@ -42,7 +58,7 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 			fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
 			where
 				E: de::Error, {
-				parse_telegram_destination_string(value).map_err(de::Error::custom)
+				parse_telegram_destination_str(value).map_err(de::Error::custom)
 			}
 
 			fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
@@ -54,7 +70,7 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 			fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
 			where
 				E: de::Error, {
-				parse_telegram_destination_string(&value.to_string()).map_err(de::Error::custom)
+				parse_telegram_destination_str(&value.to_string()).map_err(de::Error::custom)
 			}
 		}
 
@@ -63,21 +79,21 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 }
 
 impl std::str::FromStr for TelegramDestination {
-	type Err = String;
+	type Err = eyre::Report;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		parse_telegram_destination_string(s)
+		parse_telegram_destination_str(s)
 	}
 }
 
-fn parse_telegram_destination_string(s: &str) -> Result<TelegramDestination, String> {
-	fn parse_chat_id(mut s: &str) -> Result<u64, String> {
+fn parse_telegram_destination_str(s: &str) -> Result<TelegramDestination, eyre::Report> {
+	fn parse_chat_id(mut s: &str) -> Result<u64, eyre::Report> {
 		s = s.trim_start_matches("-100");
-		s.parse::<u64>().map_err(|e| e.to_string())
+		s.parse::<u64>().map_err(|e| eyre!("Failed to parse chat ID: {}", e))
 	}
 	if let Some((id_str, thread_id_str)) = s.split_once('/') {
 		let id = parse_chat_id(id_str)?;
-		let thread_id = u64::from_str(thread_id_str).map_err(|e| e.to_string())?;
+		let thread_id = u64::from_str(thread_id_str).map_err(|e| eyre!("Failed to parse thread ID: {}", e))?;
 		Ok(TelegramDestination::Group { id, thread_id })
 	} else {
 		let id = parse_chat_id(s)?;

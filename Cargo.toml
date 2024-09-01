@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.86"
 chrono = "0.4.38"
 clap = { version = "4.5.16", features = ["derive"] }
 config = "0.14.0"
 derive-new = "*"
+eyre = "0.6.12"
 hyper = { version = "1.4.1", features = ["full"] }
 insta = "1.39.0"
 lazy_static = "1.5.0"

@@ -196,8 +196,6 @@ mod tests {
 	fn deser_message() -> Result<()> {
 		let destination_str_source = TelegramDestination::Group { id: 2244305221, thread_id: 3 };
 		let destination_str = serde_json::to_string(&destination_str_source)?;
-		dbg!(&destination_str);
-		//let destination_str = "{\"Group\":{\"id\":2244305221,\"thread_id\":3}}";
 		let destination: TelegramDestination = serde_json::from_str(&destination_str)?;
 		let destination_reserialized = serde_json::to_string(&destination)?;
 		assert_eq!(destination_str, destination_reserialized);
@@ -213,6 +211,18 @@ mod tests {
       message: "a message",
   }
   "###);
+		Ok(())
+	}
+
+	#[test]
+	fn chat_filepath() -> Result<()> {
+		let destination = TelegramDestination::Group { id: 2244305221, thread_id: 3 };
+
+		let mut config = AppConfig::default();
+		config.channels.insert("test".to_string(), destination);
+
+		let chat_filepath = crate::chat_filepath(&destination.display(&config));
+		insta::assert_debug_snapshot!(chat_filepath, @r###""/var/local/tg/test.md""###);
 		Ok(())
 	}
 }

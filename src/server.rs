@@ -1,4 +1,4 @@
-use std::{io::Write, path::Path};
+use std::{io::Write, io::Read, path::Path};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
@@ -69,11 +69,21 @@ pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 					.map(|dt| dt.with_timezone(&chrono::Utc));
 
 				let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
+
+				// Manual append to apply trim_end()
 				let mut file = std::fs::OpenOptions::new()
 					.create(true)
-					.append(true)
+					.truncate(false)
+					.write(true)
+					.append(false)
 					.open(&chat_filepath)
 					.expect("config is expected to chmod parent dir to give me write access");
+				let mut file_contents = String::new();
+				file.read_to_string(&mut file_contents).expect("failed to read file contents");
+				let trimmed_file_contents = file_contents.trim_end();
+				file.set_len(0).expect("Failed to truncate file");
+				file.write_all(trimmed_file_contents.as_bytes()).expect("Failed to write trimmed file contents");
+
 				file.write_all(message_append_repr.as_bytes()).expect("Failed to write message to file");
 				file.set_xattr("user.last_changed", Utc::now().to_rfc3339().as_bytes()).expect("Failed to set xattr");
 

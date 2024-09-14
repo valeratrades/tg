@@ -1,4 +1,4 @@
-use std::{io::Write, io::Read, path::Path};
+use std::{io::{Read, Seek, SeekFrom, Write}, path::Path};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
@@ -29,6 +29,8 @@ pub struct Response {
 	pub message: String,
 }
 
+/// # Panics
+/// On unsuccessful io operations
 pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	let listener = TcpListener::bind(&addr).await?;
@@ -70,19 +72,20 @@ pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 
 				let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
 
-				// Manual append to apply trim_end()
 				let mut file = std::fs::OpenOptions::new()
 					.create(true)
 					.truncate(false)
+					.read(true)
 					.write(true)
-					.append(false)
 					.open(&chat_filepath)
 					.expect("config is expected to chmod parent dir to give me write access");
+
+				// Trim trailing whitespace
 				let mut file_contents = String::new();
 				file.read_to_string(&mut file_contents).expect("failed to read file contents");
-				let trimmed_file_contents = file_contents.trim_end();
-				file.set_len(0).expect("Failed to truncate file");
-				file.write_all(trimmed_file_contents.as_bytes()).expect("Failed to write trimmed file contents");
+				let truncate_including_pos = file_contents.trim_end().len() + 1;
+				file.set_len(truncate_including_pos as u64).expect("Failed to truncate file");
+				file.seek(SeekFrom::End(0)).unwrap();
 
 				file.write_all(message_append_repr.as_bytes()).expect("Failed to write message to file");
 				file.set_xattr("user.last_changed", Utc::now().to_rfc3339().as_bytes()).expect("Failed to set xattr");

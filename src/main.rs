@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
 			println!("{s}");
 		}
 		Commands::GenAliases => {
-			let mut s = "#!/bin/sh\n".to_string();
+			let mut s = String::new();
 			for (key, _) in config.channels.iter() {
 				// alias to "t{first letter of the key with which the alias is not taken}"
 				let mut key_chars = key.chars();
@@ -142,7 +142,10 @@ async fn main() -> Result<()> {
 							if alias_already_exists || alias_in_suggested {
 								continue;
 							} else {
-								s.push_str(&format!("\nalias {try_alias}=\"tg send -c {key} >/dev/null\""));
+								if !s.is_empty() {
+									s.push('\n');
+								}
+								s.push_str(&format!("alias {try_alias}=\"tg send -c {key} >/dev/null\""));
 								break;
 							}
 						}
@@ -153,6 +156,7 @@ async fn main() -> Result<()> {
 					};
 				}
 			}
+			s.push_str("\n\nalias tgo=\"tg open\"");
 			println!("{s}");
 		}
 		Commands::Server => {

@@ -127,7 +127,7 @@ async fn main() -> Result<()> {
 				loop {
 					match key_chars.next() {
 						Some(c) => {
-							let try_alias = format!("t{}", c);
+							let try_alias = format!("tg{}", c);
 
 							let alias_already_exists = std::process::Command::new("env")
 								.arg("sh")

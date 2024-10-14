@@ -9,7 +9,7 @@ use tokio::{
 	net::TcpListener,
 	task::JoinSet,
 };
-use xattr::FileExt;
+use xattr::FileExt as _;
 
 use crate::config::{AppConfig, TelegramDestination};
 

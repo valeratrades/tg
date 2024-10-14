@@ -138,7 +138,8 @@ async fn main() -> Result<()> {
 								.status
 								.success();
 
-							if alias_already_exists {
+							let alias_in_suggested = s.contains(&format!("alias {try_alias}="));
+							if alias_already_exists || alias_in_suggested {
 								continue;
 							} else {
 								s.push_str(&format!("\nalias {try_alias}=\"tg send -c {key} >/dev/null\""));

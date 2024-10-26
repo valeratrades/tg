@@ -15,9 +15,15 @@ commit-message.txt
 commit_message.txt
 commit-message
 commit_message
+commit
+functions.sh
 
 ## Vim
 *.sw[po]
+
+## Nix
+**/flake.lock
+result
 
 ## MacOS
 .DS_Store
@@ -51,8 +57,4 @@ venv/
 ## Rust
 .cargo/config.toml
 .cargo/config
-
-
-
-functions.sh
-commit
+**/**.pending-snap

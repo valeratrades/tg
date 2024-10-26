@@ -1,4 +1,3 @@
-#![feature(try_blocks)]
 #[allow(unused_imports)] // std::str::FromStr is not detected by RA correctly
 use std::str::FromStr;
 
@@ -69,16 +68,28 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			let try_extract_destination_from_args: Result<TelegramDestination> = try {
-				match (&args.channel, &args.destination) {
-					(Some(channel), None) => match config.channels.get(channel) {
-						Some(d) => *d,
-						None => Err(eyre!("Channel not found in config"))?,
-					},
-					(None, Some(destination)) => *destination,
-					_ => Err(eyre!("One and only one of --channel and --destination must be provided"))?,
-				}
-			};
+			// nix doesn't like nightly
+			//let try_extract_destination_from_args: Result<TelegramDestination> = try {
+			//	match (&args.channel, &args.destination) {
+			//		(Some(channel), None) => match config.channels.get(channel) {
+			//			Some(d) => *d,
+			//			None => Err(eyre!("Channel not found in config"))?,
+			//		},
+			//		(None, Some(destination)) => *destination,
+			//		_ => Err(eyre!("One and only one of --channel and --destination must be provided"))?,
+			//	}
+			//};
+			let try_extract_destination_from_args: Result<TelegramDestination> = {
+    match (&args.channel, &args.destination) {
+        (Some(channel), None) => match config.channels.get(channel) {
+            Some(d) => Ok(*d),
+            None => Err(eyre!("Channel not found in config")),
+        },
+        (None, Some(destination)) => Ok(*destination),
+        _ => Err(eyre!("One and only one of --channel and --destination must be provided")),
+    }
+};
+
 
 			let destination: TelegramDestination = match try_extract_destination_from_args {
 				Ok(d) => d,

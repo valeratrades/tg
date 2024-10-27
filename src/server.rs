@@ -1,8 +1,7 @@
-use std::{io::{Read, Seek, SeekFrom, Write}, path::Path};
+use std::{io::{Read, Seek, SeekFrom, Write}, path::PathBuf, sync::OnceLock};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
@@ -13,9 +12,7 @@ use xattr::FileExt as _;
 
 use crate::config::{AppConfig, TelegramDestination};
 
-lazy_static! {
-	pub static ref VAR_DIR: &'static Path = Path::new("/var/local/tg");
-}
+pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
 pub struct Message {

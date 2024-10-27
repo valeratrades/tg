@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
 
 			let path = match &args.channel {
 				Some(c) => chat_filepath(c),
-				None => crate::server::VAR_DIR.to_path_buf(),
+				None => crate::server::DATA_DIR.get().unwrap().to_path_buf(),
 			};
 			open_with_mode(&path, OpenMode::Normal)?;
 		}
@@ -192,5 +192,5 @@ async fn main() -> Result<()> {
 }
 
 pub fn chat_filepath(destination_name: &str) -> std::path::PathBuf {
-	crate::server::VAR_DIR.join(format!("{destination_name}.md"))
+	crate::server::DATA_DIR.get().unwrap().join(format!("{destination_name}.md"))
 }

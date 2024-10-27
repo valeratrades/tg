@@ -1,9 +1,12 @@
-use std::collections::BTreeMap; // so snapshot tests work
+use std::{collections::BTreeMap, path::PathBuf};
+// so snapshot tests work
 use std::{path::Path, str::FromStr};
 
 use eyre::{eyre, Result};
 use serde::{de, Deserialize, Deserializer, Serialize};
 use v_utils::macros::MyConfigPrimitives;
+
+use crate::server::DATA_DIR;
 
 #[derive(Debug, Default, derive_new::new, Clone, MyConfigPrimitives)]
 pub struct AppConfig {
@@ -96,26 +99,8 @@ impl AppConfig {
 		let settings: config::Config = builder.build()?;
 		let settings: Self = settings.try_deserialize()?;
 
-		assert_eq!(
-			format!("{}", crate::server::VAR_DIR.display()),
-			"/var/local/tg",
-			"VAR_DIR must be /var/local/tg (because next line)"
-		);
-		let output = std::process::Command::new("sudo")
-			.arg("chmod")
-			.arg("a+w")
-			.arg("/var/local")
-			.output()
-			.map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
-
-		if !output.status.success() {
-			let error_message = String::from_utf8_lossy(&output.stderr);
-			return Err(config::ConfigError::Foreign(Box::new(std::io::Error::new(
-				std::io::ErrorKind::Other,
-				format!("Failed to set permissions on /var/local: {}", error_message),
-			))));
-		}
-		std::fs::create_dir_all(*crate::server::VAR_DIR).map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
+		let data_dir = DATA_DIR.get_or_init(|| std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap()).join("tg");
+		std::fs::create_dir_all(data_dir).map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
 
 		Ok(settings)
 	}

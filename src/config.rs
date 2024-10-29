@@ -99,7 +99,7 @@ impl AppConfig {
 		let settings: config::Config = builder.build()?;
 		let settings: Self = settings.try_deserialize()?;
 
-		let data_dir = DATA_DIR.get_or_init(|| std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap()).join("tg");
+		let data_dir = DATA_DIR.get_or_init(|| std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap().join("tg"));
 		std::fs::create_dir_all(data_dir).map_err(|e| config::ConfigError::Foreign(Box::new(e)))?;
 
 		Ok(settings)

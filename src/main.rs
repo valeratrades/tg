@@ -149,7 +149,7 @@ async fn main() -> Result<()> {
 								.status
 								.success();
 
-							let alias_in_suggested = s.contains(&format!("alias {try_alias}="));
+							let alias_in_suggested = s.contains(&format!("alias {try_alias}=")) || try_alias == "tgo";
 							if alias_already_exists || alias_in_suggested {
 								continue;
 							} else {

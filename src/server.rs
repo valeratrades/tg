@@ -1,4 +1,8 @@
-use std::{io::{Read, Seek, SeekFrom, Write}, path::PathBuf, sync::OnceLock};
+use std::{
+	io::{Read, Seek, SeekFrom, Write},
+	path::PathBuf,
+	sync::OnceLock,
+};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
@@ -124,9 +128,9 @@ pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
 }
 
 /// match duration_since_last_write {
-///     < 5 minutes => append directly
-///     >= 5 minutes && same day => append with a newline before
-///     >= 5 minutes && different day => append with a newline before and after
+///     < 6 minutes => append directly
+///     >= 6 minutes && same day => append with a newline before
+///     >= 6 minutes && different day => append with a newline before and after
 /// }
 pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
 	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() < now);
@@ -135,10 +139,9 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 	if let Some(last_write_datetime) = last_write_datetime {
 		let duration = now.signed_duration_since(last_write_datetime);
 
-		if duration >= TimeDelta::seconds(5 * 60) {
+		if duration >= TimeDelta::minutes(6) {
 			if now.format("%d/%m").to_string() == last_write_datetime.format("%d/%m").to_string() {
-				//HACK
-				prefix = "\n".to_string();
+				prefix = "\n. ".to_string();
 			} else {
 				prefix = format!("\n## {}\n", now.format("%b %d"));
 			}

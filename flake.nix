@@ -93,25 +93,28 @@
         in
         {
           options.services.tg-server = {
-            enable = mkEnableOption "TG Server Service";
+            enable = mkEnableOption (builtins.trace "TRACE: defining tg-server options" "TG Server Service");
 
             package = mkOption {
               type = package;
-              default = self.packages.${pkgs.system}.default;
+              default = builtins.trace "TRACE: using default package" self.packages.${pkgs.system}.default;
               description = "The tg-server package to use.";
             };
           };
 
-          config = mkIf cfg.enable {
-            systemd.user.services.tg-server = {
+          config = mkIf (builtins.trace "TRACE: checking if enabled: ${toString cfg.enable}" cfg.enable) {
+            # User service only
+            systemd.user.services.tg-server = builtins.trace "TRACE: creating user service" {
               description = "TG Server Service";
               wantedBy = [ "default.target" ];
               after = [ "network.target" ];
 
               serviceConfig = {
                 Type = "simple";
-                ExecStart = "${cfg.package}/bin/tg server";
+                ExecStart = "${builtins.trace "TRACE: package path: ${cfg.package}" cfg.package}/bin/tg server";
                 Restart = "on-failure";
+                WorkingDirectory = "~"; # Set home as working directory
+                Environment = "HOME=%h"; # Ensure HOME is set correctly
               };
             };
           };

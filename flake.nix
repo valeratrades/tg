@@ -105,7 +105,7 @@
               description = "The tg-server package to use.";
             };
 
-            telegramToken = mkOption {
+            token = mkOption {
               type = path;
               description = "Path to the file containing the Telegram token for LoadCredential.";
               example = "config.sops.secrets.telegram_token_main.path";
@@ -125,7 +125,7 @@
 
               Service = {
                 Type = "simple";
-                LoadCredential = "tg_token:${cfg.credentialPath}";
+                LoadCredential = "tg_token:${cfg.token}";
                 ExecStart = ''
                   /bin/sh -c '${cfg.package}/bin/tg --token "$(cat %d/tg_token)" server'
                 '';

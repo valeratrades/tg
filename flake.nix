@@ -94,7 +94,7 @@
           cfg = config."${pname}";
         in
         {
-          options.tg-server = {
+          options."${pname}" = {
             enable = mkEnableOption "";
 
             package = mkOption {

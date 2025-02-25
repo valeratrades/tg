@@ -87,11 +87,11 @@
         }
       ) // {
       #good ref: https://github.com/NixOS/nixpkgs/blob/04ef94c4c1582fd485bbfdb8c4a8ba250e359195/nixos/modules/services/audio/navidrome.nix#L89
-      homeManagerModules.${pname} = { config, lib, pkgs, ... }:
+      homeManagerModules."${pname}" = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
           inherit (lib.types) package path;
-          cfg = config.${pname};
+          cfg = config."${pname}";
         in
         {
           options.tg-server = {

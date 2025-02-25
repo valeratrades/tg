@@ -85,7 +85,8 @@
         }
       ) // {
       #good ref: https://github.com/NixOS/nixpkgs/blob/04ef94c4c1582fd485bbfdb8c4a8ba250e359195/nixos/modules/services/audio/navidrome.nix#L89
-      nixosModules.default = { config, lib, pkgs, ... }:
+      #NB: targets HM specifically
+      hmModule.default = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
           inherit (lib.types) package path;
@@ -95,6 +96,7 @@
           options.services.tg-server = {
             enable = mkEnableOption (builtins.trace "TRACE: defining tg-server options" "TG Server Service");
 
+            #TODO!!: actually add to hm packages
             package = mkOption {
               type = package;
               default = builtins.trace "TRACE: using default package" self.packages.${pkgs.system}.default;
@@ -109,7 +111,6 @@
           };
 
           config = mkIf cfg.enable {
-            #NB: targets HM specifically
             systemd.user.services.tg-server = {
               Unit = {
                 Description = "TG Server Service";
@@ -124,8 +125,8 @@
                 Type = "simple";
                 LoadCredential = "tg_token:${cfg.credentialPath}";
                 ExecStart = ''
-/bin/sh -c '${cfg.package}/bin/tg --token "$(cat %d/tg_token)" server'
-'';
+                  /bin/sh -c '${cfg.package}/bin/tg --token "$(cat %d/tg_token)" server'
+                '';
                 Restart = "on-failure";
               };
             };

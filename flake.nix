@@ -86,7 +86,7 @@
       ) // {
       #good ref: https://github.com/NixOS/nixpkgs/blob/04ef94c4c1582fd485bbfdb8c4a8ba250e359195/nixos/modules/services/audio/navidrome.nix#L89
       #NB: targets HM specifically
-      hmModule.default = { config, lib, pkgs, ... }:
+      nixosModules.tg = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
           inherit (lib.types) package path;

@@ -20,6 +20,8 @@ struct Cli {
 	command: Commands,
 	#[arg(long, default_value = "~/.config/tg.toml")]
 	config: ExpandedPath,
+	#[arg(long)]
+	token: Option<String>,
 }
 #[derive(Subcommand, Debug, Clone)]
 enum Commands {
@@ -64,7 +66,10 @@ async fn main() -> Result<()> {
 	let cli = Cli::parse();
 	let config = config::AppConfig::read(&cli.config.0).expect("Failed to read config file");
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)
-	let bot_token = std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set");
+	let bot_token = match cli.token {
+		Some(t) => t,
+		None => std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set"),
+	};
 
 	match cli.command {
 		Commands::Send(args) => {
@@ -80,16 +85,15 @@ async fn main() -> Result<()> {
 			//	}
 			//};
 			let try_extract_destination_from_args: Result<TelegramDestination> = {
-    match (&args.channel, &args.destination) {
-        (Some(channel), None) => match config.channels.get(channel) {
-            Some(d) => Ok(*d),
-            None => Err(eyre!("Channel not found in config")),
-        },
-        (None, Some(destination)) => Ok(*destination),
-        _ => Err(eyre!("One and only one of --channel and --destination must be provided")),
-    }
-};
-
+				match (&args.channel, &args.destination) {
+					(Some(channel), None) => match config.channels.get(channel) {
+						Some(d) => Ok(*d),
+						None => Err(eyre!("Channel not found in config")),
+					},
+					(None, Some(destination)) => Ok(*destination),
+					_ => Err(eyre!("One and only one of --channel and --destination must be provided")),
+				}
+			};
 
 			let destination: TelegramDestination = match try_extract_destination_from_args {
 				Ok(d) => d,

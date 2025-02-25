@@ -88,7 +88,7 @@
       nixosModules.default = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
-          inherit (lib.types) package;
+          inherit (lib.types) package path;
           cfg = config.services.tg-server;
         in
         {
@@ -100,21 +100,33 @@
               default = builtins.trace "TRACE: using default package" self.packages.${pkgs.system}.default;
               description = "The tg-server package to use.";
             };
+
+            telegramToken = mkOption {
+              type = path;
+              description = "Path to the file containing the Telegram token for LoadCredential.";
+              example = "config.sops.secrets.telegram_token_main.path";
+            };
           };
 
-          config = mkIf (builtins.trace "TRACE: checking if enabled: ${toString cfg.enable}" cfg.enable) {
-            # User service only
-            systemd.user.services.tg-server = builtins.trace "TRACE: creating user service" {
-              description = "TG Server Service";
-              wantedBy = [ "default.target" ];
-              after = [ "network.target" ];
+          config = mkIf cfg.enable {
+            #NB: targets HM specifically
+            systemd.user.services.tg-server = {
+              Unit = {
+                Description = "TG Server Service";
+                After = [ "network.target" ];
+              };
 
-              serviceConfig = {
+              Install = {
+                WantedBy = [ "default.target" ];
+              };
+
+              Service = {
                 Type = "simple";
-                ExecStart = "${builtins.trace "TRACE: package path: ${cfg.package}" cfg.package}/bin/tg server";
+                LoadCredential = "tg_token:${cfg.credentialPath}";
+                ExecStart = ''
+                  						/bin/sh -c '${cfg.package}/bin/tg --token "$(cat %d/tg_token)" server'
+                  								'';
                 Restart = "on-failure";
-                WorkingDirectory = "~"; # Set home as working directory
-                Environment = "HOME=%h"; # Ensure HOME is set correctly
               };
             };
           };

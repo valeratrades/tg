@@ -8,6 +8,10 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils, pre-commit-hooks, v-utils }:
+    let
+      manifest = (nixpkgs.lib.importTOML ./Cargo.toml).package;
+      pname = manifest.name;
+    in
     flake-utils.lib.eachDefaultSystem
       (system:
         let
@@ -17,8 +21,6 @@
           };
 
           pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
-          manifest = (pkgs.lib.importTOML ./Cargo.toml).package;
-          pname = manifest.name;
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
           workflowContents = v-utils.ci { inherit pkgs; lastSupportedVersion = "nightly-2025-01-16"; jobsErrors = [ "rust-tests" ]; jobsWarnings = [ "rust-doc" "rust-clippy" "rust-machete" "rust-sort" "tokei" ]; };
@@ -86,14 +88,14 @@
       ) // {
       #good ref: https://github.com/NixOS/nixpkgs/blob/04ef94c4c1582fd485bbfdb8c4a8ba250e359195/nixos/modules/services/audio/navidrome.nix#L89
       #NB: targets HM specifically
-      homeManagerModules.tg = { config, lib, pkgs, ... }:
+      homeManagerModules.tg-server = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
           inherit (lib.types) package path;
-          cfg = config.services.tg-server;
+          cfg = config.tg-server;
         in
         {
-          options.services.tg-server = {
+          options.tg-server = {
             enable = mkEnableOption (builtins.trace "TRACE: defining tg-server options" "TG Server Service");
 
             #TODO!!: actually add to hm packages

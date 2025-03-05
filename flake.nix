@@ -111,7 +111,7 @@
           };
 
           config = mkIf cfg.enable {
-            systemd.user.services.tg-server = {
+            systemd.user.services."${pname}" = {
               Unit = {
                 Description = "tg server";
                 After = [ "network.target" ];

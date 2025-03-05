@@ -125,7 +125,7 @@
                 Type = "simple";
                 LoadCredential = "tg_token:${cfg.token}";
                 ExecStart = ''
-                  /bin/sh -c '${cfg.package}/bin/tg --token "$(cat %d/tg_token)" server'
+                  /bin/sh -c '${cfg.package}/bin/${pname} --token "$(cat %d/tg_token)" server'
                 '';
                 Restart = "on-failure";
               };

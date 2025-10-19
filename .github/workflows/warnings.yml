@@ -49,7 +49,7 @@ jobs:
       run: "\t\t\t\t\t\tcargo machete\n\t\t\t\t\t\texit_code=$?\n\t\t\t\t\t\tif [\
         \ $exit_code = 0 ]; then\n\t\t\t\t\t\t\techo \"Found unused dependencies\"\
         \n\t\t\t\t\t\t\texit $exit_code\n\t\t\t\t\t\tfi\n\t\t\t"
-  rust-sort:
+  rust-sorted:
     name: Cargo Sorted
     runs-on: ubuntu-latest
     steps:

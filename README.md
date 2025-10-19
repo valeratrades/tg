@@ -1,24 +1,21 @@
 # tg
-![Minimum Supported Rust Version](https://img.shields.io/badge/nightly-1.86+-ab6000.svg)
+![Minimum Supported Rust Version](https://img.shields.io/badge/nightly-1.92+-ab6000.svg)
 [<img alt="crates.io" src="https://img.shields.io/crates/v/tg.svg?color=fc8d62&logo=rust" height="20" style=flat-square>](https://crates.io/crates/tg)
 [<img alt="docs.rs" src="https://img.shields.io/badge/docs.rs-66c2a5?style=for-the-badge&labelColor=555555&logo=docs.rs&style=flat-square" height="20">](https://docs.rs/tg)
-![Lines Of Code](https://img.shields.io/badge/LoC-713-lightblue)
+![Lines Of Code](https://img.shields.io/badge/LoC-722-lightblue)
 <br>
 [<img alt="ci errors" src="https://img.shields.io/github/actions/workflow/status/valeratrades/tg/errors.yml?branch=master&style=for-the-badge&style=flat-square&label=errors&labelColor=420d09" height="20">](https://github.com/valeratrades/tg/actions?query=branch%3Amaster) <!--NB: Won't find it if repo is private-->
 [<img alt="ci warnings" src="https://img.shields.io/github/actions/workflow/status/valeratrades/tg/warnings.yml?branch=master&style=for-the-badge&style=flat-square&label=warnings&labelColor=d16002" height="20">](https://github.com/valeratrades/tg/actions?query=branch%3Amaster) <!--NB: Won't find it if repo is private-->
 
 `tg` tool allows you to interact with a Telegram bot to send messages, get bot information, and list channels configured in your configuration file. I use it to keep my quick notes.
-
 <!-- markdownlint-disable -->
 <details>
   <summary>
-    <h2>Installation</h2>
+    <h3>Installation</h3>
   </summary>
-  <pre>
-    <code class="language-sh">nix build</code></pre>
+<pre><code class="language-sh">nix build</code></pre>
 </details>
 <!-- markdownlint-restore -->
-
 
 ## Usage
 ### Commands

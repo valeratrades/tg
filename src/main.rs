@@ -2,14 +2,14 @@
 use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
-use config::TelegramDestination;
-use eyre::{bail, eyre, Result};
+use eyre::{Result, bail, eyre};
 use server::Message;
+use tg::chat::TelegramDestination;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpStream,
 };
-use v_utils::io::{open_with_mode, ExpandedPath, OpenMode};
+use v_utils::io::{ExpandedPath, OpenMode, open_with_mode};
 pub mod config;
 mod server;
 

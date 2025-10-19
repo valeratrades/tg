@@ -7,6 +7,7 @@ use std::{
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
+use tg::chat::TelegramDestination;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpListener,
@@ -14,19 +15,13 @@ use tokio::{
 };
 use xattr::FileExt as _;
 
-use crate::config::{AppConfig, TelegramDestination};
+use crate::config::AppConfig;
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
 pub struct Message {
 	pub destination: TelegramDestination,
-	pub message: String,
-}
-
-#[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
-pub struct Response {
-	pub status: u16,
 	pub message: String,
 }
 
@@ -60,7 +55,7 @@ pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 				}
 
 				// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
-				let chat_filepath = crate::chat_filepath(&message.destination.display(&config));
+				let chat_filepath = crate::chat_filepath(&crate::config::display_destination(&message.destination, &config));
 				let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
 					.ok()
 					.and_then(|file| file.get_xattr("user.last_changed").ok())

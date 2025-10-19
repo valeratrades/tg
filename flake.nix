@@ -19,17 +19,18 @@
           pkgs = import nixpkgs {
             inherit system overlays;
           };
-
+          rust = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
+            extensions = [ "rust-src" "rust-analyzer" "rust-docs" "rustc-codegen-cranelift-preview" ];
+          });
           pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
-          workflowContents = v-utils.ci { inherit pkgs; lastSupportedVersion = "nightly-2025-01-16"; jobsErrors = [ "rust-tests" ]; jobsWarnings = [ "rust-doc" "rust-clippy" "rust-machete" "rust-sort" "tokei" ]; };
-          readme = v-utils.readme-fw { inherit pkgs pname; lastSupportedVersion = "nightly-1.86"; rootDir = ./.; licenses = [{ name = "Blue Oak 1.0.0"; outPath = "LICENSE"; }]; badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ]; };
+          workflowContents = v-utils.ci { inherit pkgs; lastSupportedVersion = "nightly-2025-10-12"; jobsErrors = [ "rust-tests" ]; jobsWarnings = [ "rust-doc" "rust-clippy" "rust-machete" "rust-sorted" "tokei" ]; };
+          readme = v-utils.readme-fw { inherit pkgs pname; lastSupportedVersion = "nightly-1.92"; rootDir = ./.; licenses = [{ name = "Blue Oak 1.0.0"; outPath = "LICENSE"; }]; badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ]; };
         in
         {
           packages =
             let
-              rust = (pkgs.rust-bin.fromRustupToolchainFile ./.cargo/rust-toolchain.toml);
               rustc = rust;
               cargo = rust;
               rustPlatform = pkgs.makeRustPlatform {
@@ -45,12 +46,12 @@
                   openssl.dev
                 ];
                 nativeBuildInputs = with pkgs; [ pkg-config ];
-                env.PKG_CONFIG_PATH = "${pkgs.openssl.dev}/lib/pkgconfig";
 
                 cargoLock.lockFile = ./Cargo.lock;
                 src = pkgs.lib.cleanSource ./.;
               };
             };
+
 
           devShells.default = with pkgs; mkShell {
             inherit stdenv;
@@ -68,11 +69,10 @@
                 cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
 
                 mkdir -p ./.cargo
-                cp -f ${(v-utils.files.rust.config {inherit pkgs;})} ./.cargo/config.toml
-                cp -f ${(v-utils.files.rust.toolchain {inherit pkgs; toolchain = "nightly";})} ./.cargo/rust-toolchain.toml
-                cp -f ${(v-utils.files.rust.rustfmt {inherit pkgs;})} ./rustfmt.toml
-                cp -f ${(v-utils.files.rust.deny {inherit pkgs;})} ./deny.toml
                 cp -f ${(v-utils.files.gitignore { inherit pkgs; langs = ["rs"];})} ./.gitignore
+                cp -f ${(v-utils.files.rust.config {inherit pkgs;})} ./.cargo/config.toml
+                cp -f ${(v-utils.files.rust.rustfmt {inherit pkgs;})} ./rustfmt.toml
+                cp -f ${(v-utils.files.rust.toolchain {inherit pkgs;})} ./.cargo/rust-toolchain.toml
 
                 cp -f ${readme} ./README.md
               '';
@@ -81,7 +81,7 @@
               mold-wrapped
               openssl
               pkg-config
-              (rust-bin.fromRustupToolchainFile ./.cargo/rust-toolchain.toml)
+              rust
             ] ++ pre-commit-check.enabledPackages;
           };
         }

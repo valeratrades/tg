@@ -63,6 +63,7 @@ struct OpenArgs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+	v_utils::clientside!();
 	let cli = Cli::parse();
 	let config = config::AppConfig::read(&cli.config.0).expect("Failed to read config file");
 	//TODO!: make it possible to define the bot_token inside the config too (env overwrites if exists)

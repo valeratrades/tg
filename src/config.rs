@@ -18,14 +18,15 @@ pub struct AppConfig {
 
 #[instrument(skip(config), fields(destination = ?destination))]
 pub fn display_destination(destination: &TelegramDestination, config: &AppConfig) -> String {
-	match config.channels.iter().find(|(_, &td)| td == *destination) {
+	match config.channels.iter().find(|(_, td)| *td == destination) {
 		Some((key, _)) => {
 			debug!("Found named channel: {}", key);
 			key.clone()
 		}
 		None => {
 			let name = match destination {
-				TelegramDestination::Channel(id) => format!("{}", id),
+				TelegramDestination::ChannelExactUid(id) => format!("{}", id),
+				TelegramDestination::ChannelUsername(username) => username.clone(),
 				TelegramDestination::Group { id, thread_id } => format!("{}_slash_{}", id, thread_id),
 			};
 			debug!("Using generated name for destination: {}", name);

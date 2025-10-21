@@ -3,18 +3,23 @@ use std::str::FromStr;
 use eyre::{Result, eyre};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-#[derive(Clone, Debug, derive_new::new, Copy, PartialEq, Eq, Serialize, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Hash)]
 #[serde(untagged)]
-/// Doesn't store "-100" prefix
+/// Doesn't store "-100" prefix for numeric IDs
 pub enum TelegramDestination {
-	Channel(u64),
+	ChannelExactUid(u64),
+	ChannelUsername(String),
 	Group { id: u64, thread_id: u64 },
 }
 
 impl TelegramDestination {
 	pub fn destination_params(&self) -> Vec<(&str, String)> {
 		match self {
-			Self::Channel(chat_id) => vec![("chat_id", format!("-100{chat_id}"))],
+			Self::ChannelExactUid(chat_id) => vec![("chat_id", format!("-100{chat_id}"))],
+			Self::ChannelUsername(username) => {
+				let username = if username.starts_with('@') { username.clone() } else { format!("@{}", username) };
+				vec![("chat_id", username)]
+			}
 			Self::Group { id, thread_id } => vec![("chat_id", format!("-100{id}")), ("message_thread_id", thread_id.to_string())],
 		}
 	}
@@ -22,7 +27,7 @@ impl TelegramDestination {
 
 impl Default for TelegramDestination {
 	fn default() -> Self {
-		Self::Channel(0)
+		Self::ChannelExactUid(0)
 	}
 }
 
@@ -41,7 +46,7 @@ impl<'de> Deserialize<'de> for TelegramDestination {
 
 		let helper = TelegramDestinationHelper::deserialize(deserializer)?;
 		match helper {
-			TelegramDestinationHelper::Channel(id) => Ok(TelegramDestination::Channel(id)),
+			TelegramDestinationHelper::Channel(id) => Ok(TelegramDestination::ChannelExactUid(id)),
 			TelegramDestinationHelper::Group { id, thread_id } => Ok(TelegramDestination::Group { id, thread_id }),
 			TelegramDestinationHelper::String(s) => parse_telegram_destination_str(&s).map_err(de::Error::custom),
 			TelegramDestinationHelper::Signed64(id) => parse_telegram_destination_str(&id.to_string()).map_err(de::Error::custom),
@@ -62,13 +67,20 @@ fn parse_telegram_destination_str(s: &str) -> Result<TelegramDestination, eyre::
 		s = s.trim_start_matches("-100");
 		s.parse::<u64>().map_err(|e| eyre!("Failed to parse chat ID: {}", e))
 	}
+
+	// Check if it's a username (starts with @ or contains only letters/underscores)
+	let trimmed = s.trim();
+	if trimmed.starts_with('@') || (!trimmed.contains('/') && trimmed.chars().all(|c| c.is_alphabetic() || c == '_')) {
+		return Ok(TelegramDestination::ChannelUsername(trimmed.to_string()));
+	}
+
 	if let Some((id_str, thread_id_str)) = s.split_once('/') {
 		let id = parse_chat_id(id_str)?;
 		let thread_id = u64::from_str(thread_id_str).map_err(|e| eyre!("Failed to parse thread ID: {}", e))?;
 		Ok(TelegramDestination::Group { id, thread_id })
 	} else {
 		let id = parse_chat_id(s)?;
-		Ok(TelegramDestination::Channel(id))
+		Ok(TelegramDestination::ChannelExactUid(id))
 	}
 }
 
@@ -86,7 +98,7 @@ mod tests {
 		let json = r#""2244305221""#;
 		let chat: TelegramDestination = from_str(json).unwrap();
 		assert_debug_snapshot!(chat, @r###"
-Channel(
+ChannelExactUid(
     2244305221,
 )
 "###);
@@ -112,11 +124,14 @@ Group {
 
 	#[test]
 	fn test_deserialize_errors() {
+		// "invalid" is now parsed as a channel username
 		let input = r#""invalid""#;
 		let result: Result<TelegramDestination, _> = from_str(input);
 		insta::assert_debug_snapshot!(result, @r###"
-  Err(
-      Error("Failed to parse chat ID: invalid digit found in string", line: 0, column: 0),
+  Ok(
+      ChannelUsername(
+          "invalid",
+      ),
   )
   "###);
 
@@ -145,10 +160,66 @@ alerts = "2244305223/7"
           id: 2244305223,
           thread_id: 7,
       },
-      "journal": Channel(
+      "journal": ChannelExactUid(
           2244305222,
       ),
-      "wtt": Channel(
+      "wtt": ChannelExactUid(
+          2244305221,
+      ),
+  }
+  "###);
+	}
+
+	#[test]
+	fn test_deserialize_channel_username() {
+		let json = r#""WatchingTT""#;
+		let chat: TelegramDestination = from_str(json).unwrap();
+		assert_debug_snapshot!(chat, @r###"
+ChannelUsername(
+    "WatchingTT",
+)
+"###);
+
+		let json_with_at = r#""@WatchingTT""#;
+		let chat_with_at: TelegramDestination = from_str(json_with_at).unwrap();
+		assert_debug_snapshot!(chat_with_at, @r###"
+ChannelUsername(
+    "@WatchingTT",
+)
+"###);
+	}
+
+	#[test]
+	fn test_destination_params_username() {
+		let dest = TelegramDestination::ChannelUsername("WatchingTT".to_string());
+		let params = dest.destination_params();
+		assert_eq!(params, vec![("chat_id", "@WatchingTT".to_string())]);
+
+		let dest_with_at = TelegramDestination::ChannelUsername("@WatchingTT".to_string());
+		let params_with_at = dest_with_at.destination_params();
+		assert_eq!(params_with_at, vec![("chat_id", "@WatchingTT".to_string())]);
+	}
+
+	#[test]
+	fn test_deserialize_channels_with_username() {
+		let toml_str = r#"
+wtt = "2244305221"
+watching = "WatchingTT"
+alerts = "2244305223/7"
+"#;
+
+		let config_channels: BTreeMap<String, TelegramDestination> = toml::from_str(toml_str).unwrap();
+
+		assert_debug_snapshot!(config_channels, @r###"
+  {
+      "alerts": Group {
+          id: 2244305223,
+          thread_id: 7,
+      },
+      "watching": ChannelUsername(
+          "WatchingTT",
+      ),
+      "wtt": ChannelExactUid(
           2244305221,
       ),
   }

@@ -88,10 +88,10 @@ async fn main() -> Result<()> {
 			let try_extract_destination_from_args: Result<TelegramDestination> = {
 				match (&args.channel, &args.destination) {
 					(Some(channel), None) => match config.channels.get(channel) {
-						Some(d) => Ok(*d),
+						Some(d) => Ok(d.clone()),
 						None => Err(eyre!("Channel not found in config")),
 					},
-					(None, Some(destination)) => Ok(*destination),
+					(None, Some(destination)) => Ok(destination.clone()),
 					_ => Err(eyre!("One and only one of --channel and --destination must be provided")),
 				}
 			};

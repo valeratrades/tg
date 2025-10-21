@@ -1,4 +1,4 @@
-#[allow(unused_imports)] // std::str::FromStr is not detected by RA correctly
+#[allow(unused_imports)] // std::str::FromStr is not detected by RA correctly (2025/03/21)
 use std::str::FromStr;
 
 use clap::{Args, Parser, Subcommand};
@@ -74,17 +74,6 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			// nix doesn't like nightly
-			//let try_extract_destination_from_args: Result<TelegramDestination> = try {
-			//	match (&args.channel, &args.destination) {
-			//		(Some(channel), None) => match config.channels.get(channel) {
-			//			Some(d) => *d,
-			//			None => Err(eyre!("Channel not found in config"))?,
-			//		},
-			//		(None, Some(destination)) => *destination,
-			//		_ => Err(eyre!("One and only one of --channel and --destination must be provided"))?,
-			//	}
-			//};
 			let try_extract_destination_from_args: Result<TelegramDestination> = {
 				match (&args.channel, &args.destination) {
 					(Some(channel), None) => match config.channels.get(channel) {
@@ -117,13 +106,13 @@ async fn main() -> Result<()> {
 			let _response_str = String::from_utf8_lossy(&response);
 		}
 		Commands::BotInfo => {
-			let url = format!("https://api.telegram.org/bot{}/getMe", bot_token);
+			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
 			let client = reqwest::Client::new();
 			let res = client.get(&url).send().await?;
 
 			let parsed_json: serde_json::Value = serde_json::from_str(&res.text().await?).expect("Failed to parse JSON");
 			let pretty_json = serde_json::to_string_pretty(&parsed_json).expect("Failed to pretty print JSON");
-			println!("{}", pretty_json);
+			println!("{pretty_json}");
 		}
 		Commands::ListChannels => {
 			let mut s = String::new();
@@ -148,7 +137,7 @@ async fn main() -> Result<()> {
 							let alias_already_exists = std::process::Command::new("env")
 								.arg("sh")
 								.arg("-c")
-								.arg(format!("which {} 2>/dev/null", try_alias))
+								.arg(format!("which {try_alias} 2>/dev/null"))
 								.output()
 								.expect("Failed to execute command")
 								.status

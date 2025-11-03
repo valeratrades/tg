@@ -3,7 +3,7 @@ use std::str::FromStr;
 use eyre::{Result, eyre};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Hash)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(untagged)]
 /// Doesn't store "-100" prefix for numeric IDs
 pub enum TelegramDestination {

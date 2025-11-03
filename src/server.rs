@@ -20,7 +20,7 @@ use crate::config::AppConfig;
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-#[derive(Clone, Debug, Default, derive_new::new, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, derive_new::new)]
 pub struct Message {
 	pub destination: TelegramDestination,
 	pub message: String,

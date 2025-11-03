@@ -16,6 +16,8 @@ jobs:
     - uses: dtolnay/rust-toolchain@master
       with:
         toolchain: ${{matrix.rust}}
+    - name: Install mold
+      uses: rui314/setup-mold@v1
     - if: github.ref == 'refs/heads/release'
       name: Set RUSTFLAGS for release branch
       run: echo "RUSTFLAGS=-Dwarnings" >> $GITHUB_ENV
@@ -34,7 +36,7 @@ jobs:
       matrix:
         rust:
         - nightly
-        - nightly-2025-10-12
+        - nightly-2025-10-10
     timeout-minutes: 45
 name: Errors
 'on':

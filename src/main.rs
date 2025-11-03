@@ -13,7 +13,7 @@ use v_utils::io::{ExpandedPath, OpenMode, open_with_mode};
 pub mod config;
 mod server;
 
-#[derive(Parser, Debug, Clone)]
+#[derive(Clone, Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
 	#[command(subcommand)]
@@ -23,7 +23,7 @@ struct Cli {
 	#[arg(long)]
 	token: Option<String>,
 }
-#[derive(Subcommand, Debug, Clone)]
+#[derive(Clone, Debug, Subcommand)]
 enum Commands {
 	/// Send the message (if more than one string is provided, they are contatenated with a space)
 	///Ex
@@ -42,7 +42,7 @@ enum Commands {
 	/// Open the messages file of a channel
 	Open(OpenArgs),
 }
-#[derive(Args, Debug, Clone)]
+#[derive(Args, Clone, Debug)]
 struct SendArgs {
 	/// Name of the channel to send the message to. Matches against the keys in the config file
 	#[arg(short, long)]

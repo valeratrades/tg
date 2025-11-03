@@ -10,7 +10,7 @@ use v_utils::macros::MyConfigPrimitives;
 
 use crate::server::DATA_DIR;
 
-#[derive(Debug, Default, derive_new::new, Clone, MyConfigPrimitives)]
+#[derive(Clone, Debug, Default, MyConfigPrimitives, derive_new::new)]
 pub struct AppConfig {
 	pub channels: BTreeMap<String, TelegramDestination>,
 	pub localhost_port: u16,

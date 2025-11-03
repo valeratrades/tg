@@ -168,10 +168,10 @@ async fn main() -> Result<()> {
 			server::run(config, bot_token).await?;
 		}
 		Commands::Open(args) => {
-			if let Some(c) = &args.channel {
-				if !config.channels.contains_key(c) {
-					bail!("Channel not found in config")
-				}
+			if let Some(c) = &args.channel
+				&& !config.channels.contains_key(c)
+			{
+				bail!("Channel not found in config")
 			}
 
 			let path = match &args.channel {

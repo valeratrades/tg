@@ -7,13 +7,15 @@
     v-utils.url = "github:valeratrades/.github";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, pre-commit-hooks, v-utils }:
+  outputs =
+    { self, nixpkgs, rust-overlay, flake-utils, pre-commit-hooks, v-utils }:
     let
       manifest = (nixpkgs.lib.importTOML ./Cargo.toml).package;
       pname = manifest.name;
     in
     flake-utils.lib.eachDefaultSystem
-      (system:
+      (
+        system:
         let
           overlays = builtins.trace "flake.nix sourced" [ (import rust-overlay) ];
           pkgs = import nixpkgs {
@@ -23,8 +25,32 @@
           pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
-          workflowContents = v-utils.ci { inherit pkgs; lastSupportedVersion = "nightly-2025-10-10"; jobsErrors = [ "rust-tests" ]; jobsWarnings = [ "rust-doc" "rust-clippy" "rust-machete" "rust-sorted" "rust-sorted-derives" "tokei" ]; };
-          readme = v-utils.readme-fw { inherit pkgs pname; lastSupportedVersion = "nightly-1.92"; rootDir = ./.; licenses = [{ name = "Blue Oak 1.0.0"; outPath = "LICENSE"; }]; badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ]; };
+          workflowContents = v-utils.ci {
+            inherit pkgs;
+            lastSupportedVersion = "nightly-2025-10-10";
+            jobsErrors = [ "rust-tests" ];
+            jobsWarnings = [
+              "rust-doc"
+              "rust-clippy"
+              "rust-machete"
+              "rust-sorted"
+              "rust-sorted-derives"
+              "tokei"
+            ];
+            jobsOther = [ "loc-badge" ];
+          };
+          readme = v-utils.readme-fw {
+            inherit pkgs pname;
+            lastSupportedVersion = "nightly-1.92";
+            rootDir = ./.;
+            licenses = [
+              {
+                name = "Blue Oak 1.0.0";
+                outPath = "LICENSE";
+              }
+            ];
+            badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
+          };
         in
         {
           packages =
@@ -50,44 +76,61 @@
               };
             };
 
+          devShells.default =
+            with pkgs;
+            mkShell {
+              inherit stdenv;
+              shellHook = pre-commit-check.shellHook + ''
+                            mkdir -p ./.github/workflows
+                            cp ${workflowContents.errors} -f ./.github/workflows/errors.yml
+                            cp ${workflowContents.warnings} -f ./.github/workflows/warnings.yml
+                            cp ${workflowContents.other} -f ./.github/workflows/other.yml || :
 
-          devShells.default = with pkgs; mkShell {
-            inherit stdenv;
-            shellHook =
-              pre-commit-check.shellHook +
-              ''
-                mkdir -p ./.github/workflows
-                rm -f ./.github/workflows/errors.yml; cp ${workflowContents.errors} ./.github/workflows/errors.yml
-                rm -f ./.github/workflows/warnings.yml; cp ${workflowContents.warnings} ./.github/workflows/warnings.yml
+                             if command -v gh &> /dev/null; then
+                  if [ -n "$GITHUB_LOC_GIST" ]; then
+                    echo "Setting GITHUB_LOC_GIST secret for repository..."
+                    gh secret set GITHUB_LOC_GIST --body "$GITHUB_LOC_GIST" 2>/dev/null || echo "Failed to set secret (may already exist or no permissions)"
+                  else
+                    echo "Warning: GITHUB_LOC_GIST environment variable not set. The LOC badge workflow will fail."
+                  fi
+                fi
 
-                cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
 
-                ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
-                cp -f ${(v-utils.hooks.treefmt) {inherit pkgs;}} ./.treefmt.toml
-                cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
+                            cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
 
-                mkdir -p ./.cargo
-                cp -f ${(v-utils.files.gitignore { inherit pkgs; langs = ["rs"];})} ./.gitignore
-                cp -f ${(v-utils.files.rust.config {inherit pkgs;})} ./.cargo/config.toml
-                cp -f ${(v-utils.files.rust.rustfmt {inherit pkgs;})} ./rustfmt.toml
-                cp -f ${(v-utils.files.rust.toolchain {inherit pkgs;})} ./.cargo/rust-toolchain.toml
+                            ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
+                            cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
+                            cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
 
-                cp -f ${readme} ./README.md
+                            mkdir -p ./.cargo
+                            cp -f ${
+                              (v-utils.files.gitignore {
+                                inherit pkgs;
+                                langs = [ "rs" ];
+                              })
+                            } ./.gitignore
+                            cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
+                            cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
+                            cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
+
+                            cp -f ${readme} ./README.md
               '';
-            env = {
-              RUST_BACKTRACE = 1;
-              RUST_LIB_BACKTRACE = 0;
-            };
+              env = {
+                RUST_BACKTRACE = 1;
+                RUST_LIB_BACKTRACE = 0;
+              };
 
-            packages = [
-              mold-wrapped
-              openssl
-              pkg-config
-              rust
-            ] ++ pre-commit-check.enabledPackages;
-          };
+              packages = [
+                mold-wrapped
+                openssl
+                pkg-config
+                rust
+              ]
+              ++ pre-commit-check.enabledPackages;
+            };
         }
-      ) // {
+      )
+    // {
       #good ref: https://github.com/NixOS/nixpkgs/blob/04ef94c4c1582fd485bbfdb8c4a8ba250e359195/nixos/modules/services/audio/navidrome.nix#L89
       homeManagerModules."${pname}" = { config, lib, pkgs, ... }:
         let
@@ -138,4 +181,3 @@
         };
     };
 }
-

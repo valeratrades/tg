@@ -81,39 +81,29 @@
             mkShell {
               inherit stdenv;
               shellHook = pre-commit-check.shellHook + ''
-                            mkdir -p ./.github/workflows
-                            cp ${workflowContents.errors} -f ./.github/workflows/errors.yml
-                            cp ${workflowContents.warnings} -f ./.github/workflows/warnings.yml
-                            cp ${workflowContents.other} -f ./.github/workflows/other.yml || :
+                mkdir -p ./.github/workflows
+                cp ${workflowContents.errors} -f ./.github/workflows/errors.yml
+                cp ${workflowContents.warnings} -f ./.github/workflows/warnings.yml
+                cp ${workflowContents.other} -f ./.github/workflows/other.yml || :
 
-                             if command -v gh &> /dev/null; then
-                  if [ -n "$GITHUB_LOC_GIST" ]; then
-                    echo "Setting GITHUB_LOC_GIST secret for repository..."
-                    gh secret set GITHUB_LOC_GIST --body "$GITHUB_LOC_GIST" 2>/dev/null || echo "Failed to set secret (may already exist or no permissions)"
-                  else
-                    echo "Warning: GITHUB_LOC_GIST environment variable not set. The LOC badge workflow will fail."
-                  fi
-                fi
+                cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
 
+                ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
+                cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
+                cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
 
-                            cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
+                mkdir -p ./.cargo
+                cp -f ${
+                  (v-utils.files.gitignore {
+                    inherit pkgs;
+                    langs = [ "rs" ];
+                  })
+                } ./.gitignore
+                cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
+                cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
+                cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
 
-                            ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
-                            cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
-                            cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
-
-                            mkdir -p ./.cargo
-                            cp -f ${
-                              (v-utils.files.gitignore {
-                                inherit pkgs;
-                                langs = [ "rs" ];
-                              })
-                            } ./.gitignore
-                            cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
-                            cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
-                            cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
-
-                            cp -f ${readme} ./README.md
+                cp -f ${readme} ./README.md
               '';
               env = {
                 RUST_BACKTRACE = 1;

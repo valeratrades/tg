@@ -80,31 +80,29 @@
             with pkgs;
             mkShell {
               inherit stdenv;
-              shellHook = pre-commit-check.shellHook + ''
-                mkdir -p ./.github/workflows
-                cp ${workflowContents.errors} -f ./.github/workflows/errors.yml
-                cp ${workflowContents.warnings} -f ./.github/workflows/warnings.yml
-                cp ${workflowContents.other} -f ./.github/workflows/other.yml || :
+              shellHook =
+                pre-commit-check.shellHook +
+                workflowContents.shellHook +
+                ''
+                  cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
 
-                cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
+                  ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
+                  cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
+                  cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
 
-                ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
-                cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
-                cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
+                  mkdir -p ./.cargo
+                  cp -f ${
+                    (v-utils.files.gitignore {
+                      inherit pkgs;
+                      langs = [ "rs" ];
+                    })
+                  } ./.gitignore
+                  cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
+                  cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
+                  cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
 
-                mkdir -p ./.cargo
-                cp -f ${
-                  (v-utils.files.gitignore {
-                    inherit pkgs;
-                    langs = [ "rs" ];
-                  })
-                } ./.gitignore
-                cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
-                cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
-                cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
-
-                cp -f ${readme} ./README.md
-              '';
+                  cp -f ${readme} ./README.md
+                '';
               env = {
                 RUST_BACKTRACE = 1;
                 RUST_LIB_BACKTRACE = 0;

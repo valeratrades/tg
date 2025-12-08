@@ -10,41 +10,45 @@
 `tg` tool allows you to interact with a Telegram bot to send messages, get bot information, and list channels configured in your configuration file. I use it to keep my quick notes.
 <!-- markdownlint-disable -->
 <details>
-  <summary>
-    <h3>Installation</h3>
-  </summary>
-<pre><code class="language-sh">nix build</code></pre>
+<summary>
+<h3>Installation</h3>
+</summary>
+
+```sh
+nix build
+```
+
 </details>
 <!-- markdownlint-restore -->
 
 ## Usage
-### Commands
-#### Send a Message
+#### Commands
+##### Send a Message
 Send a message to a specified channel:
 ```sh
 tg send -c channel2 "Today I'm feeling blue" "//this is still a part of the message"
 ```
 
-#### Get Bot Information
+##### Get Bot Information
 
 Retrieve information about the bot:
 ```sh
 tg bot-info
 ```
 
-#### List Channels
+##### List Channels
 List all the channels defined in the configuration file:
 ```sh
 tg list-channels
 ```
 
-#### Gen Aliases
+##### Gen Aliases
 An example of aliases to use with it. I myself gen them through this, then remove ones I don't intend to use often.
 ```sh
 tg gen-aliases
 ```
 
-### Configuration
+#### Configuration
 Create a configuration file at `~/.config/tg.toml` (or specify a different path with the `--config` option) with the following structure:
 ```toml
 [channels]
@@ -57,7 +61,7 @@ Each entry under `[channels]` represents a Telegram channel or group. Channels a
 
 Example config: ./examples/config.toml
 
-#### Env
+##### Env
 Ensure you have set the `TELEGRAM_BOT_KEY` environment variable with your Telegram bot API key:
 ```sh
 export TELEGRAM_BOT_KEY="your_bot_api_key"
@@ -84,3 +88,4 @@ export TELEGRAM_BOT_KEY="your_bot_api_key"
 for inclusion in this crate by you, as defined in the Apache-2.0 license, shall
 be licensed as above, without any additional terms or conditions.
 </sub>
+

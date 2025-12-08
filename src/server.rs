@@ -128,16 +128,25 @@ pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
 				}
 				debug!("Set xattr successfully");
 
-				let mut retry = true;
-				while retry {
-					retry = false;
+				let mut delay_secs = 1.0_f64;
+				const E: f64 = std::f64::consts::E;
+				const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+
+				loop {
 					match send_message(message.clone(), &bot_token).await {
 						Ok(_) => {
 							info!("Message sent successfully to Telegram");
+							break;
 						}
 						Err(e) => {
-							error!("Failed to send message to Telegram: {}", e);
-							//TODO!!!: keep stack of messages with failed sent, then retry sending every 100s
+							let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E; // approximate total time spent retrying
+							if total_elapsed_secs >= THIRTY_MINS_SECS {
+								error!("Failed to send message to Telegram after 30+ minutes: {}", e);
+							} else {
+								warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
+							}
+							tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+							delay_secs *= E;
 						}
 					}
 				}

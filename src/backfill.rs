@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use eyre::{Result, eyre};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
-use v_utils::{trades::Timeframe, xdg_state_file};
+use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{chat_filepath, config::AppConfig, server::format_message_append};
@@ -218,23 +218,4 @@ fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i64)]) 
 	}
 
 	Ok(())
-}
-
-/// Spawns a background task that runs backfill periodically
-pub fn spawn_periodic_backfill(config: AppConfig, bot_token: String, interval: Timeframe) -> tokio::task::JoinHandle<()> {
-	let interval_duration = interval.duration();
-	info!("Starting periodic backfill with interval: {}", interval);
-
-	tokio::spawn(async move {
-		let mut interval_timer = tokio::time::interval(interval_duration);
-
-		loop {
-			interval_timer.tick().await;
-
-			match backfill(&config, &bot_token).await {
-				Ok(()) => debug!("Periodic backfill completed successfully"),
-				Err(e) => warn!("Periodic backfill failed: {}", e),
-			}
-		}
-	})
 }

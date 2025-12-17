@@ -1,22 +1,26 @@
 use std::{
 	io::{Read, Seek, SeekFrom, Write},
 	path::PathBuf,
+	pin::{Pin, pin},
 	sync::OnceLock,
 };
 
 use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
+use futures::future::{Either, select};
+use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
 use tg::chat::TelegramDestination;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
-	net::TcpListener,
-	task::JoinSet,
+	net::{TcpListener, TcpStream},
+	time::Interval,
 };
 use tracing::{debug, error, info, instrument, warn};
+use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
-use crate::config::AppConfig;
+use crate::{backfill, config::AppConfig};
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -26,143 +30,215 @@ pub struct Message {
 	pub message: String,
 }
 
+/// Result from completing a task
+enum TaskResult {
+	/// Connection finished (closed or error)
+	ConnectionDone,
+	/// Backfill tick completed, return the interval to re-queue
+	BackfillDone(Interval),
+}
+
 /// # Panics
 /// On unsuccessful io operations
 #[instrument(skip(bot_token), fields(port = config.localhost_port))]
-pub async fn run(config: AppConfig, bot_token: String) -> Result<()> {
+pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);
 
-	let mut join_set = JoinSet::new();
-	while let Ok((mut socket, addr)) = listener.accept().await {
-		info!("Accepted connection from: {}", addr);
-		let config = config.clone();
-		let bot_token = bot_token.clone();
+	let interval_duration = backfill_interval.duration();
+	info!("Backfill interval: {}", backfill_interval);
 
-		join_set.spawn(async move {
-			let mut buf = vec![0; 1024];
+	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, AppConfig, String)> + Send>>;
+	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
-			while let Ok(n) = socket.read(&mut buf).await {
-				if n == 0 {
-					debug!("Connection closed by client");
-					return;
-				}
+	// Initial backfill task
+	let backfill_interval_timer = tokio::time::interval(interval_duration);
+	let config_clone = config.clone();
+	let token_clone = bot_token.clone();
+	futures.push(Box::pin(async move {
+		let mut interval = backfill_interval_timer;
+		interval.tick().await;
 
-				let received = String::from_utf8_lossy(&buf[0..n]);
-				debug!("Received raw message: {}", received);
-				let message: Message = match serde_json::from_str(&received) {
-					Ok(m) => m,
-					Err(e) => {
-						error!("Failed to deserialize message: {}. Raw: {}", e, received);
-						return;
-					}
-				};
+		match backfill::backfill(&config_clone, &token_clone).await {
+			Ok(()) => debug!("Backfill completed successfully"),
+			Err(e) => warn!("Backfill failed: {}", e),
+		}
 
-				if let Err(e) = socket.write_all(b"200").await {
-					error!("Failed to send acknowledgment: {}", e);
-					return;
-				}
-				debug!("Sent acknowledgment");
+		(TaskResult::BackfillDone(interval), config_clone, token_clone)
+	}));
 
-				// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
-				let destination_name = crate::config::display_destination(&message.destination, &config);
-				let chat_filepath = crate::chat_filepath(&destination_name);
-				info!("Processing message for destination '{}' to file: {}", destination_name, chat_filepath.display());
+	loop {
+		enum Event {
+			NewConnection(std::io::Result<(TcpStream, std::net::SocketAddr)>),
+			TaskCompleted(Option<(TaskResult, AppConfig, String)>),
+		}
 
-				let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
-					.ok()
-					.and_then(|file| {
-						debug!("Reading xattr from existing file");
-						file.get_xattr("user.last_changed").ok()
-					})
-					.flatten()
-					.map(|v| String::from_utf8_lossy(&v).into_owned());
-				let last_write_datetime = last_write_tag
-					.as_deref()
-					.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok())
-					.map(|dt| dt.with_timezone(&chrono::Utc));
+		let event = {
+			let accept_fut = pin!(listener.accept());
+			let task_fut = pin!(futures.next());
 
-				let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
-				debug!("Formatted message append: {:?}", message_append_repr);
-
-				let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
-					Ok(f) => {
-						debug!("Opened chat file successfully");
-						f
-					}
-					Err(e) => {
-						error!("Failed to open chat file '{}': {}", chat_filepath.display(), e);
-						return;
-					}
-				};
-
-				// Trim trailing whitespace
-				let mut file_contents = String::new();
-				if let Err(e) = file.read_to_string(&mut file_contents) {
-					error!("Failed to read file contents: {}", e);
-					return;
-				}
-				let truncate_including_pos = file_contents.trim_end().len() + 1;
-				if let Err(e) = file.set_len(truncate_including_pos as u64) {
-					error!("Failed to truncate file: {}", e);
-					return;
-				}
-				if let Err(e) = file.seek(SeekFrom::End(0)) {
-					error!("Failed to seek to end of file: {}", e);
-					return;
-				}
-
-				if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
-					error!("Failed to write message to file: {}", e);
-					return;
-				}
-				debug!("Wrote message to file");
-
-				let now_rfc3339 = Utc::now().to_rfc3339();
-				if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
-					error!("Failed to set xattr: {}", e);
-					return;
-				}
-				debug!("Set xattr successfully");
-
-				let mut delay_secs = 1.0_f64;
-				const E: f64 = std::f64::consts::E;
-				const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
-
-				loop {
-					match send_message(message.clone(), &bot_token).await {
-						Ok(_) => {
-							info!("Message sent successfully to Telegram");
-							break;
-						}
-						Err(e) => {
-							let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E; // approximate total time spent retrying
-							if total_elapsed_secs >= THIRTY_MINS_SECS {
-								error!("Failed to send message to Telegram after 30+ minutes: {}", e);
-							} else {
-								warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
-							}
-							tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-							delay_secs *= E;
-						}
-					}
-				}
+			match select(accept_fut, task_fut).await {
+				Either::Left((accept_result, _task_fut)) => Event::NewConnection(accept_result),
+				Either::Right((task_result, _accept_fut)) => Event::TaskCompleted(task_result),
 			}
-		});
-	}
+		};
 
-	info!("Server shutting down, waiting for tasks to complete");
-	while let Some(res) = join_set.join_next().await {
-		if let Err(e) = res {
-			error!("Task failed: {:?}", e);
+		match event {
+			Event::NewConnection(accept_result) => {
+				let (socket, addr) = accept_result?;
+				info!("Accepted connection from: {}", addr);
+
+				let config_clone = config.clone();
+				let token_clone = bot_token.clone();
+				futures.push(Box::pin(async move {
+					handle_connection(socket, &config_clone, &token_clone).await;
+					(TaskResult::ConnectionDone, config_clone, token_clone)
+				}));
+			}
+			Event::TaskCompleted(Some((result, config_ret, token_ret))) => match result {
+				TaskResult::ConnectionDone => {
+					debug!("Connection task completed");
+				}
+				TaskResult::BackfillDone(mut interval) => {
+					debug!("Backfill task completed, re-queuing");
+					let config_clone = config_ret;
+					let token_clone = token_ret;
+					futures.push(Box::pin(async move {
+						interval.tick().await;
+
+						match backfill::backfill(&config_clone, &token_clone).await {
+							Ok(()) => debug!("Backfill completed successfully"),
+							Err(e) => warn!("Backfill failed: {}", e),
+						}
+
+						(TaskResult::BackfillDone(interval), config_clone, token_clone)
+					}));
+				}
+			},
+			Event::TaskCompleted(None) => {
+				// FuturesUnordered is empty - shouldn't happen since backfill is always re-queued
+				warn!("All tasks completed unexpectedly");
+				break;
+			}
 		}
 	}
 
 	info!("Server stopped");
 	Ok(())
+}
+
+async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token: &str) {
+	let mut buf = vec![0; 1024];
+
+	while let Ok(n) = socket.read(&mut buf).await {
+		if n == 0 {
+			debug!("Connection closed by client");
+			return;
+		}
+
+		let received = String::from_utf8_lossy(&buf[0..n]);
+		debug!("Received raw message: {}", received);
+		let message: Message = match serde_json::from_str(&received) {
+			Ok(m) => m,
+			Err(e) => {
+				error!("Failed to deserialize message: {}. Raw: {}", e, received);
+				return;
+			}
+		};
+
+		if let Err(e) = socket.write_all(b"200").await {
+			error!("Failed to send acknowledgment: {}", e);
+			return;
+		}
+		debug!("Sent acknowledgment");
+
+		// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
+		let destination_name = crate::config::display_destination(&message.destination, config);
+		let chat_filepath = crate::chat_filepath(&destination_name);
+		info!("Processing message for destination '{}' to file: {}", destination_name, chat_filepath.display());
+
+		let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
+			.ok()
+			.and_then(|file| {
+				debug!("Reading xattr from existing file");
+				file.get_xattr("user.last_changed").ok()
+			})
+			.flatten()
+			.map(|v| String::from_utf8_lossy(&v).into_owned());
+		let last_write_datetime = last_write_tag
+			.as_deref()
+			.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok())
+			.map(|dt| dt.with_timezone(&chrono::Utc));
+
+		let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
+		debug!("Formatted message append: {:?}", message_append_repr);
+
+		let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
+			Ok(f) => {
+				debug!("Opened chat file successfully");
+				f
+			}
+			Err(e) => {
+				error!("Failed to open chat file '{}': {}", chat_filepath.display(), e);
+				return;
+			}
+		};
+
+		// Trim trailing whitespace
+		let mut file_contents = String::new();
+		if let Err(e) = file.read_to_string(&mut file_contents) {
+			error!("Failed to read file contents: {}", e);
+			return;
+		}
+		let truncate_including_pos = file_contents.trim_end().len() + 1;
+		if let Err(e) = file.set_len(truncate_including_pos as u64) {
+			error!("Failed to truncate file: {}", e);
+			return;
+		}
+		if let Err(e) = file.seek(SeekFrom::End(0)) {
+			error!("Failed to seek to end of file: {}", e);
+			return;
+		}
+
+		if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
+			error!("Failed to write message to file: {}", e);
+			return;
+		}
+		debug!("Wrote message to file");
+
+		let now_rfc3339 = Utc::now().to_rfc3339();
+		if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
+			error!("Failed to set xattr: {}", e);
+			return;
+		}
+		debug!("Set xattr successfully");
+
+		let mut delay_secs = 1.0_f64;
+		const E: f64 = std::f64::consts::E;
+		const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+
+		loop {
+			match send_message(message.clone(), bot_token).await {
+				Ok(_) => {
+					info!("Message sent successfully to Telegram");
+					break;
+				}
+				Err(e) => {
+					let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E; // approximate total time spent retrying
+					if total_elapsed_secs >= THIRTY_MINS_SECS {
+						error!("Failed to send message to Telegram after 30+ minutes: {}", e);
+					} else {
+						warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
+					}
+					tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+					delay_secs *= E;
+				}
+			}
+		}
+	}
 }
 
 #[instrument(skip(bot_token), fields(destination = ?message.destination))]

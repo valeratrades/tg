@@ -1909,6 +1909,8 @@ dependencies = [
  "config",
  "derive-new",
  "eyre",
+ "futures",
+ "futures-util",
  "insta",
  "reqwest",
  "serde",

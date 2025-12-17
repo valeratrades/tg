@@ -178,10 +178,7 @@ async fn main() -> Result<()> {
 			println!("{s}");
 		}
 		Commands::Server(args) => {
-			// Spawn periodic backfill task
-			let _backfill_handle = backfill::spawn_periodic_backfill(config.clone(), bot_token.clone(), args.backfill_interval);
-
-			server::run(config, bot_token).await?;
+			server::run(config, bot_token, args.backfill_interval).await?;
 		}
 		Commands::Backfill => {
 			backfill::backfill(&config, &bot_token).await?;

@@ -9,7 +9,11 @@ use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpStream,
 };
-use v_utils::io::{ExpandedPath, OpenMode, open_with_mode};
+use v_utils::{
+	io::{ExpandedPath, OpenMode, open_with_mode},
+	trades::Timeframe,
+};
+pub mod backfill;
 pub mod config;
 mod server;
 
@@ -38,9 +42,11 @@ enum Commands {
 	/// Gen aliases for sending to channels
 	GenAliases,
 	/// Start a telegram server, compiling messages from the configured channels into markdown log files, to be viewed with $EDITOR
-	Server,
+	Server(ServerArgs),
 	/// Open the messages file of a channel
 	Open(OpenArgs),
+	/// Backfill messages from Telegram for all configured channels
+	Backfill,
 }
 #[derive(Args, Clone, Debug)]
 struct SendArgs {
@@ -59,6 +65,13 @@ struct SendArgs {
 struct OpenArgs {
 	/// Name of the channel to open
 	channel: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+struct ServerArgs {
+	/// Interval for periodic backfill from Telegram (e.g., "1m", "5m", "1h")
+	#[arg(long, default_value = "1m")]
+	backfill_interval: Timeframe,
 }
 
 #[tokio::main]
@@ -132,7 +145,7 @@ async fn main() -> Result<()> {
 				loop {
 					match key_chars.next() {
 						Some(c) => {
-							let try_alias = format!("tg{}", c);
+							let try_alias = format!("tg{c}");
 
 							let alias_already_exists = std::process::Command::new("env")
 								.arg("sh")
@@ -164,8 +177,14 @@ async fn main() -> Result<()> {
 			s.push_str("\n\nalias tgo=\"tg open\"");
 			println!("{s}");
 		}
-		Commands::Server => {
+		Commands::Server(args) => {
+			// Spawn periodic backfill task
+			let _backfill_handle = backfill::spawn_periodic_backfill(config.clone(), bot_token.clone(), args.backfill_interval);
+
 			server::run(config, bot_token).await?;
+		}
+		Commands::Backfill => {
+			backfill::backfill(&config, &bot_token).await?;
 		}
 		Commands::Open(args) => {
 			if let Some(c) = &args.channel

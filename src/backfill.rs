@@ -19,6 +19,36 @@ use crate::{
 
 const MAX_MESSAGES_PER_FETCH: i64 = 1000;
 
+/// Download an image from Telegram and save it locally, returning the relative filename
+async fn download_telegram_image(bot_token: &str, file_id: &str, dest_name: &str, timestamp: i64) -> Result<String> {
+	let client = reqwest::Client::new();
+
+	// Get file path from Telegram
+	let url = format!("https://api.telegram.org/bot{}/getFile", bot_token);
+	let res = client.get(&url).query(&[("file_id", file_id)]).send().await?;
+	let file_response: GetFileResponse = res.json().await?;
+
+	let file_path = file_response.result.and_then(|r| r.file_path).ok_or_else(|| eyre!("No file_path in getFile response"))?;
+
+	// Download the file
+	let download_url = format!("https://api.telegram.org/file/bot{}/{}", bot_token, file_path);
+	let image_bytes = client.get(&download_url).send().await?.bytes().await?;
+
+	// Determine extension from file_path
+	let ext = std::path::Path::new(&file_path).extension().and_then(|e| e.to_str()).unwrap_or("jpg");
+
+	// Save to images subdirectory
+	let images_dir = crate::server::DATA_DIR.get().unwrap().join("images");
+	std::fs::create_dir_all(&images_dir)?;
+
+	let filename = format!("{}_{}.{}", dest_name, timestamp, ext);
+	let full_path = images_dir.join(&filename);
+	std::fs::write(&full_path, &image_bytes)?;
+
+	debug!("Downloaded image to {}", full_path.display());
+	Ok(format!("images/{}", filename))
+}
+
 /// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
 fn telegram_chat_id(id: u64) -> i64 {
 	format!("-100{}", id).parse().unwrap()
@@ -92,12 +122,33 @@ struct TelegramMessage {
 	#[serde(default)]
 	text: Option<String>,
 	#[serde(default)]
+	caption: Option<String>,
+	#[serde(default)]
+	photo: Option<Vec<PhotoSize>>,
+	#[serde(default)]
 	message_thread_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct TelegramChat {
 	id: i64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PhotoSize {
+	file_id: String,
+	width: u32,
+	height: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetFileResponse {
+	result: Option<TelegramFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+	file_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,7 +249,7 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 		info!("Processing {} new messages for {}", new_messages.len(), dest_name);
 
 		// Merge messages into the local file
-		merge_messages_to_file(&dest_name, &new_messages)?;
+		merge_messages_to_file(&dest_name, &new_messages, bot_token).await?;
 
 		// Update sync timestamp
 		if let Some(max_update_id) = new_messages.iter().map(|(_, id)| *id).max() {
@@ -235,7 +286,7 @@ async fn fetch_updates(bot_token: &str, offset: i64, limit: i64) -> Result<Vec<T
 	Ok(response.result)
 }
 
-fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i64)]) -> Result<()> {
+async fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i64)], bot_token: &str) -> Result<()> {
 	let chat_filepath = chat_filepath(dest_name);
 
 	// Read existing xattr for last write time
@@ -265,8 +316,36 @@ fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i64)]) 
 	let mut last_write = last_write_datetime;
 
 	for (msg, _) in sorted_messages {
-		if let Some(text) = &msg.text {
-			let msg_time = DateTime::from_timestamp(msg.date, 0).unwrap_or_else(Utc::now);
+		let msg_time = DateTime::from_timestamp(msg.date, 0).unwrap_or_else(Utc::now);
+
+		// Handle photo messages
+		if let Some(photos) = &msg.photo {
+			// Get the largest photo (last in array)
+			if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
+				match download_telegram_image(bot_token, &largest.file_id, dest_name, msg.date).await {
+					Ok(image_path) => {
+						// Use caption if available, otherwise just the image
+						let content = match &msg.caption {
+							Some(caption) => format!("![]({})\n{}", image_path, caption),
+							None => format!("![]({})", image_path),
+						};
+						let formatted = format_message_append(&content, last_write, msg_time);
+						file.write_all(formatted.as_bytes())?;
+						last_write = Some(msg_time);
+					}
+					Err(e) => {
+						warn!("Failed to download image: {}", e);
+						// Still include caption if present
+						if let Some(caption) = &msg.caption {
+							let formatted = format_message_append(&format!("[image failed to download]\n{}", caption), last_write, msg_time);
+							file.write_all(formatted.as_bytes())?;
+							last_write = Some(msg_time);
+						}
+					}
+				}
+			}
+		} else if let Some(text) = &msg.text {
+			// Regular text message
 			let formatted = format_message_append(text, last_write, msg_time);
 			file.write_all(formatted.as_bytes())?;
 			last_write = Some(msg_time);

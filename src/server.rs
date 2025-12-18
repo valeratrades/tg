@@ -243,16 +243,78 @@ async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token:
 	}
 }
 
+/// Extract image path from markdown image syntax: ![alt](path) or ![](path)
+fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
+	// Match ![...](...) pattern
+	let re = regex::Regex::new(r"^!\[([^\]]*)\]\(([^)]+)\)").ok()?;
+	let caps = re.captures(text.trim())?;
+	let path = caps.get(2)?.as_str().to_string();
+	// Get remaining text after the image tag as caption
+	let full_match = caps.get(0)?;
+	let remaining = text[full_match.end()..].trim();
+	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
+	Some((path, caption))
+}
+
 #[instrument(skip(bot_token), fields(destination = ?message.destination))]
 pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
 	debug!("Sending message to Telegram API");
-	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-	let mut params = vec![("text", message.message.clone())];
+	let client = reqwest::Client::new();
 	let destination = &message.destination;
+
+	// Check if message contains an image
+	if let Some((image_path, caption)) = extract_image_path(&message.message) {
+		// Resolve the image path relative to data directory
+		let full_path = DATA_DIR.get().unwrap().join(&image_path);
+
+		if full_path.exists() {
+			debug!("Sending photo from {}", full_path.display());
+			let url = format!("https://api.telegram.org/bot{}/sendPhoto", bot_token);
+
+			// Read image file
+			let image_bytes = std::fs::read(&full_path)?;
+			let filename = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("image.jpg").to_string();
+
+			// Build multipart form
+			let mut form = reqwest::multipart::Form::new().part("photo", reqwest::multipart::Part::bytes(image_bytes).file_name(filename));
+
+			// Add destination params
+			for (key, value) in destination.destination_params() {
+				form = form.text(key.to_string(), value);
+			}
+
+			// Add caption if present
+			if let Some(cap) = caption {
+				form = form.text("caption", cap);
+			}
+
+			let res = client.post(&url).multipart(form).send().await?;
+			let status = res.status();
+			let response_text = res.text().await?;
+
+			if status.is_success() {
+				debug!("Telegram API response: {}", response_text);
+				info!("Successfully sent photo to {:?}", destination);
+			} else {
+				warn!("Telegram API returned non-success status {}: {}", status, response_text);
+			}
+		} else {
+			warn!("Image file not found: {}, sending as text", full_path.display());
+			send_text_message(&client, &message.message, destination, bot_token).await?;
+		}
+	} else {
+		send_text_message(&client, &message.message, destination, bot_token).await?;
+	}
+
+	Ok(())
+}
+
+async fn send_text_message(client: &reqwest::Client, text: &str, destination: &tg::chat::TelegramDestination, bot_token: &str) -> Result<()> {
+	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+	let mut params = vec![("text", text.to_string())];
 	params.extend(destination.destination_params());
 
-	let client = reqwest::Client::new();
-	debug!("Posting to Telegram API");
+	debug!("Posting text to Telegram API");
 	let res = client.post(&url).form(&params).send().await?;
 
 	let status = res.status();

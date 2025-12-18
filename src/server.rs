@@ -187,14 +187,16 @@ async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token:
 			}
 		};
 
-		// Trim trailing whitespace
+		// Trim trailing whitespace, keeping at most one newline
 		let mut file_contents = String::new();
 		if let Err(e) = file.read_to_string(&mut file_contents) {
 			error!("Failed to read file contents: {}", e);
 			return;
 		}
-		let truncate_including_pos = file_contents.trim_end().len() + 1;
-		if let Err(e) = file.set_len(truncate_including_pos as u64) {
+		let trimmed_len = file_contents.trim_end().len();
+		// Cap at file length to avoid extending the file if it doesn't end with whitespace
+		let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
+		if let Err(e) = file.set_len(truncate_to as u64) {
 			error!("Failed to truncate file: {}", e);
 			return;
 		}

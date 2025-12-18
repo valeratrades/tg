@@ -10,10 +10,28 @@ use v_utils::macros::MyConfigPrimitives;
 
 use crate::server::DATA_DIR;
 
-#[derive(Clone, Debug, Default, MyConfigPrimitives, derive_new::new)]
+#[derive(Clone, Debug, MyConfigPrimitives, derive_new::new)]
 pub struct AppConfig {
 	pub channels: BTreeMap<String, TelegramDestination>,
 	pub localhost_port: u16,
+	#[new(default)]
+	pub max_messages_per_chat: Option<usize>,
+}
+
+impl Default for AppConfig {
+	fn default() -> Self {
+		Self {
+			channels: BTreeMap::new(),
+			localhost_port: 0,
+			max_messages_per_chat: Some(1000),
+		}
+	}
+}
+
+impl AppConfig {
+	pub fn max_messages_per_chat(&self) -> usize {
+		self.max_messages_per_chat.unwrap_or(1000)
+	}
 }
 
 #[instrument(skip(config), fields(destination = ?destination))]

@@ -338,7 +338,7 @@ async fn send_text_message(client: &reqwest::Client, text: &str, destination: &t
 #[instrument(skip(message), fields(message_len = message.len()))]
 pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
 	debug!("Formatting message append");
-	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() < now);
+	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() <= now);
 
 	let mut prefix = String::new();
 	if let Some(last_write_datetime) = last_write_datetime {

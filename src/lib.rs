@@ -1,1 +1,1 @@
-pub mod chat;
+// tg library - Telegram forum group syncing tool

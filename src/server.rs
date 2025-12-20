@@ -10,23 +10,27 @@ use eyre::Result;
 use futures::future::{Either, select};
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
-use tg::chat::TelegramDestination;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::{TcpListener, TcpStream},
 	time::Interval,
 };
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, warn};
 use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
-use crate::{backfill, config::AppConfig};
+use crate::{
+	backfill::{self, topic_filepath},
+	config::{AppConfig, TopicsMetadata, telegram_chat_id},
+};
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Message to send to a specific topic in a forum group
 #[derive(Clone, Debug, Default, Deserialize, Serialize, derive_new::new)]
 pub struct Message {
-	pub destination: TelegramDestination,
+	pub group_id: u64,
+	pub topic_id: u64,
 	pub message: String,
 }
 
@@ -40,7 +44,6 @@ enum TaskResult {
 
 /// # Panics
 /// On unsuccessful io operations
-#[instrument(skip(bot_token), fields(port = config.localhost_port))]
 pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
@@ -130,7 +133,7 @@ pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timefr
 	Ok(())
 }
 
-async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token: &str) {
+async fn handle_connection(mut socket: TcpStream, _config: &AppConfig, bot_token: &str) {
 	let mut buf = vec![0; 1024];
 
 	while let Ok(n) = socket.read(&mut buf).await {
@@ -155,10 +158,14 @@ async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token:
 		}
 		debug!("Sent acknowledgment");
 
-		// In the perfect world would store messages in db by the Destination::hash(), but for now writing directly to end repr, using name as id.
-		let destination_name = crate::config::display_destination(&message.destination, config);
-		let chat_filepath = crate::chat_filepath(&destination_name);
-		info!("Processing message for destination '{}' to file: {}", destination_name, chat_filepath.display());
+		let metadata = TopicsMetadata::load();
+		let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
+		info!(
+			"Processing message for group {} topic {} to file: {}",
+			message.group_id,
+			message.topic_id,
+			chat_filepath.display()
+		);
 
 		let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
 			.ok()
@@ -175,6 +182,14 @@ async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token:
 
 		let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
 		debug!("Formatted message append: {:?}", message_append_repr);
+
+		// Ensure the parent directory exists
+		if let Some(parent) = chat_filepath.parent() {
+			if let Err(e) = std::fs::create_dir_all(parent) {
+				error!("Failed to create directory '{}': {}", parent.display(), e);
+				return;
+			}
+		}
 
 		let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
 			Ok(f) => {
@@ -223,7 +238,7 @@ async fn handle_connection(mut socket: TcpStream, config: &AppConfig, bot_token:
 		const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
 
 		loop {
-			match send_message(message.clone(), bot_token).await {
+			match send_message(&message, bot_token).await {
 				Ok(_) => {
 					info!("Message sent successfully to Telegram");
 					break;
@@ -256,11 +271,11 @@ fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	Some((path, caption))
 }
 
-#[instrument(skip(bot_token), fields(destination = ?message.destination))]
-pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
+pub async fn send_message(message: &Message, bot_token: &str) -> Result<()> {
 	debug!("Sending message to Telegram API");
 	let client = reqwest::Client::new();
-	let destination = &message.destination;
+
+	let chat_id = telegram_chat_id(message.group_id);
 
 	// Check if message contains an image
 	if let Some((image_path, caption)) = extract_image_path(&message.message) {
@@ -276,12 +291,10 @@ pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
 			let filename = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("image.jpg").to_string();
 
 			// Build multipart form
-			let mut form = reqwest::multipart::Form::new().part("photo", reqwest::multipart::Part::bytes(image_bytes).file_name(filename));
-
-			// Add destination params
-			for (key, value) in destination.destination_params() {
-				form = form.text(key.to_string(), value);
-			}
+			let mut form = reqwest::multipart::Form::new()
+				.part("photo", reqwest::multipart::Part::bytes(image_bytes).file_name(filename))
+				.text("chat_id", chat_id.to_string())
+				.text("message_thread_id", message.topic_id.to_string());
 
 			// Add caption if present
 			if let Some(cap) = caption {
@@ -294,25 +307,26 @@ pub async fn send_message(message: Message, bot_token: &str) -> Result<()> {
 
 			if status.is_success() {
 				debug!("Telegram API response: {}", response_text);
-				info!("Successfully sent photo to {:?}", destination);
+				info!("Successfully sent photo to group {} topic {}", message.group_id, message.topic_id);
 			} else {
 				warn!("Telegram API returned non-success status {}: {}", status, response_text);
 			}
 		} else {
 			warn!("Image file not found: {}, sending as text", full_path.display());
-			send_text_message(&client, &message.message, destination, bot_token).await?;
+			send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await?;
 		}
 	} else {
-		send_text_message(&client, &message.message, destination, bot_token).await?;
+		send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await?;
 	}
 
 	Ok(())
 }
 
-async fn send_text_message(client: &reqwest::Client, text: &str, destination: &tg::chat::TelegramDestination, bot_token: &str) -> Result<()> {
+async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<()> {
 	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
-	let mut params = vec![("text", text.to_string())];
-	params.extend(destination.destination_params());
+	let chat_id = telegram_chat_id(group_id);
+
+	let params = vec![("text", text.to_string()), ("chat_id", chat_id.to_string()), ("message_thread_id", topic_id.to_string())];
 
 	debug!("Posting text to Telegram API");
 	let res = client.post(&url).form(&params).send().await?;
@@ -322,7 +336,7 @@ async fn send_text_message(client: &reqwest::Client, text: &str, destination: &t
 
 	if status.is_success() {
 		debug!("Telegram API response: {}", response_text);
-		info!("Successfully sent message to {:?}", destination);
+		info!("Successfully sent message to group {} topic {}", group_id, topic_id);
 	} else {
 		warn!("Telegram API returned non-success status {}: {}", status, response_text);
 	}
@@ -335,7 +349,6 @@ async fn send_text_message(client: &reqwest::Client, text: &str, destination: &t
 ///     >= 6 minutes && same day => append with a newline before
 ///     >= 6 minutes && different day => append with a newline before and after
 /// }
-#[instrument(skip(message), fields(message_len = message.len()))]
 pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
 	debug!("Formatting message append");
 	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() <= now);
@@ -412,36 +425,15 @@ mod tests {
 
 	#[test]
 	fn deser_message() -> Result<()> {
-		let destination_str_source = TelegramDestination::Group { id: 2244305221, thread_id: 3 };
-		let destination_str = serde_json::to_string(&destination_str_source)?;
-		let destination: TelegramDestination = serde_json::from_str(&destination_str)?;
-		let destination_reserialized = serde_json::to_string(&destination)?;
-		assert_eq!(destination_str, destination_reserialized);
-
-		let message_str = format!(r#"{{"destination":{},"message":"a message"}}"#, destination_str);
-		let message: Message = serde_json::from_str(&message_str)?;
+		let message_str = r#"{"group_id":2244305221,"topic_id":3,"message":"a message"}"#;
+		let message: Message = serde_json::from_str(message_str)?;
 		insta::assert_debug_snapshot!(message, @r###"
   Message {
-      destination: Group {
-          id: 2244305221,
-          thread_id: 3,
-      },
+      group_id: 2244305221,
+      topic_id: 3,
       message: "a message",
   }
   "###);
 		Ok(())
 	}
-
-	// that's an integration test. TODO: move
-	//#[test]
-	//fn chat_filepath() -> Result<()> {
-	//	let destination = TelegramDestination::Group { id: 2244305221, thread_id: 3 };
-	//
-	//	let mut config = AppConfig::default();
-	//	config.channels.insert("test".to_string(), destination);
-	//
-	//	let chat_filepath = crate::chat_filepath(&destination.display(&config));
-	//	insta::assert_debug_snapshot!(chat_filepath, @r###""/home/v/tg/test.md""###);
-	//	Ok(())
-	//}
 }

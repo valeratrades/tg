@@ -12,8 +12,7 @@ use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{
-	chat_filepath,
-	config::{AppConfig, TelegramDestination},
+	config::{AppConfig, TopicsMetadata, extract_group_id},
 	server::format_message_append,
 };
 
@@ -49,33 +48,10 @@ async fn download_telegram_image(bot_token: &str, file_id: &str, dest_name: &str
 	Ok(format!("images/{}", filename))
 }
 
-/// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
-fn telegram_chat_id(id: u64) -> i64 {
-	format!("-100{}", id).parse().unwrap()
-}
-
-/// Check if a message matches a configured destination
-fn message_matches_destination(msg: &TelegramMessage, dest: &TelegramDestination) -> bool {
-	match dest {
-		TelegramDestination::ChannelExactUid(id) => {
-			let full_id = telegram_chat_id(*id);
-			msg.chat.id == full_id || msg.chat.id == *id as i64
-		}
-		TelegramDestination::ChannelUsername(_) => {
-			// Can't match usernames to chat IDs without additional API call
-			false
-		}
-		TelegramDestination::Group { id, thread_id } => {
-			let full_id = telegram_chat_id(*id);
-			(msg.chat.id == full_id || msg.chat.id == *id as i64) && msg.message_thread_id == Some(*thread_id as i64)
-		}
-	}
-}
-
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SyncTimestamps {
-	/// Maps channel name -> last synced update_id
-	pub channels: BTreeMap<String, i64>,
+	/// Maps "group_id/topic_id" -> last synced update_id
+	pub topics: BTreeMap<String, i64>,
 }
 
 impl SyncTimestamps {
@@ -160,15 +136,27 @@ struct GetUpdatesResponse {
 	description: Option<String>,
 }
 
-/// Run a single backfill operation for all configured channels
+/// A discovered topic destination
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TopicDestination {
+	group_id: u64,
+	topic_id: u64,
+}
+
+impl TopicDestination {
+	fn key(&self) -> String {
+		format!("{}/{}", self.group_id, self.topic_id)
+	}
+}
+
+/// Run a single backfill operation for all configured forum groups
 pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 	let mut sync_timestamps = SyncTimestamps::load();
-	info!("Starting backfill, loaded sync timestamps: {:?}", sync_timestamps.channels.keys().collect::<Vec<_>>());
+	let mut topics_metadata = TopicsMetadata::load();
+	info!("Starting backfill, loaded sync timestamps for {} topics", sync_timestamps.topics.len());
 
-	// Find the minimum offset across all channels (or 0 if none)
-	// Add 1 because Telegram's offset returns updates with update_id >= offset,
-	// and we've already processed up to the stored offset
-	let min_offset = sync_timestamps.channels.values().copied().min().unwrap_or(-1) + 1;
+	// Find the minimum offset across all topics (or 0 if none)
+	let min_offset = sync_timestamps.topics.values().copied().min().unwrap_or(-1) + 1;
 
 	// Fetch updates from Telegram with pagination
 	let mut all_updates = Vec::new();
@@ -201,59 +189,79 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 
 	info!("Total updates fetched: {}", all_updates.len());
 
-	// Group updates by destination
-	let mut updates_by_dest: BTreeMap<String, Vec<(TelegramMessage, i64)>> = BTreeMap::new();
+	// Group updates by topic destination
+	let mut updates_by_topic: BTreeMap<String, Vec<(TelegramMessage, i64)>> = BTreeMap::new();
 
 	for update in all_updates {
 		let msg = update.message.or(update.channel_post);
 		if let Some(msg) = msg {
-			// Try to match this message to a configured channel
-			let mut matched = false;
-			for (name, dest) in &config.channels {
-				if message_matches_destination(&msg, dest) {
-					debug!("Message from chat {} matched channel '{}' (dest: {:?})", msg.chat.id, name, dest);
-					updates_by_dest.entry(name.clone()).or_default().push((msg.clone(), update.update_id));
-					matched = true;
-					break;
+			// Extract group_id from chat.id
+			let group_id = match extract_group_id(msg.chat.id) {
+				Some(id) => id,
+				None => {
+					debug!("Could not extract group_id from chat_id={}", msg.chat.id);
+					continue;
 				}
+			};
+
+			// Check if this group is in our configured forum_groups
+			if !config.forum_groups.contains(&group_id) {
+				debug!("Message from unconfigured group {}, skipping", group_id);
+				continue;
 			}
 
-			if !matched {
-				debug!("Unmatched message from chat_id={}, thread_id={:?}", msg.chat.id, msg.message_thread_id);
-			}
+			// Get topic_id (default to 1 for General topic if not specified)
+			let topic_id = msg.message_thread_id.unwrap_or(1) as u64;
+
+			let dest = TopicDestination { group_id, topic_id };
+			let key = dest.key();
+
+			// Register this topic in metadata
+			topics_metadata.ensure_topic(group_id, topic_id);
+
+			debug!("Message from group {} topic {} matched", group_id, topic_id);
+			updates_by_topic.entry(key).or_default().push((msg.clone(), update.update_id));
 		}
 	}
 
-	// Process each destination
-	for (dest_name, messages) in updates_by_dest {
-		let last_synced = sync_timestamps.channels.get(&dest_name).copied().unwrap_or(0);
+	// Save updated topics metadata
+	topics_metadata.save()?;
+
+	// Process each topic
+	for (topic_key, messages) in updates_by_topic {
+		let last_synced = sync_timestamps.topics.get(&topic_key).copied().unwrap_or(0);
 
 		// Filter to only new messages
 		let mut new_messages: Vec<_> = messages.into_iter().filter(|(_, update_id)| *update_id > last_synced).collect();
 
 		if new_messages.is_empty() {
-			debug!("No new messages for {}", dest_name);
+			debug!("No new messages for {}", topic_key);
 			continue;
 		}
 
-		// Limit to most recent max_messages_per_chat messages per chat
+		// Limit to most recent max_messages_per_chat messages per topic
 		let max_per_chat = config.max_messages_per_chat();
 		if new_messages.len() > max_per_chat {
 			// Sort by update_id and keep the most recent
 			new_messages.sort_by_key(|(_, update_id)| *update_id);
 			let skip = new_messages.len() - max_per_chat;
 			new_messages = new_messages.into_iter().skip(skip).collect();
-			info!("Limiting {} to {} most recent messages (skipped {})", dest_name, max_per_chat, skip);
+			info!("Limiting {} to {} most recent messages (skipped {})", topic_key, max_per_chat, skip);
 		}
 
-		info!("Processing {} new messages for {}", new_messages.len(), dest_name);
+		info!("Processing {} new messages for {}", new_messages.len(), topic_key);
+
+		// Parse topic_key to get group_id and topic_id
+		let parts: Vec<&str> = topic_key.split('/').collect();
+		let group_id: u64 = parts[0].parse().unwrap();
+		let topic_id: u64 = parts[1].parse().unwrap();
 
 		// Merge messages into the local file
-		merge_messages_to_file(&dest_name, &new_messages, bot_token).await?;
+		merge_messages_to_file(group_id, topic_id, &new_messages, bot_token, &topics_metadata).await?;
 
 		// Update sync timestamp
 		if let Some(max_update_id) = new_messages.iter().map(|(_, id)| *id).max() {
-			sync_timestamps.channels.insert(dest_name, max_update_id);
+			sync_timestamps.topics.insert(topic_key, max_update_id);
 		}
 	}
 
@@ -286,8 +294,21 @@ async fn fetch_updates(bot_token: &str, offset: i64, limit: i64) -> Result<Vec<T
 	Ok(response.result)
 }
 
-async fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i64)], bot_token: &str) -> Result<()> {
-	let chat_filepath = chat_filepath(dest_name);
+/// Get the file path for a topic
+pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+	let group_name = metadata.group_name(group_id);
+	let topic_name = metadata.topic_name(group_id, topic_id);
+
+	let group_dir = data_dir.join(&group_name);
+	std::fs::create_dir_all(&group_dir).ok();
+
+	group_dir.join(format!("{}.md", topic_name))
+}
+
+async fn merge_messages_to_file(group_id: u64, topic_id: u64, messages: &[(TelegramMessage, i64)], bot_token: &str, metadata: &TopicsMetadata) -> Result<()> {
+	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
+	let dest_name = format!("{}_{}", group_id, topic_id);
 
 	// Read existing xattr for last write time
 	let last_write_datetime: Option<DateTime<Utc>> = std::fs::File::open(&chat_filepath)
@@ -322,7 +343,7 @@ async fn merge_messages_to_file(dest_name: &str, messages: &[(TelegramMessage, i
 		if let Some(photos) = &msg.photo {
 			// Get the largest photo (last in array)
 			if let Some(largest) = photos.iter().max_by_key(|p| p.width * p.height) {
-				match download_telegram_image(bot_token, &largest.file_id, dest_name, msg.date).await {
+				match download_telegram_image(bot_token, &largest.file_id, &dest_name, msg.date).await {
 					Ok(image_path) => {
 						// Use caption if available, otherwise just the image
 						let content = match &msg.caption {

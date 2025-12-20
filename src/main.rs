@@ -55,8 +55,6 @@ enum Commands {
 	Open(OpenArgs),
 	/// Backfill messages from Telegram for all configured forum groups
 	Backfill,
-	/// Rename a topic or group in the metadata
-	Rename(RenameArgs),
 	/// List all discovered topics
 	List,
 }
@@ -80,14 +78,6 @@ struct SendArgs {
 struct OpenArgs {
 	/// Pattern to match topic name (uses fzf if multiple matches)
 	pattern: Option<String>,
-}
-
-#[derive(Args, Clone, Debug)]
-struct RenameArgs {
-	/// Pattern to select file to rename
-	pattern: String,
-	/// New name
-	new_name: String,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -139,9 +129,6 @@ async fn main() -> Result<()> {
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
 			open_with_mode(&path, OpenMode::Normal)?;
-		}
-		Commands::Rename(args) => {
-			rename_topic(&args.pattern, &args.new_name)?;
 		}
 		Commands::List => {
 			list_topics()?;
@@ -340,53 +327,6 @@ fn resolve_topic_path(pattern: Option<&str>) -> Result<std::path::PathBuf> {
 			}
 		}
 	}
-}
-
-/// Rename a topic or group in the metadata
-fn rename_topic(pattern: &str, new_name: &str) -> Result<()> {
-	let path = resolve_topic_path(Some(pattern))?;
-	let mut metadata = TopicsMetadata::load();
-	let data_dir = crate::server::DATA_DIR.get().unwrap();
-
-	// Get relative path
-	let rel_path = path.strip_prefix(data_dir)?;
-	let components: Vec<_> = rel_path.components().collect();
-
-	if components.len() != 2 {
-		bail!("Invalid path format");
-	}
-
-	let group_name = components[0].as_os_str().to_string_lossy();
-	let topic_filename = components[1].as_os_str().to_string_lossy();
-	let topic_name = topic_filename.strip_suffix(".md").unwrap_or(&topic_filename);
-
-	// Find the group_id
-	let group_id = metadata
-		.groups
-		.iter()
-		.find(|(_, g)| g.name.as_deref() == Some(&*group_name))
-		.map(|(id, _)| *id)
-		.or_else(|| group_name.strip_prefix("group_").and_then(|s| s.parse().ok()))
-		.ok_or_else(|| eyre!("Could not find group for '{}'", group_name))?;
-
-	// Find the topic_id
-	let topic_id = metadata
-		.groups
-		.get(&group_id)
-		.and_then(|g| g.topics.iter().find(|(_, name)| *name == topic_name).map(|(id, _)| *id))
-		.or_else(|| topic_name.strip_prefix("topic_").and_then(|s| s.parse().ok()))
-		.ok_or_else(|| eyre!("Could not find topic '{}' in group", topic_name))?;
-
-	// Update the metadata
-	metadata.set_topic_name(group_id, topic_id, new_name.to_string());
-	metadata.save()?;
-
-	// Rename the actual file
-	let new_path = path.parent().unwrap().join(format!("{}.md", new_name));
-	std::fs::rename(&path, &new_path)?;
-
-	println!("Renamed {} -> {}", path.display(), new_path.display());
-	Ok(())
 }
 
 /// List all discovered topics

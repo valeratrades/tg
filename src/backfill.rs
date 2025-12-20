@@ -18,6 +18,16 @@ use crate::{
 
 const MAX_MESSAGES_PER_FETCH: i64 = 1000;
 
+/// Sanitize topic name for use as filename: lowercase, replace spaces with underscores
+fn sanitize_topic_name(name: &str) -> String {
+	name.to_lowercase()
+		.chars()
+		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+		.collect::<String>()
+		.trim_matches('_')
+		.to_string()
+}
+
 /// Download an image from Telegram and save it locally, returning the relative filename
 async fn download_telegram_image(bot_token: &str, file_id: &str, dest_name: &str, timestamp: i64) -> Result<String> {
 	let client = reqwest::Client::new();
@@ -103,6 +113,21 @@ struct TelegramMessage {
 	photo: Option<Vec<PhotoSize>>,
 	#[serde(default)]
 	message_thread_id: Option<i64>,
+	#[serde(default)]
+	forum_topic_created: Option<ForumTopicCreated>,
+	#[serde(default)]
+	forum_topic_edited: Option<ForumTopicEdited>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForumTopicCreated {
+	name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct ForumTopicEdited {
+	#[serde(default)]
+	name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -216,8 +241,19 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 			let dest = TopicDestination { group_id, topic_id };
 			let key = dest.key();
 
-			// Register this topic in metadata
-			topics_metadata.ensure_topic(group_id, topic_id);
+			// Extract topic name from service messages if available
+			if let Some(created) = &msg.forum_topic_created {
+				let name = sanitize_topic_name(&created.name);
+				topics_metadata.set_topic_name(group_id, topic_id, name);
+			} else if let Some(edited) = &msg.forum_topic_edited {
+				if let Some(name) = &edited.name {
+					let name = sanitize_topic_name(name);
+					topics_metadata.set_topic_name(group_id, topic_id, name);
+				}
+			} else {
+				// Only create default name if topic doesn't exist yet
+				topics_metadata.ensure_topic(group_id, topic_id);
+			}
 
 			debug!("Message from group {} topic {} matched", group_id, topic_id);
 			updates_by_topic.entry(key).or_default().push((msg.clone(), update.update_id));
@@ -379,4 +415,40 @@ async fn merge_messages_to_file(group_id: u64, topic_id: u64, messages: &[(Teleg
 	}
 
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_sanitize_topic_name() {
+		// Basic lowercase
+		assert_eq!(sanitize_topic_name("Journal"), "journal");
+		assert_eq!(sanitize_topic_name("ALERTS"), "alerts");
+
+		// Spaces become underscores
+		assert_eq!(sanitize_topic_name("My Topic"), "my_topic");
+		assert_eq!(sanitize_topic_name("Work Notes"), "work_notes");
+
+		// Special characters become underscores
+		assert_eq!(sanitize_topic_name("alerts!"), "alerts");
+		assert_eq!(sanitize_topic_name("topic/name"), "topic_name");
+		assert_eq!(sanitize_topic_name("topic:name"), "topic_name");
+
+		// Emojis are stripped
+		assert_eq!(sanitize_topic_name("🔥 Hot Takes"), "hot_takes");
+		assert_eq!(sanitize_topic_name("📝 Notes"), "notes");
+
+		// Hyphens and underscores preserved
+		assert_eq!(sanitize_topic_name("my-topic"), "my-topic");
+		assert_eq!(sanitize_topic_name("my_topic"), "my_topic");
+
+		// Consecutive special chars collapse
+		assert_eq!(sanitize_topic_name("a  b"), "a__b");
+
+		// Leading/trailing underscores trimmed
+		assert_eq!(sanitize_topic_name("  topic  "), "topic");
+		assert_eq!(sanitize_topic_name("!!!topic!!!"), "topic");
+	}
 }

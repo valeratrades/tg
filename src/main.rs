@@ -18,9 +18,9 @@ use v_utils::{
 
 use crate::config::{AppConfig, SettingsFlags, TopicsMetadata};
 
-pub mod backfill;
 pub mod config;
 mod mtproto;
+pub mod pull;
 mod server;
 mod shell_init;
 
@@ -55,8 +55,8 @@ enum Commands {
 	/// tg open journal   # open if unique, else fzf
 	/// ```
 	Open(OpenArgs),
-	/// Backfill messages from Telegram for all configured forum groups
-	Backfill,
+	/// Pull messages from Telegram for all configured forum groups
+	Pull,
 	/// List all discovered topics
 	List,
 	/// Aggregate TODOs from all topics into todos.md
@@ -88,9 +88,9 @@ struct OpenArgs {
 
 #[derive(Args, Clone, Debug)]
 struct ServerArgs {
-	/// Interval for periodic backfill from Telegram (e.g., "1m", "5m", "1h")
+	/// Interval for periodic pull from Telegram (e.g., "1m", "5m", "1h")
 	#[arg(long, default_value = "1m")]
-	backfill_interval: Timeframe,
+	pull_interval: Timeframe,
 }
 
 #[tokio::main]
@@ -129,10 +129,10 @@ async fn main() -> Result<()> {
 			println!("{pretty_json}");
 		}
 		Commands::Server(args) => {
-			server::run(config, bot_token, args.backfill_interval).await?;
+			server::run(config, bot_token, args.pull_interval).await?;
 		}
-		Commands::Backfill => {
-			backfill::backfill(&config, &bot_token).await?;
+		Commands::Pull => {
+			pull::pull(&config, &bot_token).await?;
 		}
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
@@ -383,7 +383,7 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<()> {
 	// Iterate over all known topics from metadata
 	for (group_id, group) in &metadata.groups {
 		for (topic_id, topic_name) in &group.topics {
-			let file_path = backfill::topic_filepath(*group_id, *topic_id, &metadata);
+			let file_path = pull::topic_filepath(*group_id, *topic_id, &metadata);
 			let source = format!("{}/{}.md", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)), topic_name);
 
 			let mut contents = String::new();

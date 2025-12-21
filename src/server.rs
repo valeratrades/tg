@@ -20,8 +20,8 @@ use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
 use crate::{
-	backfill::{self, topic_filepath},
 	config::{AppConfig, TopicsMetadata, telegram_chat_id},
+	pull::{self, topic_filepath},
 };
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -38,44 +38,44 @@ pub struct Message {
 enum TaskResult {
 	/// Connection finished (closed or error)
 	ConnectionDone,
-	/// Backfill tick completed, return the interval to re-queue
-	BackfillDone(Interval),
+	/// Pull tick completed, return the interval to re-queue
+	PullDone(Interval),
 }
 
 /// # Panics
 /// On unsuccessful io operations
-pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timeframe) -> Result<()> {
+pub async fn run(config: AppConfig, bot_token: String, pull_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
 
 	// Discover forum topics and create topic files at startup
 	info!("Discovering forum topics for configured groups...");
-	backfill::discover_and_create_topic_files(&config, &bot_token).await?;
+	pull::discover_and_create_topic_files(&config, &bot_token).await?;
 
 	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);
 
-	let interval_duration = backfill_interval.duration();
-	info!("Backfill interval: {}", backfill_interval);
+	let interval_duration = pull_interval.duration();
+	info!("Pull interval: {}", pull_interval);
 
 	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, AppConfig, String)> + Send>>;
 	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
-	// Initial backfill task
-	let backfill_interval_timer = tokio::time::interval(interval_duration);
+	// Initial pull task
+	let pull_interval_timer = tokio::time::interval(interval_duration);
 	let config_clone = config.clone();
 	let token_clone = bot_token.clone();
 	futures.push(Box::pin(async move {
-		let mut interval = backfill_interval_timer;
+		let mut interval = pull_interval_timer;
 		interval.tick().await;
 
-		match backfill::backfill(&config_clone, &token_clone).await {
-			Ok(()) => debug!("Backfill completed successfully"),
-			Err(e) => warn!("Backfill failed: {}", e),
+		match pull::pull(&config_clone, &token_clone).await {
+			Ok(()) => debug!("Pull completed successfully"),
+			Err(e) => warn!("Pull failed: {}", e),
 		}
 
-		(TaskResult::BackfillDone(interval), config_clone, token_clone)
+		(TaskResult::PullDone(interval), config_clone, token_clone)
 	}));
 
 	loop {
@@ -110,24 +110,24 @@ pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timefr
 				TaskResult::ConnectionDone => {
 					debug!("Connection task completed");
 				}
-				TaskResult::BackfillDone(mut interval) => {
-					debug!("Backfill task completed, re-queuing");
+				TaskResult::PullDone(mut interval) => {
+					debug!("Pull task completed, re-queuing");
 					let config_clone = config_ret;
 					let token_clone = token_ret;
 					futures.push(Box::pin(async move {
 						interval.tick().await;
 
-						match backfill::backfill(&config_clone, &token_clone).await {
-							Ok(()) => debug!("Backfill completed successfully"),
-							Err(e) => warn!("Backfill failed: {}", e),
+						match pull::pull(&config_clone, &token_clone).await {
+							Ok(()) => debug!("Pull completed successfully"),
+							Err(e) => warn!("Pull failed: {}", e),
 						}
 
-						(TaskResult::BackfillDone(interval), config_clone, token_clone)
+						(TaskResult::PullDone(interval), config_clone, token_clone)
 					}));
 				}
 			},
 			Event::TaskCompleted(None) => {
-				// FuturesUnordered is empty - shouldn't happen since backfill is always re-queued
+				// FuturesUnordered is empty - shouldn't happen since pull is always re-queued
 				warn!("All tasks completed unexpectedly");
 				break;
 			}

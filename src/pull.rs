@@ -237,9 +237,9 @@ pub async fn discover_and_create_topic_files(config: &AppConfig, bot_token: &str
 	// Create topic files for all discovered topics
 	create_topic_files(&topics_metadata)?;
 
-	// Run backfill to sync messages
-	info!("Running backfill to sync messages...");
-	backfill(config, bot_token).await?;
+	// Run pull to sync messages
+	info!("Running pull to sync messages...");
+	pull(config, bot_token).await?;
 
 	Ok(())
 }
@@ -272,11 +272,11 @@ pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
 	Ok(())
 }
 
-/// Run a single backfill operation for all configured forum groups
-pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
+/// Run a single pull operation for all configured forum groups
+pub async fn pull(config: &AppConfig, bot_token: &str) -> Result<()> {
 	let mut sync_timestamps = SyncTimestamps::load();
 	let mut topics_metadata = TopicsMetadata::load();
-	info!("Starting backfill, loaded sync timestamps for {} topics", sync_timestamps.topics.len());
+	info!("Starting pull, loaded sync timestamps for {} topics", sync_timestamps.topics.len());
 
 	// Find the minimum offset across all topics (or 0 if none)
 	let min_offset = sync_timestamps.topics.values().copied().min().unwrap_or(-1) + 1;
@@ -401,7 +401,7 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 
 	// Save updated timestamps
 	sync_timestamps.save()?;
-	info!("Backfill complete, saved sync timestamps");
+	info!("Pull complete, saved sync timestamps");
 
 	Ok(())
 }

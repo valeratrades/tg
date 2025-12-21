@@ -59,8 +59,9 @@ enum Commands {
 	Pull,
 	/// List all discovered topics
 	List,
-	/// Aggregate TODOs from all topics into todos.md
-	Todos,
+	/// Aggregate TODOs from all topics
+	#[command(subcommand)]
+	Todos(TodosCommands),
 	/// Output shell initialization (aliases and completions)
 	ShellInit(shell_init::ShellInitArgs),
 }
@@ -91,6 +92,14 @@ struct ServerArgs {
 	/// Interval for periodic pull from Telegram (e.g., "1m", "5m", "1h")
 	#[arg(long, default_value = "1m")]
 	pull_interval: Timeframe,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum TodosCommands {
+	/// Compile TODOs from all topics into todos.md
+	Compile,
+	/// Compile TODOs and open todos.md with $EDITOR
+	Open,
 }
 
 #[tokio::main]
@@ -141,9 +150,15 @@ async fn main() -> Result<()> {
 		Commands::List => {
 			list_topics()?;
 		}
-		Commands::Todos => {
-			aggregate_todos(&config)?;
-		}
+		Commands::Todos(cmd) => match cmd {
+			TodosCommands::Compile => {
+				aggregate_todos(&config)?;
+			}
+			TodosCommands::Open => {
+				let path = aggregate_todos(&config)?;
+				open_with_mode(&path, OpenMode::Normal)?;
+			}
+		},
 		Commands::ShellInit(args) => {
 			shell_init::output(args);
 		}
@@ -366,8 +381,8 @@ struct TodoItem {
 	date: Option<chrono::NaiveDate>,
 }
 
-/// Aggregate TODOs from all topic files into todos.md
-fn aggregate_todos(config: &config::AppConfig) -> Result<()> {
+/// Aggregate TODOs from all topic files into todos.md, returning the path
+fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 	use std::io::Read as _;
 
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
@@ -484,5 +499,5 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<()> {
 	std::fs::write(&todos_path, &output)?;
 	println!("Wrote {} TODOs to {}", todos.len(), todos_path.display());
 
-	Ok(())
+	Ok(todos_path)
 }

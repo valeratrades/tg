@@ -22,17 +22,8 @@ impl Shell {
 		format!(
 			r#"
 # {EXE_NAME} aliases
-alias tga="{EXE_NAME} send alerts"
-alias tgf="{EXE_NAME} send far-fetched"
-alias tgg="{EXE_NAME} send general"
-alias tgj="{EXE_NAME} send journal"
-alias tgl="{EXE_NAME} send learning"
-alias tgm="{EXE_NAME} send math"
-alias tgp="{EXE_NAME} send papers"
-alias tgt="{EXE_NAME} send tooling"
-alias tgr="{EXE_NAME} send trading"
-alias tgv="{EXE_NAME} send videos"
-alias tgw="{EXE_NAME} send work"
+alias tga="{EXE_NAME} send alerts >/dev/null"
+alias tgg="{EXE_NAME} send general >/dev/null"
 alias tgo="{EXE_NAME} open"
 "#
 		)

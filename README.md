@@ -23,48 +23,87 @@ nix build
 
 ## Usage
 #### Commands
-##### Send a Message
-Send a message to a specified channel:
+
+##### Server
+Start a background server that continuously syncs messages from configured forum groups:
 ```sh
-tg send -c channel2 "Today I'm feeling blue" "//this is still a part of the message"
+tg server                    # default 1m pull interval
+tg server --pull-interval 5m # custom interval
 ```
 
-##### Get Bot Information
+The server:
+- Discovers all topics in configured forum groups at startup
+- Pulls message history via MTProto
+- Syncs new messages on the configured interval
+- Creates markdown files in `~/.local/share/tg/<group_name>/`
 
+Note: New topics created after server start won't appear until restart.
+
+##### Pull
+One-shot pull of messages from all configured forum groups:
+```sh
+tg pull
+```
+
+##### Open
+Open a topic file in `$EDITOR` (uses fzf for pattern matching):
+```sh
+tg open           # fzf over all topics
+tg open journal   # open if unique match, else fzf
+```
+
+##### Send
+Send a message to a topic:
+```sh
+tg send journal "Today I'm feeling blue"
+tg send -g 2244305221 -t 7 "direct by IDs"
+```
+
+##### List
+List all discovered topics:
+```sh
+tg list
+```
+
+##### Todos
+Aggregate TODOs from all topic files:
+```sh
+tg todos
+```
+
+##### Bot Info
 Retrieve information about the bot:
 ```sh
 tg bot-info
 ```
 
-##### List Channels
-List all the channels defined in the configuration file:
-```sh
-tg list-channels
-```
-
-##### Gen Aliases
-An example of aliases to use with it. I myself gen them through this, then remove ones I don't intend to use often.
-```sh
-tg gen-aliases
-```
-
 #### Configuration
-Create a configuration file at `~/.config/tg.toml` (or specify a different path with the `--config` option) with the following structure:
+Create a configuration file at `~/.config/tg.toml`:
 ```toml
-[channels]
-channel1 = "1234305221"
-channel2 = "-1001234305221"
-group_and_topic = "1234305221/7"
+localhost_port = 59753
+max_messages_per_chat = 1000
+
+# MTProto credentials (required for pull/server)
+# Get these from https://my.telegram.org/
+api_id = 12345
+api_hash = "your_api_hash"  # or use TELEGRAM_API_HASH env var
+phone = "+1234567890"       # or use PHONE_NUMBER_FR env var
+username = "@yourusername"  # for session file naming
+
+[groups]
+personal = "-1002244305221"        # forum group
+work = "-1002244305221/3"          # specific topic in group
 ```
 
-Each entry under `[channels]` represents a Telegram channel or group. Channels are specified by their ID, and groups are specified by their ID followed by a thread ID separated by a `/`.
+Groups are specified by chat ID (with -100 prefix for supergroups). Append `/topic_id` to target a specific topic.
 
 Example config: ./examples/config.toml
 
-##### Env
-Ensure you have set the `TELEGRAM_BOT_KEY` environment variable with your Telegram bot API key:
+##### Environment Variables
 ```sh
-export TELEGRAM_BOT_KEY="your_bot_api_key"
+export TELEGRAM_MAIN_BOT_TOKEN="your_bot_token"  # for send/bot-info
+export TELEGRAM_API_HASH="your_api_hash"         # alternative to config
+export PHONE_NUMBER_FR="+1234567890"             # alternative to config
 ```
 
 

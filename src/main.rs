@@ -113,8 +113,6 @@ async fn main() -> Result<()> {
 
 			let mut response = [0u8; 3];
 			stream.read_exact(&mut response).await?;
-
-			println!("Sent to {}:{} -> {}", group_id, topic_id, msg_text);
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");

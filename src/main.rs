@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
 	config::init_data_dir();
 	let bot_token = match cli.token {
 		Some(t) => t,
-		None => std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set"),
+		None => std::env::var("TELEGRAM_MAIN_BOT_TOKEN").expect("TELEGRAM_MAIN_BOT_TOKEN not set"),
 	};
 
 	match cli.command {

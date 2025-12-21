@@ -1,9 +1,9 @@
 use std::{
 	io::Write as IoWrite,
-	path::Path,
 	process::{Command, Stdio},
 };
 
+use chrono::Datelike;
 use clap::{Args, Parser, Subcommand};
 use eyre::{Result, bail, eyre};
 use server::Message;
@@ -57,6 +57,8 @@ enum Commands {
 	Backfill,
 	/// List all discovered topics
 	List,
+	/// Aggregate TODOs from all topics into todos.md
+	Todos,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -99,17 +101,20 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			let (group_id, topic_id) = resolve_send_destination(&args)?;
+			let (group_id, topic_id) = resolve_send_destination(&args, &config)?;
+			let msg_text = args.message.join(" ");
 
-			let message = Message::new(group_id, topic_id, args.message.join(" "));
-			let addr = format!("127.0.0.1:{}", config.localhost_port);
-			let mut stream = TcpStream::connect(addr).await?;
+			let message = Message::new(group_id, topic_id, msg_text.clone());
+			let addr = format!("127.0.0.1:{}", config.localhost_port());
+			let mut stream = TcpStream::connect(&addr).await?;
 
 			let json = serde_json::to_string(&message)?;
 			stream.write_all(json.as_bytes()).await?;
 
 			let mut response = [0u8; 3];
 			stream.read_exact(&mut response).await?;
+
+			println!("Sent to {}:{} -> {}", group_id, topic_id, msg_text);
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
@@ -133,68 +138,64 @@ async fn main() -> Result<()> {
 		Commands::List => {
 			list_topics()?;
 		}
+		Commands::Todos => {
+			aggregate_todos(&config)?;
+		}
 	};
 
 	Ok(())
 }
 
-/// Resolve send destination from args
-fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
+/// Resolve send destination from args using config channels
+fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Result<(u64, u64)> {
 	// If direct IDs are provided, use them
 	if let Some(group_id) = args.group_id {
-		let topic_id = args.topic_id.unwrap_or(1); // Default to General topic
+		let topic_id = args.topic_id.unwrap_or(1);
 		return Ok((group_id, topic_id));
 	}
 
-	// Otherwise, resolve from pattern
-	let path = resolve_topic_path(args.topic.as_deref())?;
+	// Resolve from channel name in config
+	let name = args.topic.as_deref().ok_or_else(|| eyre!("Channel name required"))?;
 
-	// Parse group_id and topic_id from the file path
-	parse_ids_from_path(&path)
-}
-
-/// Parse group_id and topic_id from a topic file path
-fn parse_ids_from_path(path: &Path) -> Result<(u64, u64)> {
-	let metadata = TopicsMetadata::load();
-	let data_dir = crate::server::DATA_DIR.get().unwrap();
-
-	// Get relative path from data_dir
-	let rel_path = path.strip_prefix(data_dir).map_err(|_| eyre!("Path not in data directory"))?;
-
-	// Expected format: {group_name}/{topic_name}.md
-	let components: Vec<_> = rel_path.components().collect();
-	if components.len() != 2 {
-		bail!("Invalid path format, expected group/topic.md");
+	// Try exact match first
+	if let Some((group_id, topic_id)) = config.resolve_channel(name) {
+		return Ok((group_id, topic_id));
 	}
 
-	let group_name = components[0].as_os_str().to_string_lossy();
-	let topic_filename = components[1].as_os_str().to_string_lossy();
-	let topic_name = topic_filename.strip_suffix(".md").unwrap_or(&topic_filename);
+	// Try fuzzy match
+	let channels = config.channels.as_ref().ok_or_else(|| eyre!("No channels configured"))?;
+	let name_lower = name.to_lowercase();
+	let matches: Vec<_> = channels.iter().filter(|(k, _)| k.to_lowercase().contains(&name_lower)).collect();
 
-	// Find group_id from group_name
-	let group_id = metadata
-		.groups
-		.iter()
-		.find(|(_, g)| g.name.as_deref() == Some(&*group_name) || format!("group_{}", **&metadata.groups.keys().next().unwrap()) == *group_name)
-		.map(|(id, _)| *id)
-		.or_else(|| {
-			// Try parsing as group_{id}
-			group_name.strip_prefix("group_").and_then(|s| s.parse().ok())
-		})
-		.ok_or_else(|| eyre!("Could not find group_id for '{}'", group_name))?;
+	match matches.len() {
+		0 => Err(eyre!("No channel found matching: {}", name)),
+		1 => {
+			let (channel_name, dest) = matches[0];
+			eprintln!("Found: {}", channel_name);
+			config::parse_channel_destination(dest).ok_or_else(|| eyre!("Invalid channel destination: {}", dest))
+		}
+		_ => {
+			// Multiple matches - use fzf
+			let input: String = matches.iter().map(|(k, v)| format!("{} -> {}", k, v)).collect::<Vec<_>>().join("\n");
 
-	// Find topic_id from topic_name
-	let topic_id = metadata
-		.groups
-		.get(&group_id)
-		.and_then(|g| g.topics.iter().find(|(_, name)| *name == topic_name).map(|(id, _)| *id))
-		.or_else(|| {
-			// Try parsing as topic_{id}
-			topic_name.strip_prefix("topic_").and_then(|s| s.parse().ok())
-		})
-		.ok_or_else(|| eyre!("Could not find topic_id for '{}' in group {}", topic_name, group_id))?;
+			let mut fzf = Command::new("fzf").args(["--query", name]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
 
-	Ok((group_id, topic_id))
+			if let Some(stdin) = fzf.stdin.take() {
+				let mut stdin_handle = stdin;
+				stdin_handle.write_all(input.as_bytes())?;
+			}
+
+			let output = fzf.wait_with_output()?;
+
+			if output.status.success() {
+				let chosen = String::from_utf8(output.stdout)?.trim().to_string();
+				let channel_name = chosen.split(" -> ").next().unwrap_or("");
+				config.resolve_channel(channel_name).ok_or_else(|| eyre!("Failed to resolve: {}", channel_name))
+			} else {
+				Err(eyre!("No channel selected"))
+			}
+		}
+	}
 }
 
 /// Search for topic files using a pattern
@@ -345,6 +346,137 @@ fn list_topics() -> Result<()> {
 			println!("  {} ({}){}", topic_name, topic_id, exists);
 		}
 	}
+
+	Ok(())
+}
+
+/// A TODO item extracted from a topic file
+struct TodoItem {
+	/// The TODO text (after "TODO: ")
+	text: String,
+	/// Source topic path (relative to data dir)
+	source: String,
+	/// Approximate date of the message containing the TODO
+	date: Option<chrono::NaiveDate>,
+}
+
+/// Aggregate TODOs from all topic files into todos.md
+fn aggregate_todos(config: &config::AppConfig) -> Result<()> {
+	use std::io::Read as _;
+
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+	let cutoff_duration = config.pull_todos_over().duration();
+	let cutoff_date = chrono::Utc::now().naive_utc().date() - chrono::Duration::from_std(cutoff_duration).unwrap_or(chrono::Duration::weeks(1));
+
+	let metadata = TopicsMetadata::load();
+	let mut todos: Vec<TodoItem> = Vec::new();
+
+	// Regex for date headers like "## Jan 03" or "## Dec 25"
+	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})$").unwrap();
+
+	// Iterate over all known topics from metadata
+	for (group_id, group) in &metadata.groups {
+		for (topic_id, topic_name) in &group.topics {
+			let file_path = backfill::topic_filepath(*group_id, *topic_id, &metadata);
+			let source = format!("{}/{}.md", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)), topic_name);
+
+			let mut contents = String::new();
+			if std::fs::File::open(&file_path).and_then(|mut f| f.read_to_string(&mut contents)).is_err() {
+				continue;
+			}
+
+			let mut current_date: Option<chrono::NaiveDate> = None;
+			let current_year = chrono::Utc::now().year();
+
+			for line in contents.lines() {
+				let trimmed = line.trim();
+
+				// Check for date header
+				if let Some(caps) = date_header_re.captures(trimmed) {
+					let month_str = caps.get(1).unwrap().as_str();
+					let day: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+
+					let month = match month_str.to_lowercase().as_str() {
+						"jan" => 1,
+						"feb" => 2,
+						"mar" => 3,
+						"apr" => 4,
+						"may" => 5,
+						"jun" => 6,
+						"jul" => 7,
+						"aug" => 8,
+						"sep" => 9,
+						"oct" => 10,
+						"nov" => 11,
+						"dec" => 12,
+						_ => continue,
+					};
+
+					// Assume current year, but handle year boundary
+					let mut year = current_year;
+					if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+						// If this date is in the future, it's probably from last year
+						if date > chrono::Utc::now().naive_utc().date() {
+							year -= 1;
+						}
+						current_date = chrono::NaiveDate::from_ymd_opt(year, month, day);
+					}
+					continue;
+				}
+
+				// Check for TODO
+				if let Some(todo_start) = trimmed.find("TODO: ") {
+					let todo_text = trimmed[todo_start + 6..].trim();
+					if !todo_text.is_empty() {
+						// Only include if within cutoff date (or no date info available)
+						let include = current_date.map(|d| d >= cutoff_date).unwrap_or(true);
+						if include {
+							todos.push(TodoItem {
+								text: todo_text.to_string(),
+								source: source.clone(),
+								date: current_date,
+							});
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Sort by date (newest first), then by source
+	todos.sort_by(|a, b| match (&b.date, &a.date) {
+		(Some(bd), Some(ad)) => bd.cmp(ad).then_with(|| a.source.cmp(&b.source)),
+		(Some(_), None) => std::cmp::Ordering::Less,
+		(None, Some(_)) => std::cmp::Ordering::Greater,
+		(None, None) => a.source.cmp(&b.source),
+	});
+
+	// Write todos.md
+	let todos_path = data_dir.join("todos.md");
+	let mut output = String::new();
+	output.push_str("# TODOs\n\n");
+	output.push_str(&format!("*Auto-aggregated from channel messages (last {}).*\n\n", config.pull_todos_over()));
+
+	if todos.is_empty() {
+		output.push_str("No TODOs found.\n");
+	} else {
+		let mut current_source: Option<&str> = None;
+		for todo in &todos {
+			if current_source != Some(&todo.source) {
+				if current_source.is_some() {
+					output.push('\n');
+				}
+				output.push_str(&format!("## {}\n\n", todo.source));
+				current_source = Some(&todo.source);
+			}
+
+			let date_str = todo.date.map(|d| format!(" ({})", d.format("%b %d"))).unwrap_or_default();
+			output.push_str(&format!("- [ ] {}{}\n", todo.text, date_str));
+		}
+	}
+
+	std::fs::write(&todos_path, &output)?;
+	println!("Wrote {} TODOs to {}", todos.len(), todos_path.display());
 
 	Ok(())
 }

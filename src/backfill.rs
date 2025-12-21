@@ -230,7 +230,7 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 			};
 
 			// Check if this group is in our configured forum_groups
-			if !config.forum_groups.contains(&group_id) {
+			if !config.forum_groups().contains(&group_id) {
 				debug!("Message from unconfigured group {}, skipping", group_id);
 				continue;
 			}
@@ -337,12 +337,20 @@ pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -
 	let topic_name = metadata.topic_name(group_id, topic_id);
 
 	let group_dir = data_dir.join(&group_name);
-	std::fs::create_dir_all(&group_dir).ok();
-
 	group_dir.join(format!("{}.md", topic_name))
 }
 
+/// Ensure the parent directory for a topic file exists
+pub fn ensure_topic_dir(group_id: u64, metadata: &TopicsMetadata) -> Result<()> {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+	let group_name = metadata.group_name(group_id);
+	let group_dir = data_dir.join(&group_name);
+	std::fs::create_dir_all(&group_dir)?;
+	Ok(())
+}
+
 async fn merge_messages_to_file(group_id: u64, topic_id: u64, messages: &[(TelegramMessage, i64)], bot_token: &str, metadata: &TopicsMetadata) -> Result<()> {
+	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
 	let dest_name = format!("{}_{}", group_id, topic_id);
 

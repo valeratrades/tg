@@ -46,7 +46,7 @@ enum TaskResult {
 /// On unsuccessful io operations
 pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
-	let addr = format!("127.0.0.1:{}", config.localhost_port);
+	let addr = format!("127.0.0.1:{}", config.localhost_port());
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);
@@ -293,8 +293,12 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<()> {
 			// Build multipart form
 			let mut form = reqwest::multipart::Form::new()
 				.part("photo", reqwest::multipart::Part::bytes(image_bytes).file_name(filename))
-				.text("chat_id", chat_id.to_string())
-				.text("message_thread_id", message.topic_id.to_string());
+				.text("chat_id", chat_id.to_string());
+
+			// General topic (id=1) doesn't use message_thread_id
+			if message.topic_id != 1 {
+				form = form.text("message_thread_id", message.topic_id.to_string());
+			}
 
 			// Add caption if present
 			if let Some(cap) = caption {
@@ -326,7 +330,11 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 	let chat_id = telegram_chat_id(group_id);
 
-	let params = vec![("text", text.to_string()), ("chat_id", chat_id.to_string()), ("message_thread_id", topic_id.to_string())];
+	// General topic (id=1) doesn't use message_thread_id
+	let mut params = vec![("text", text.to_string()), ("chat_id", chat_id.to_string())];
+	if topic_id != 1 {
+		params.push(("message_thread_id", topic_id.to_string()));
+	}
 
 	debug!("Posting text to Telegram API");
 	let res = client.post(&url).form(&params).send().await?;

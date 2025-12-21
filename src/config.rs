@@ -2,32 +2,69 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
-use v_utils::macros::MyConfigPrimitives;
+use v_utils::{macros::MyConfigPrimitives, trades::Timeframe};
 
 use crate::server::DATA_DIR;
 
-#[derive(Clone, Debug, MyConfigPrimitives, derive_new::new)]
-pub struct AppConfig {
-	/// Forum groups (supergroups with topics enabled) - all topics will be auto-discovered
-	pub forum_groups: Vec<u64>,
-	pub localhost_port: u16,
-	#[new(default)]
-	pub max_messages_per_chat: Option<usize>,
-}
-
-impl Default for AppConfig {
-	fn default() -> Self {
-		Self {
-			forum_groups: Vec::new(),
-			localhost_port: 0,
-			max_messages_per_chat: Some(1000),
-		}
+/// Parse a channel destination string like "-1002244305221" or "-1002244305221/3"
+/// Returns (group_id, topic_id) where topic_id defaults to 1
+pub fn parse_channel_destination(dest: &str) -> Option<(u64, u64)> {
+	let dest = dest.trim().trim_matches('"');
+	if let Some((chat_part, topic_part)) = dest.split_once('/') {
+		let chat_id: i64 = chat_part.parse().ok()?;
+		let topic_id: u64 = topic_part.parse().ok()?;
+		let group_id = extract_group_id(chat_id)?;
+		Some((group_id, topic_id))
+	} else {
+		let chat_id: i64 = dest.parse().ok()?;
+		let group_id = extract_group_id(chat_id)?;
+		Some((group_id, 1)) // Default to General topic
 	}
 }
 
+#[derive(Clone, Debug, Default, MyConfigPrimitives, derive_new::new)]
+pub struct AppConfig {
+	#[new(default)]
+	pub localhost_port: Option<u16>,
+	#[new(default)]
+	pub max_messages_per_chat: Option<usize>,
+	/// How far back to pull TODOs from channel messages (default: 1 week)
+	#[new(default)]
+	pub pull_todos_over: Option<Timeframe>,
+	/// Named channel destinations: name -> "chat_id" or "chat_id/topic_id"
+	#[new(default)]
+	pub channels: Option<std::collections::HashMap<String, String>>,
+}
+
 impl AppConfig {
+	pub fn localhost_port(&self) -> u16 {
+		self.localhost_port.unwrap_or(8123)
+	}
+
 	pub fn max_messages_per_chat(&self) -> usize {
 		self.max_messages_per_chat.unwrap_or(1000)
+	}
+
+	pub fn pull_todos_over(&self) -> Timeframe {
+		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
+	}
+
+	/// Get unique group IDs from all channel destinations
+	pub fn forum_groups(&self) -> Vec<u64> {
+		let mut groups = std::collections::HashSet::new();
+		if let Some(channels) = &self.channels {
+			for dest in channels.values() {
+				if let Some((group_id, _)) = parse_channel_destination(dest) {
+					groups.insert(group_id);
+				}
+			}
+		}
+		groups.into_iter().collect()
+	}
+
+	/// Resolve a channel name to (group_id, topic_id)
+	pub fn resolve_channel(&self, name: &str) -> Option<(u64, u64)> {
+		self.channels.as_ref()?.get(name).and_then(|dest| parse_channel_destination(dest))
 	}
 
 	pub fn read(path: &Path) -> Result<Self, config::ConfigError> {
@@ -54,8 +91,9 @@ impl AppConfig {
 
 		let settings: Self = match settings.try_deserialize::<Self>() {
 			Ok(s) => {
-				info!("Successfully deserialized config with {} forum groups", s.forum_groups.len());
-				debug!("Forum groups: {:?}", s.forum_groups);
+				let channel_count = s.channels.as_ref().map(|c| c.len()).unwrap_or(0);
+				info!("Successfully deserialized config with {} channels", channel_count);
+				debug!("Derived forum groups: {:?}", s.forum_groups());
 				s
 			}
 			Err(e) => {
@@ -163,7 +201,7 @@ impl TopicsMetadata {
 
 /// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
 pub fn telegram_chat_id(id: u64) -> i64 {
-	format!("-100{}", id).parse().unwrap()
+	format!("-100{id}").parse().unwrap()
 }
 
 /// Extract the group ID from a Telegram chat_id (strips -100 prefix)
@@ -281,22 +319,34 @@ mod tests {
 	#[test]
 	fn test_config_deserialization() {
 		let toml_str = r#"
-forum_groups = [2244305221, 1234567890]
 localhost_port = 8123
 max_messages_per_chat = 500
+
+[channels]
+general = "-1002244305221"
+work = "-1002244305221/3"
+alerts = "-1001234567890"
 "#;
 
 		let config: AppConfig = toml::from_str(toml_str).unwrap();
 
-		assert_eq!(config.forum_groups, vec![2244305221, 1234567890]);
-		assert_eq!(config.localhost_port, 8123);
+		assert_eq!(config.localhost_port(), 8123);
 		assert_eq!(config.max_messages_per_chat(), 500);
+
+		// Check channel resolution
+		assert_eq!(config.resolve_channel("general"), Some((2244305221, 1)));
+		assert_eq!(config.resolve_channel("work"), Some((2244305221, 3)));
+		assert_eq!(config.resolve_channel("alerts"), Some((1234567890, 1)));
+
+		// Check derived forum_groups
+		let mut groups = config.forum_groups();
+		groups.sort();
+		assert_eq!(groups, vec![1234567890, 2244305221]);
 	}
 
 	#[test]
 	fn test_config_defaults() {
 		let toml_str = r#"
-forum_groups = []
 localhost_port = 8080
 "#;
 
@@ -304,5 +354,7 @@ localhost_port = 8080
 
 		// max_messages_per_chat should use default
 		assert_eq!(config.max_messages_per_chat(), 1000);
+		// No channels = empty forum_groups
+		assert!(config.forum_groups().is_empty());
 	}
 }

@@ -46,7 +46,12 @@ enum TaskResult {
 /// On unsuccessful io operations
 pub async fn run(config: AppConfig, bot_token: String, backfill_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
-	let addr = format!("127.0.0.1:{}", config.localhost_port());
+
+	// Discover forum topics and create topic files at startup
+	info!("Discovering forum topics for configured groups...");
+	backfill::discover_and_create_topic_files(&config, &bot_token).await?;
+
+	let addr = format!("127.0.0.1:{}", config.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);

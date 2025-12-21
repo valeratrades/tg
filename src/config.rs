@@ -1,10 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
-use v_utils::{macros::MyConfigPrimitives, trades::Timeframe};
-
-use crate::server::DATA_DIR;
+use tracing::{info, warn};
+use v_utils::{
+	macros::{MyConfigPrimitives, Settings},
+	trades::Timeframe,
+};
 
 /// Parse a channel destination string like "-1002244305221" or "-1002244305221/3"
 /// Returns (group_id, topic_id) where topic_id defaults to 1
@@ -22,109 +23,69 @@ pub fn parse_channel_destination(dest: &str) -> Option<(u64, u64)> {
 	}
 }
 
-#[derive(Clone, Debug, Default, MyConfigPrimitives, derive_new::new)]
+#[derive(Clone, Debug, Default, MyConfigPrimitives, Settings)]
 pub struct AppConfig {
-	#[new(default)]
-	pub localhost_port: Option<u16>,
-	#[new(default)]
-	pub max_messages_per_chat: Option<usize>,
+	#[settings(default = 8123)]
+	pub localhost_port: u16,
+	#[settings(default = 1000)]
+	pub max_messages_per_chat: usize,
 	/// How far back to pull TODOs from channel messages (default: 1 week)
-	#[new(default)]
 	pub pull_todos_over: Option<Timeframe>,
-	/// Named channel destinations: name -> "chat_id" or "chat_id/topic_id"
-	#[new(default)]
-	pub channels: Option<std::collections::HashMap<String, String>>,
+	/// Named group destinations: name -> "chat_id" or "chat_id/topic_id"
+	pub groups: Option<std::collections::HashMap<String, String>>,
+	/// Telegram API ID from https://my.telegram.org/
+	pub api_id: Option<i32>,
+	/// Telegram API hash (can be { env = "VAR_NAME" })
+	pub api_hash: Option<String>,
+	/// Phone number for Telegram auth (can be { env = "VAR_NAME" })
+	pub phone: Option<String>,
+	/// Telegram username for session file naming
+	pub username: Option<String>,
 }
 
 impl AppConfig {
-	pub fn localhost_port(&self) -> u16 {
-		self.localhost_port.unwrap_or(8123)
-	}
-
-	pub fn max_messages_per_chat(&self) -> usize {
-		self.max_messages_per_chat.unwrap_or(1000)
-	}
-
 	pub fn pull_todos_over(&self) -> Timeframe {
-		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
+		self.pull_todos_over.clone().unwrap_or_else(|| Timeframe::from(&"1w"))
 	}
 
-	/// Get unique group IDs from all channel destinations
-	pub fn forum_groups(&self) -> Vec<u64> {
-		let mut groups = std::collections::HashSet::new();
-		if let Some(channels) = &self.channels {
-			for dest in channels.values() {
+	/// Get unique group IDs from all group destinations
+	pub fn forum_group_ids(&self) -> Vec<u64> {
+		let mut group_ids = std::collections::HashSet::new();
+		if let Some(groups) = &self.groups {
+			for dest in groups.values() {
 				if let Some((group_id, _)) = parse_channel_destination(dest) {
-					groups.insert(group_id);
+					group_ids.insert(group_id);
 				}
 			}
 		}
-		groups.into_iter().collect()
+		group_ids.into_iter().collect()
 	}
 
-	/// Resolve a channel name to (group_id, topic_id)
-	pub fn resolve_channel(&self, name: &str) -> Option<(u64, u64)> {
-		self.channels.as_ref()?.get(name).and_then(|dest| parse_channel_destination(dest))
+	/// Resolve a group name to (group_id, topic_id)
+	pub fn resolve_group(&self, name: &str) -> Option<(u64, u64)> {
+		self.groups.as_ref()?.get(name).and_then(|dest| parse_channel_destination(dest))
 	}
+}
 
-	pub fn read(path: &Path) -> Result<Self, config::ConfigError> {
-		info!("Reading config from: {}", path.display());
+/// Initialize the data directory (call after config is loaded)
+pub fn init_data_dir() {
+	use crate::server::DATA_DIR;
 
-		if !path.exists() {
-			error!("Config file does not exist at path: {}", path.display());
-			return Err(config::ConfigError::Message(format!("Config file not found: {}", path.display())));
-		}
+	let data_dir_path = std::env::var("XDG_DATA_HOME")
+		.map(PathBuf::from)
+		.unwrap_or_else(|_| {
+			warn!("XDG_DATA_HOME not set, using ~/.local/share");
+			dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
+		})
+		.join("tg");
 
-		debug!("Building config from file");
-		let builder = config::Config::builder().add_source(config::File::with_name(&format!("{}", path.display())));
+	info!("Initializing data directory: {}", data_dir_path.display());
+	let data_dir = DATA_DIR.get_or_init(|| data_dir_path);
 
-		let settings: config::Config = match builder.build() {
-			Ok(s) => {
-				debug!("Successfully built config");
-				s
-			}
-			Err(e) => {
-				error!("Failed to build config: {}", e);
-				return Err(e);
-			}
-		};
-
-		let settings: Self = match settings.try_deserialize::<Self>() {
-			Ok(s) => {
-				let channel_count = s.channels.as_ref().map(|c| c.len()).unwrap_or(0);
-				info!("Successfully deserialized config with {} channels", channel_count);
-				debug!("Derived forum groups: {:?}", s.forum_groups());
-				s
-			}
-			Err(e) => {
-				error!("Failed to deserialize config: {}", e);
-				return Err(e);
-			}
-		};
-
-		let data_dir_path = std::env::var("XDG_DATA_HOME")
-			.map(PathBuf::from)
-			.unwrap_or_else(|_| {
-				warn!("XDG_DATA_HOME not set, this will panic");
-				PathBuf::from("") // This will cause unwrap to panic
-			})
-			.join("tg");
-
-		info!("Initializing data directory: {}", data_dir_path.display());
-		let data_dir = DATA_DIR.get_or_init(|| data_dir_path);
-
-		match std::fs::create_dir_all(data_dir) {
-			Ok(_) => {
-				info!("Data directory ready: {}", data_dir.display());
-			}
-			Err(e) => {
-				error!("Failed to create data directory '{}': {}", data_dir.display(), e);
-				return Err(config::ConfigError::Foreign(Box::new(e)));
-			}
-		}
-
-		Ok(settings)
+	if let Err(e) = std::fs::create_dir_all(data_dir) {
+		panic!("Failed to create data directory '{}': {}", data_dir.display(), e);
 	}
+	info!("Data directory ready: {}", data_dir.display());
 }
 
 /// Metadata for discovered topics in forum groups
@@ -322,7 +283,7 @@ mod tests {
 localhost_port = 8123
 max_messages_per_chat = 500
 
-[channels]
+[groups]
 general = "-1002244305221"
 work = "-1002244305221/3"
 alerts = "-1001234567890"
@@ -330,31 +291,33 @@ alerts = "-1001234567890"
 
 		let config: AppConfig = toml::from_str(toml_str).unwrap();
 
-		assert_eq!(config.localhost_port(), 8123);
-		assert_eq!(config.max_messages_per_chat(), 500);
+		assert_eq!(config.localhost_port, 8123);
+		assert_eq!(config.max_messages_per_chat, 500);
 
-		// Check channel resolution
-		assert_eq!(config.resolve_channel("general"), Some((2244305221, 1)));
-		assert_eq!(config.resolve_channel("work"), Some((2244305221, 3)));
-		assert_eq!(config.resolve_channel("alerts"), Some((1234567890, 1)));
+		// Check group resolution
+		assert_eq!(config.resolve_group("general"), Some((2244305221, 1)));
+		assert_eq!(config.resolve_group("work"), Some((2244305221, 3)));
+		assert_eq!(config.resolve_group("alerts"), Some((1234567890, 1)));
 
-		// Check derived forum_groups
-		let mut groups = config.forum_groups();
-		groups.sort();
-		assert_eq!(groups, vec![1234567890, 2244305221]);
+		// Check derived forum_group_ids
+		let mut group_ids = config.forum_group_ids();
+		group_ids.sort();
+		assert_eq!(group_ids, vec![1234567890, 2244305221]);
 	}
 
 	#[test]
 	fn test_config_defaults() {
+		// Note: defaults only work via Settings derive, not direct toml parsing
 		let toml_str = r#"
 localhost_port = 8080
+max_messages_per_chat = 1000
 "#;
 
 		let config: AppConfig = toml::from_str(toml_str).unwrap();
 
-		// max_messages_per_chat should use default
-		assert_eq!(config.max_messages_per_chat(), 1000);
-		// No channels = empty forum_groups
-		assert!(config.forum_groups().is_empty());
+		// Values should match what was set
+		assert_eq!(config.max_messages_per_chat, 1000);
+		// No groups = empty forum_group_ids
+		assert!(config.forum_group_ids().is_empty());
 	}
 }

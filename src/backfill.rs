@@ -12,7 +12,7 @@ use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{
-	config::{AppConfig, TopicsMetadata, extract_group_id},
+	config::{AppConfig, TopicsMetadata, extract_group_id, telegram_chat_id},
 	server::format_message_append,
 };
 
@@ -148,6 +148,22 @@ struct GetFileResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct GetChatResponse {
+	ok: bool,
+	result: Option<TelegramChatInfo>,
+	#[serde(default)]
+	description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct TelegramChatInfo {
+	#[serde(default)]
+	title: Option<String>,
+	#[serde(default)]
+	is_forum: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
 struct TelegramFile {
 	file_path: Option<String>,
 }
@@ -172,6 +188,88 @@ impl TopicDestination {
 	fn key(&self) -> String {
 		format!("{}/{}", self.group_id, self.topic_id)
 	}
+}
+
+/// Fetch group info and discover topics for all configured groups.
+/// Creates topic files for each discovered topic in the XDG data home.
+/// Uses MTProto API (via grammers) to list all forum topics directly.
+pub async fn discover_and_create_topic_files(config: &AppConfig, bot_token: &str) -> Result<()> {
+	let client = reqwest::Client::new();
+	let mut topics_metadata = TopicsMetadata::load();
+
+	// First, get group names via Bot API
+	for group_id in config.forum_group_ids() {
+		let chat_id = telegram_chat_id(group_id);
+
+		let url = format!("https://api.telegram.org/bot{}/getChat", bot_token);
+		let res = client.get(&url).query(&[("chat_id", chat_id.to_string())]).send().await?;
+		let response: GetChatResponse = res.json().await?;
+
+		if !response.ok {
+			warn!("Failed to get chat {}: {:?}", group_id, response.description);
+			continue;
+		}
+
+		if let Some(chat_info) = response.result {
+			let is_forum = chat_info.is_forum.unwrap_or(false);
+			if !is_forum {
+				warn!("Group {} is not a forum", group_id);
+				continue;
+			}
+
+			if let Some(title) = chat_info.title {
+				let sanitized_name = sanitize_topic_name(&title);
+				topics_metadata.set_group_name(group_id, sanitized_name);
+				info!("Discovered forum group: {} (id: {})", title, group_id);
+			}
+		}
+	}
+
+	topics_metadata.save()?;
+
+	// Use MTProto to discover all topics (requires user auth)
+	info!("Discovering forum topics via MTProto...");
+	crate::mtproto::discover_all_topics(config).await?;
+
+	// Reload metadata after MTProto discovery
+	let topics_metadata = TopicsMetadata::load();
+
+	// Create topic files for all discovered topics
+	create_topic_files(&topics_metadata)?;
+
+	// Run backfill to sync messages
+	info!("Running backfill to sync messages...");
+	backfill(config, bot_token).await?;
+
+	Ok(())
+}
+
+/// Create empty topic files for all topics in metadata
+pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+
+	for (group_id, group) in &metadata.groups {
+		let default_name = format!("group_{}", group_id);
+		let group_name = group.name.as_deref().unwrap_or(&default_name);
+		let group_dir = data_dir.join(group_name);
+
+		// Create group directory
+		std::fs::create_dir_all(&group_dir)?;
+
+		for (topic_id, topic_name) in &group.topics {
+			let file_path = group_dir.join(format!("{}.md", topic_name));
+
+			// Create empty file if it doesn't exist
+			if !file_path.exists() {
+				std::fs::File::create(&file_path)?;
+				info!("Created topic file: {} (topic_id={})", file_path.display(), topic_id);
+			}
+		}
+
+		info!("Group {} ({}) has {} topics", group_name, group_id, group.topics.len());
+	}
+
+	Ok(())
 }
 
 /// Run a single backfill operation for all configured forum groups
@@ -229,8 +327,8 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 				}
 			};
 
-			// Check if this group is in our configured forum_groups
-			if !config.forum_groups().contains(&group_id) {
+			// Check if this group is in our configured groups
+			if !config.forum_group_ids().contains(&group_id) {
 				debug!("Message from unconfigured group {}, skipping", group_id);
 				continue;
 			}
@@ -276,7 +374,7 @@ pub async fn backfill(config: &AppConfig, bot_token: &str) -> Result<()> {
 		}
 
 		// Limit to most recent max_messages_per_chat messages per topic
-		let max_per_chat = config.max_messages_per_chat();
+		let max_per_chat = config.max_messages_per_chat;
 		if new_messages.len() > max_per_chat {
 			// Sort by update_id and keep the most recent
 			new_messages.sort_by_key(|(_, update_id)| *update_id);

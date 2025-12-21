@@ -10,12 +10,19 @@ rand = "0.8.5"
 [dependencies]
 chrono = "0.4.42"
 clap = { version = "4.5.49", features = ["derive"] }
+clap_complete = "4"
 color-eyre = "0.6.5"
 config = "0.15.18"
 derive-new = "*"
+derive_more = { version = "2", features = ["display", "from_str"] }
+dirs = "6.0.0"
 eyre = "^0.6.12"
 futures = "0.3.31"
 futures-util = "^0.3.31"
+grammers-client = "0.8.1"
+grammers-mtsender = "0.8.1"
+grammers-session = "0.8.0"
+grammers-tl-types = "0.8.0"
 regex = "1"
 reqwest = { version = "0.12.24", features = ["rustls-tls", "json", "multipart"], default-features = false }
 serde = "^1.0.228"
@@ -23,7 +30,7 @@ serde_json = "^1.0.145"
 tokio = { version = "^1.48.0", features = ["full"] }
 toml = "^0.9.8"
 tracing = "^0.1.41"
-v_utils = { version = "^2.7.7", features = ["io", "distributions", "macros"] }
+v_utils = { version = "^2.15", features = ["io", "distributions", "macros", "cli"] }
 xattr = "1.6.1"
 
 [dev-dependencies]

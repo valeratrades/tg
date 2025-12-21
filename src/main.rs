@@ -12,23 +12,25 @@ use tokio::{
 	net::TcpStream,
 };
 use v_utils::{
-	io::{ExpandedPath, OpenMode, open_with_mode},
+	io::{OpenMode, open_with_mode},
 	trades::Timeframe,
 };
 
-use crate::config::TopicsMetadata;
+use crate::config::{AppConfig, SettingsFlags, TopicsMetadata};
 
 pub mod backfill;
 pub mod config;
+mod mtproto;
 mod server;
+mod shell_init;
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
-struct Cli {
+pub struct Cli {
 	#[command(subcommand)]
 	command: Commands,
-	#[arg(long, default_value = "~/.config/tg.toml")]
-	config: ExpandedPath,
+	#[command(flatten)]
+	settings: SettingsFlags,
 	#[arg(long)]
 	token: Option<String>,
 }
@@ -59,6 +61,8 @@ enum Commands {
 	List,
 	/// Aggregate TODOs from all topics into todos.md
 	Todos,
+	/// Output shell initialization (aliases and completions)
+	ShellInit(shell_init::ShellInitArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -93,7 +97,8 @@ struct ServerArgs {
 async fn main() -> Result<()> {
 	v_utils::clientside!();
 	let cli = Cli::parse();
-	let config = config::AppConfig::read(&cli.config.0).expect("Failed to read config file");
+	let config = AppConfig::try_build(cli.settings).expect("Failed to read config file");
+	config::init_data_dir();
 	let bot_token = match cli.token {
 		Some(t) => t,
 		None => std::env::var("TELEGRAM_BOT_KEY").expect("TELEGRAM_BOT_KEY not set"),
@@ -105,7 +110,7 @@ async fn main() -> Result<()> {
 			let msg_text = args.message.join(" ");
 
 			let message = Message::new(group_id, topic_id, msg_text.clone());
-			let addr = format!("127.0.0.1:{}", config.localhost_port());
+			let addr = format!("127.0.0.1:{}", config.localhost_port);
 			let mut stream = TcpStream::connect(&addr).await?;
 
 			let json = serde_json::to_string(&message)?;
@@ -139,12 +144,15 @@ async fn main() -> Result<()> {
 		Commands::Todos => {
 			aggregate_todos(&config)?;
 		}
+		Commands::ShellInit(args) => {
+			shell_init::output(args);
+		}
 	};
 
 	Ok(())
 }
 
-/// Resolve send destination from args using config channels
+/// Resolve send destination from args using config groups
 fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Result<(u64, u64)> {
 	// If direct IDs are provided, use them
 	if let Some(group_id) = args.group_id {
@@ -152,25 +160,25 @@ fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Resu
 		return Ok((group_id, topic_id));
 	}
 
-	// Resolve from channel name in config
-	let name = args.topic.as_deref().ok_or_else(|| eyre!("Channel name required"))?;
+	// Resolve from group name in config
+	let name = args.topic.as_deref().ok_or_else(|| eyre!("Group name required"))?;
 
 	// Try exact match first
-	if let Some((group_id, topic_id)) = config.resolve_channel(name) {
+	if let Some((group_id, topic_id)) = config.resolve_group(name) {
 		return Ok((group_id, topic_id));
 	}
 
 	// Try fuzzy match
-	let channels = config.channels.as_ref().ok_or_else(|| eyre!("No channels configured"))?;
+	let groups = config.groups.as_ref().ok_or_else(|| eyre!("No groups configured"))?;
 	let name_lower = name.to_lowercase();
-	let matches: Vec<_> = channels.iter().filter(|(k, _)| k.to_lowercase().contains(&name_lower)).collect();
+	let matches: Vec<_> = groups.iter().filter(|(k, _)| k.to_lowercase().contains(&name_lower)).collect();
 
 	match matches.len() {
-		0 => Err(eyre!("No channel found matching: {}", name)),
+		0 => Err(eyre!("No group found matching: {}", name)),
 		1 => {
-			let (channel_name, dest) = matches[0];
-			eprintln!("Found: {}", channel_name);
-			config::parse_channel_destination(dest).ok_or_else(|| eyre!("Invalid channel destination: {}", dest))
+			let (group_name, dest) = matches[0];
+			eprintln!("Found: {}", group_name);
+			config::parse_channel_destination(dest).ok_or_else(|| eyre!("Invalid group destination: {}", dest))
 		}
 		_ => {
 			// Multiple matches - use fzf
@@ -187,10 +195,10 @@ fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Resu
 
 			if output.status.success() {
 				let chosen = String::from_utf8(output.stdout)?.trim().to_string();
-				let channel_name = chosen.split(" -> ").next().unwrap_or("");
-				config.resolve_channel(channel_name).ok_or_else(|| eyre!("Failed to resolve: {}", channel_name))
+				let group_name = chosen.split(" -> ").next().unwrap_or("");
+				config.resolve_group(group_name).ok_or_else(|| eyre!("Failed to resolve: {}", group_name))
 			} else {
-				Err(eyre!("No channel selected"))
+				Err(eyre!("No group selected"))
 			}
 		}
 	}
@@ -453,7 +461,7 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<()> {
 	let todos_path = data_dir.join("todos.md");
 	let mut output = String::new();
 	output.push_str("# TODOs\n\n");
-	output.push_str(&format!("*Auto-aggregated from channel messages (last {}).*\n\n", config.pull_todos_over()));
+	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", config.pull_todos_over()));
 
 	if todos.is_empty() {
 		output.push_str("No TODOs found.\n");

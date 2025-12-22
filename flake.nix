@@ -123,7 +123,7 @@
       homeManagerModules."${pname}" = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
-          inherit (lib.types) package path;
+          inherit (lib.types) package path nullOr str;
           cfg = config."${pname}";
         in
         {
@@ -141,6 +141,20 @@
               description = "Path to the file containing the Telegram token for LoadCredential.";
               example = "config.sops.secrets.telegram_token_main.path";
             };
+
+            apiHash = mkOption {
+              type = nullOr path;
+              default = null;
+              description = "Path to the file containing the Telegram API hash for MTProto.";
+              example = "config.sops.secrets.telegram_api_hash.path";
+            };
+
+            phone = mkOption {
+              type = nullOr path;
+              default = null;
+              description = "Path to the file containing the phone number for MTProto.";
+              example = "config.sops.secrets.telegram_phone.path";
+            };
           };
 
           config = mkIf cfg.enable {
@@ -156,10 +170,20 @@
 
               Service = {
                 Type = "simple";
-                LoadCredential = "tg_token:${cfg.token}";
-                ExecStart = ''
-                  /bin/sh -c '${cfg.package}/bin/${pname} --token "$(cat %d/tg_token)" server'
-                '';
+                LoadCredential = [
+                  "tg_token:${cfg.token}"
+                ] ++ lib.optional (cfg.apiHash != null) "tg_api_hash:${cfg.apiHash}"
+                ++ lib.optional (cfg.phone != null) "tg_phone:${cfg.phone}";
+                ExecStart =
+                  let
+                    envSetup = lib.concatStringsSep " " (
+                      lib.optional (cfg.apiHash != null) ''TELEGRAM_API_HASH="$(cat %d/tg_api_hash)"''
+                      ++ lib.optional (cfg.phone != null) ''PHONE_NUMBER_FR="$(cat %d/tg_phone)"''
+                    );
+                  in
+                  ''
+                    /bin/sh -c '${envSetup} ${cfg.package}/bin/${pname} --token "$(cat %d/tg_token)" server'
+                  '';
                 Restart = "on-failure";
               };
             };

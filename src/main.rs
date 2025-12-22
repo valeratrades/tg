@@ -62,8 +62,8 @@ enum Commands {
 	/// Aggregate TODOs from all topics
 	#[command(subcommand)]
 	Todos(TodosCommands),
-	/// Output shell initialization (aliases and completions)
-	ShellInit(shell_init::ShellInitArgs),
+	/// Shell aliases and hooks. Usage: `tg init <shell> | source`
+	Init(shell_init::ShellInitArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -115,18 +115,25 @@ async fn main() -> Result<()> {
 
 	match cli.command {
 		Commands::Send(args) => {
-			let (group_id, topic_id) = resolve_send_destination(&args, &config)?;
+			let (group_id, topic_id) = resolve_send_destination(&args)?;
 			let msg_text = args.message.join(" ");
 
 			let message = Message::new(group_id, topic_id, msg_text.clone());
 			let addr = format!("127.0.0.1:{}", config.localhost_port);
-			let mut stream = TcpStream::connect(&addr).await?;
 
-			let json = serde_json::to_string(&message)?;
-			stream.write_all(json.as_bytes()).await?;
-
-			let mut response = [0u8; 3];
-			stream.read_exact(&mut response).await?;
+			// Try server first, fall back to direct send
+			match TcpStream::connect(&addr).await {
+				Ok(mut stream) => {
+					let json = serde_json::to_string(&message)?;
+					stream.write_all(json.as_bytes()).await?;
+					let mut response = [0u8; 3];
+					stream.read_exact(&mut response).await?;
+				}
+				Err(_) => {
+					// Server not running, send directly
+					server::send_message(&message, &bot_token).await?;
+				}
+			}
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
@@ -159,7 +166,7 @@ async fn main() -> Result<()> {
 				open_with_mode(&path, OpenMode::Normal)?;
 			}
 		},
-		Commands::ShellInit(args) => {
+		Commands::Init(args) => {
 			shell_init::output(args);
 		}
 	};
@@ -167,39 +174,40 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 
-/// Resolve send destination from args using config groups
-fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Result<(u64, u64)> {
+/// Resolve send destination from topic name using metadata
+fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 	// If direct IDs are provided, use them
 	if let Some(group_id) = args.group_id {
 		let topic_id = args.topic_id.unwrap_or(1);
 		return Ok((group_id, topic_id));
 	}
 
-	// Resolve from group name in config
-	let name = args.topic.as_deref().ok_or_else(|| eyre!("Group name required"))?;
+	let pattern = args.topic.as_deref().ok_or_else(|| eyre!("Topic name required"))?;
+	let metadata = TopicsMetadata::load();
+	let pattern_lower = pattern.to_lowercase();
 
-	// Try exact match first
-	if let Some((group_id, topic_id)) = config.resolve_group(name) {
-		return Ok((group_id, topic_id));
+	// Collect all matching topics from metadata
+	let mut matches: Vec<(u64, u64, String)> = Vec::new();
+	for (group_id, group) in &metadata.groups {
+		for (topic_id, topic_name) in &group.topics {
+			if topic_name.to_lowercase().contains(&pattern_lower) {
+				let display = format!("{}/{}", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)), topic_name);
+				matches.push((*group_id, *topic_id, display));
+			}
+		}
 	}
 
-	// Try fuzzy match
-	let groups = config.groups.as_ref().ok_or_else(|| eyre!("No groups configured"))?;
-	let name_lower = name.to_lowercase();
-	let matches: Vec<_> = groups.iter().filter(|(k, _)| k.to_lowercase().contains(&name_lower)).collect();
-
 	match matches.len() {
-		0 => Err(eyre!("No group found matching: {}", name)),
+		0 => Err(eyre!("No topic found matching: {}", pattern)),
 		1 => {
-			let (group_name, dest) = matches[0];
-			eprintln!("Found: {}", group_name);
-			config::parse_channel_destination(dest).ok_or_else(|| eyre!("Invalid group destination: {}", dest))
+			let (group_id, topic_id, _) = &matches[0];
+			Ok((*group_id, *topic_id))
 		}
 		_ => {
 			// Multiple matches - use fzf
-			let input: String = matches.iter().map(|(k, v)| format!("{} -> {}", k, v)).collect::<Vec<_>>().join("\n");
+			let input: String = matches.iter().map(|(_, _, d)| d.as_str()).collect::<Vec<_>>().join("\n");
 
-			let mut fzf = Command::new("fzf").args(["--query", name]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
+			let mut fzf = Command::new("fzf").args(["--query", pattern]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
 
 			if let Some(stdin) = fzf.stdin.take() {
 				let mut stdin_handle = stdin;
@@ -210,10 +218,14 @@ fn resolve_send_destination(args: &SendArgs, config: &config::AppConfig) -> Resu
 
 			if output.status.success() {
 				let chosen = String::from_utf8(output.stdout)?.trim().to_string();
-				let group_name = chosen.split(" -> ").next().unwrap_or("");
-				config.resolve_group(group_name).ok_or_else(|| eyre!("Failed to resolve: {}", group_name))
+				// Find the match
+				matches
+					.iter()
+					.find(|(_, _, d)| d == &chosen)
+					.map(|(g, t, _)| (*g, *t))
+					.ok_or_else(|| eyre!("Failed to find selection: {}", chosen))
 			} else {
-				Err(eyre!("No group selected"))
+				Err(eyre!("No topic selected"))
 			}
 		}
 	}

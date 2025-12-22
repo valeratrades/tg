@@ -23,6 +23,7 @@ mod mtproto;
 pub mod pull;
 mod server;
 mod shell_init;
+mod sync;
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
@@ -152,7 +153,37 @@ async fn main() -> Result<()> {
 		}
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
+
+			// Read and parse file content before opening
+			let old_content = std::fs::read_to_string(&path).unwrap_or_default();
+			let old_state = sync::parse_file_messages(&old_content);
+
+			// Open with editor
 			open_with_mode(&path, OpenMode::Normal)?;
+
+			// Read and parse file content after closing editor
+			let new_content = std::fs::read_to_string(&path).unwrap_or_default();
+			let new_state = sync::parse_file_messages(&new_content);
+
+			// Detect changes
+			let changes = sync::detect_changes(&old_state, &new_state);
+
+			if !changes.is_empty() {
+				// Resolve topic IDs from file path
+				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
+					eprintln!(
+						"Detected {} changes ({} deletions, {} edits)",
+						changes.total_affected(),
+						changes.deleted.len(),
+						changes.edited.len()
+					);
+
+					// Apply changes to Telegram
+					sync::apply_changes(&changes, group_id, topic_id, &bot_token).await?;
+				} else {
+					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced to Telegram");
+				}
+			}
 		}
 		Commands::List => {
 			list_topics()?;

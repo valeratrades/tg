@@ -16,7 +16,7 @@ use xattr::FileExt as _;
 use crate::{
 	config::{AppConfig, TopicsMetadata, telegram_chat_id},
 	mtproto,
-	server::format_message_append,
+	server::format_message_append_with_id,
 };
 
 /// Sanitize topic name for use as filename: lowercase, replace spaces with underscores
@@ -296,11 +296,11 @@ async fn get_input_peer(client: &Client, group_id: u64) -> Result<tl::enums::Inp
 
 /// A message fetched from MTProto
 #[derive(Clone, Debug)]
-struct FetchedMessage {
-	id: i32,
-	date: i32,
-	text: String,
-	photo: Option<tl::types::Photo>,
+pub struct FetchedMessage {
+	pub id: i32,
+	pub date: i32,
+	pub text: String,
+	pub photo: Option<tl::types::Photo>,
 }
 
 /// Fetch messages from a forum topic using MTProto
@@ -426,11 +426,11 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 		// Handle photo messages (just note them for now, TODO: implement download)
 		if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
-			let formatted = format_message_append(&content, last_write, msg_time);
+			let formatted = format_message_append_with_id(&content, last_write, msg_time, Some(msg.id));
 			file.write_all(formatted.as_bytes())?;
 			last_write = Some(msg_time);
 		} else if !msg.text.is_empty() {
-			let formatted = format_message_append(&msg.text, last_write, msg_time);
+			let formatted = format_message_append_with_id(&msg.text, last_write, msg_time, Some(msg.id));
 			file.write_all(formatted.as_bytes())?;
 			last_write = Some(msg_time);
 		}

@@ -363,6 +363,11 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 ///     >= 6 minutes && different day => append with a newline before and after
 /// }
 pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+	format_message_append_with_id(message, last_write_datetime, now, None)
+}
+
+/// Format a message append with an optional message ID marker
+pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>) -> String {
 	debug!("Formatting message append");
 	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() <= now);
 
@@ -379,7 +384,8 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 		}
 	}
 
-	format!("{}{}\n", prefix, message)
+	let id_suffix = msg_id.map(|id| format!(" <!-- msg:{} -->", id)).unwrap_or_default();
+	format!("{}{}{}\n", prefix, message, id_suffix)
 }
 
 #[cfg(test)]

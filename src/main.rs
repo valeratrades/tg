@@ -319,6 +319,19 @@ async fn main() -> Result<()> {
 
 					client.disconnect();
 					handle.abort();
+
+					// Also remove TODOs from source topic files so they don't reappear
+					let mut source_removals = 0;
+					for todo in &deleted {
+						match remove_todo_from_source(todo.group_id, todo.topic_id, &todo.text) {
+							Ok(true) => source_removals += 1,
+							Ok(false) => tracing::warn!(text = %todo.text, "TODO not found in source file"),
+							Err(e) => tracing::error!(error = %e, "Failed to remove TODO from source file"),
+						}
+					}
+					if source_removals > 0 {
+						eprintln!("Removed {} TODO(s) from source topic files", source_removals);
+					}
 				}
 			}
 		},
@@ -545,20 +558,23 @@ struct TrackedTodo {
 	group_id: u64,
 	topic_id: u64,
 	message_id: i32,
+	/// The TODO text, used to find and remove from source file
+	text: String,
 }
 
 /// Parse todos.md and extract all tracked TODO items
 fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	let mut tracked = std::collections::HashSet::new();
-	// Pattern: <!-- todo:group_id:topic_id:msg_id -->
-	let todo_re = regex::Regex::new(r"<!-- todo:(\d+):(\d+):(\d+) -->").unwrap();
+	// Pattern: - [ ] text (date) <!-- todo:group_id:topic_id:msg_id -->
+	let todo_re = regex::Regex::new(r"^- \[ \] (.+?) \([A-Za-z]{3} \d{1,2}\) <!-- todo:(\d+):(\d+):(\d+) -->$").unwrap();
 
 	for line in content.lines() {
-		if let Some(caps) = todo_re.captures(line) {
+		if let Some(caps) = todo_re.captures(line.trim()) {
+			let text = caps.get(1).unwrap().as_str().to_string();
 			if let (Ok(group_id), Ok(topic_id), Ok(msg_id)) = (
-				caps.get(1).unwrap().as_str().parse::<u64>(),
 				caps.get(2).unwrap().as_str().parse::<u64>(),
-				caps.get(3).unwrap().as_str().parse::<i32>(),
+				caps.get(3).unwrap().as_str().parse::<u64>(),
+				caps.get(4).unwrap().as_str().parse::<i32>(),
 			) {
 				// Only track items with valid message IDs (not 0)
 				if msg_id != 0 {
@@ -566,6 +582,7 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 						group_id,
 						topic_id,
 						message_id: msg_id,
+						text,
 					});
 				}
 			}
@@ -573,6 +590,35 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	}
 
 	tracked
+}
+
+/// Remove a TODO line from a source topic file
+fn remove_todo_from_source(group_id: u64, topic_id: u64, todo_text: &str) -> Result<bool> {
+	let metadata = TopicsMetadata::load();
+	let file_path = pull::topic_filepath(group_id, topic_id, &metadata);
+
+	if !file_path.exists() {
+		return Ok(false);
+	}
+
+	let content = std::fs::read_to_string(&file_path)?;
+	let mut lines: Vec<&str> = content.lines().collect();
+	let original_len = lines.len();
+
+	// Find and remove the line containing this TODO text
+	// Match "TODO: {text}" pattern
+	let search_pattern = format!("TODO: {}", todo_text);
+	lines.retain(|line| !line.contains(&search_pattern));
+
+	if lines.len() < original_len {
+		// Something was removed, write back
+		let new_content = lines.join("\n");
+		std::fs::write(&file_path, new_content)?;
+		tracing::info!(path = %file_path.display(), "Removed TODO from source file");
+		return Ok(true);
+	}
+
+	Ok(false)
 }
 
 /// A TODO item extracted from a topic file

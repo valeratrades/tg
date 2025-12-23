@@ -57,7 +57,7 @@ enum Commands {
 	/// ```
 	Open(OpenArgs),
 	/// Pull messages from Telegram for all configured forum groups
-	Pull,
+	Pull(PullArgs),
 	/// List all discovered topics
 	List,
 	/// Aggregate TODOs from all topics
@@ -86,6 +86,14 @@ struct SendArgs {
 struct OpenArgs {
 	/// Pattern to match topic name (uses fzf if multiple matches)
 	pattern: Option<String>,
+}
+
+#[derive(Args, Clone, Debug)]
+struct PullArgs {
+	/// Reset sync state and re-fetch all messages (clears topic files)
+	/// Use this to add message ID markers to old messages for TODO tracking
+	#[arg(long)]
+	reset: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -148,7 +156,48 @@ async fn main() -> Result<()> {
 		Commands::Server(args) => {
 			server::run(config, bot_token, args.pull_interval).await?;
 		}
-		Commands::Pull => {
+		Commands::Pull(args) => {
+			if args.reset {
+				// Reset mode: clear sync timestamps and topic files, then re-pull everything
+				eprintln!("WARNING: This will delete all local topic files and re-fetch from Telegram.");
+				eprintln!("This is necessary to add message ID markers for TODO deletion tracking.");
+				eprint!("Continue? [y/N] ");
+				std::io::stdout().flush()?;
+				let mut input = String::new();
+				std::io::stdin().read_line(&mut input)?;
+				if !input.trim().eq_ignore_ascii_case("y") {
+					eprintln!("Aborted.");
+					return Ok(());
+				}
+
+				// Clear sync timestamps
+				let sync_path = pull::SyncTimestamps::file_path();
+				if sync_path.exists() {
+					std::fs::remove_file(&sync_path)?;
+					eprintln!("Cleared sync timestamps");
+				}
+
+				// Clear topic files
+				let data_dir = server::DATA_DIR.get().unwrap();
+				let metadata = TopicsMetadata::load();
+				for (group_id, group) in &metadata.groups {
+					let default_name = format!("group_{}", group_id);
+					let group_name = group.name.as_deref().unwrap_or(&default_name);
+					let group_dir = data_dir.join(group_name);
+					if group_dir.exists() {
+						for entry in std::fs::read_dir(&group_dir)? {
+							let entry = entry?;
+							let path = entry.path();
+							if path.extension().map(|e| e == "md").unwrap_or(false) {
+								std::fs::remove_file(&path)?;
+								eprintln!("Removed {}", path.display());
+							}
+						}
+					}
+				}
+
+				eprintln!("Re-pulling all messages...");
+			}
 			pull::pull(&config, &bot_token).await?;
 		}
 		Commands::Open(args) => {
@@ -202,9 +251,22 @@ async fn main() -> Result<()> {
 				// Count total TODOs vs trackable ones
 				let total_todo_lines = old_content.lines().filter(|l| l.contains("<!-- todo:")).count();
 				let trackable_count = old_todos.len();
+				let untrackable_count = total_todo_lines - trackable_count;
+				tracing::debug!(
+					total_todos = total_todo_lines,
+					trackable = trackable_count,
+					untrackable = untrackable_count,
+					"Parsed todos.md before edit"
+				);
+
 				if trackable_count == 0 && total_todo_lines > 0 {
 					eprintln!("Note: {} TODOs found but none have message IDs (old messages before ID tracking).", total_todo_lines);
 					eprintln!("Deletions from todos.md won't sync to Telegram for these items.");
+				} else if untrackable_count > 0 {
+					eprintln!(
+						"Note: {}/{} TODOs have message IDs. {} cannot be synced (old messages).",
+						trackable_count, total_todo_lines, untrackable_count
+					);
 				}
 
 				// Open with editor
@@ -216,6 +278,16 @@ async fn main() -> Result<()> {
 
 				// Find deleted TODOs (in old but not in new)
 				let deleted: Vec<_> = old_todos.difference(&new_todos).cloned().collect();
+
+				tracing::debug!(
+					old_trackable = old_todos.len(),
+					new_trackable = new_todos.len(),
+					deleted_count = deleted.len(),
+					"Comparing todos after edit"
+				);
+				for todo in &deleted {
+					tracing::debug!(group_id = todo.group_id, topic_id = todo.topic_id, message_id = todo.message_id, "Will delete todo");
+				}
 
 				eprintln!("Tracking: {} trackable TODOs before, {} after, {} deleted", old_todos.len(), new_todos.len(), deleted.len());
 
@@ -231,10 +303,17 @@ async fn main() -> Result<()> {
 					// Create MTProto client and apply deletions
 					let (client, handle) = mtproto::create_client(&config).await?;
 
-					for (group_id, msg_ids) in deletions_by_group {
-						match mtproto::delete_messages(&client, group_id, &msg_ids).await {
-							Ok(count) => eprintln!("Deleted {} message(s) from group {}", count, group_id),
-							Err(e) => eprintln!("Failed to delete from group {}: {}", group_id, e),
+					for (group_id, msg_ids) in &deletions_by_group {
+						tracing::info!(group_id, msg_ids = ?msg_ids, "Deleting messages via MTProto");
+						match mtproto::delete_messages(&client, *group_id, msg_ids).await {
+							Ok(count) => {
+								tracing::info!(group_id, count, "Successfully deleted messages");
+								eprintln!("Deleted {} message(s) from group {}", count, group_id);
+							}
+							Err(e) => {
+								tracing::error!(group_id, error = %e, "Failed to delete messages");
+								eprintln!("Failed to delete from group {}: {}", group_id, e);
+							}
 						}
 					}
 
@@ -527,6 +606,8 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})$").unwrap();
 	// Regex for message ID markers like <!-- msg:123 -->
 	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+) -->").unwrap();
+	// Regex for message block start (`. ` prefix or date header)
+	let msg_block_start_re = regex::Regex::new(r"^(\. |## )").unwrap();
 
 	// Iterate over all known topics from metadata
 	for (group_id, group) in &metadata.groups {
@@ -542,65 +623,90 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 			let mut current_date: Option<chrono::NaiveDate> = None;
 			let current_year = chrono::Utc::now().year();
 
-			for line in contents.lines() {
-				let trimmed = line.trim();
+			// Parse file into message blocks to associate TODOs with their message IDs
+			// A message block is: all lines from one message start until the next
+			// Message ID marker appears at the end of the message block
+			let lines: Vec<&str> = contents.lines().collect();
+			let mut block_start = 0;
 
-				// Check for date header
-				if let Some(caps) = date_header_re.captures(trimmed) {
-					let month_str = caps.get(1).unwrap().as_str();
-					let day: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+			for i in 0..=lines.len() {
+				// Check if this is a block boundary (new block starts or end of file)
+				let is_boundary = i == lines.len() || (i > 0 && msg_block_start_re.is_match(lines[i]));
 
-					let month = match month_str.to_lowercase().as_str() {
-						"jan" => 1,
-						"feb" => 2,
-						"mar" => 3,
-						"apr" => 4,
-						"may" => 5,
-						"jun" => 6,
-						"jul" => 7,
-						"aug" => 8,
-						"sep" => 9,
-						"oct" => 10,
-						"nov" => 11,
-						"dec" => 12,
-						_ => continue,
-					};
+				if is_boundary && block_start < i {
+					// Process the block from block_start to i-1
+					let block_lines = &lines[block_start..i];
 
-					// Assume current year, but handle year boundary
-					let mut year = current_year;
-					if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-						// If this date is in the future, it's probably from last year
-						if date > chrono::Utc::now().naive_utc().date() {
-							year -= 1;
-						}
-						current_date = chrono::NaiveDate::from_ymd_opt(year, month, day);
-					}
-					continue;
-				}
-
-				// Check for TODO
-				if let Some(todo_start) = trimmed.find("TODO: ") {
-					// Extract message ID if present
-					let message_id = msg_id_re.captures(trimmed).and_then(|caps| caps.get(1)?.as_str().parse::<i32>().ok());
-
-					// Extract TODO text (remove the msg ID marker if present)
-					let todo_line = msg_id_re.replace(trimmed, "");
-					let todo_text = todo_line[todo_start + 6..].trim();
-
-					if !todo_text.is_empty() {
-						// Only include if within cutoff date (or no date info available)
-						let include = current_date.map(|d| d >= cutoff_date).unwrap_or(true);
-						if include {
-							todos.push(TodoItem {
-								text: todo_text.to_string(),
-								source: source.clone(),
-								date: current_date,
-								message_id,
-								group_id: *group_id,
-								topic_id: *topic_id,
-							});
+					// Find message ID in the block (usually on the last line)
+					let mut block_msg_id: Option<i32> = None;
+					for line in block_lines.iter().rev() {
+						if let Some(caps) = msg_id_re.captures(line) {
+							block_msg_id = caps.get(1).and_then(|m| m.as_str().parse().ok());
+							break;
 						}
 					}
+
+					// Process lines in this block
+					for line in block_lines {
+						let trimmed = line.trim();
+
+						// Check for date header
+						if let Some(caps) = date_header_re.captures(trimmed) {
+							let month_str = caps.get(1).unwrap().as_str();
+							let day: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+
+							let month = match month_str.to_lowercase().as_str() {
+								"jan" => 1,
+								"feb" => 2,
+								"mar" => 3,
+								"apr" => 4,
+								"may" => 5,
+								"jun" => 6,
+								"jul" => 7,
+								"aug" => 8,
+								"sep" => 9,
+								"oct" => 10,
+								"nov" => 11,
+								"dec" => 12,
+								_ => continue,
+							};
+
+							// Assume current year, but handle year boundary
+							let mut year = current_year;
+							if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+								// If this date is in the future, it's probably from last year
+								if date > chrono::Utc::now().naive_utc().date() {
+									year -= 1;
+								}
+								current_date = chrono::NaiveDate::from_ymd_opt(year, month, day);
+							}
+							continue;
+						}
+
+						// Check for TODO
+						if let Some(todo_start) = trimmed.find("TODO: ") {
+							// Extract TODO text (remove the msg ID marker if present)
+							let todo_line = msg_id_re.replace(trimmed, "");
+							let todo_text = todo_line[todo_start + 6..].trim();
+
+							if !todo_text.is_empty() {
+								// Only include if within cutoff date (or no date info available)
+								let include = current_date.map(|d| d >= cutoff_date).unwrap_or(true);
+								if include {
+									todos.push(TodoItem {
+										text: todo_text.to_string(),
+										source: source.clone(),
+										date: current_date,
+										message_id: block_msg_id,
+										group_id: *group_id,
+										topic_id: *topic_id,
+									});
+								}
+							}
+						}
+					}
+
+					block_start = i;
 				}
 			}
 		}

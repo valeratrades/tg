@@ -218,8 +218,8 @@ async fn main() -> Result<()> {
 			let changes = sync::detect_changes(&old_state, &new_state);
 
 			if !changes.is_empty() {
-				// Resolve topic IDs from file path
-				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
+				// Resolve group ID from file path
+				if let Some((group_id, _topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					eprintln!(
 						"Detected {} changes ({} deletions, {} edits)",
 						changes.total_affected(),
@@ -227,8 +227,11 @@ async fn main() -> Result<()> {
 						changes.edited.len()
 					);
 
-					// Apply changes to Telegram
-					sync::apply_changes(&changes, group_id, topic_id, &bot_token).await?;
+					// Apply changes via MTProto
+					let (client, handle) = mtproto::create_client(&config).await?;
+					sync::apply_changes(&changes, group_id, &client).await?;
+					client.disconnect();
+					handle.abort();
 				} else {
 					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced to Telegram");
 				}

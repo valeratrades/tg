@@ -313,3 +313,26 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 	info!("Deleted {} messages from group {}", pts_count, group_id);
 	Ok(pts_count as usize)
 }
+
+/// Edit a message in a channel/supergroup via MTProto
+pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_text: &str) -> Result<()> {
+	let chat_id = telegram_chat_id(group_id);
+	let input_peer = get_input_peer(client, chat_id).await?;
+
+	let request = tl::functions::messages::EditMessage {
+		peer: input_peer,
+		id: message_id,
+		message: Some(new_text.to_string()),
+		no_webpage: false,
+		invert_media: false,
+		media: None,
+		reply_markup: None,
+		entities: None,
+		schedule_date: None,
+		quick_reply_shortcut_id: None,
+	};
+
+	client.invoke(&request).await?;
+	info!("Edited message {} in group {}", message_id, group_id);
+	Ok(())
+}

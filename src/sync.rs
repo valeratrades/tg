@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, io::Write as _, path::Path};
 
-use eyre::{Result, eyre};
+use eyre::Result;
+use grammers_client::Client;
 use regex::Regex;
 use tracing::{debug, info, warn};
 
-use crate::config::{TopicsMetadata, telegram_chat_id};
+use crate::{config::TopicsMetadata, mtproto};
 
 /// Represents changes detected between old and new file states
 #[derive(Clone, Debug, Default)]
@@ -67,8 +68,8 @@ pub fn detect_changes(old_state: &BTreeMap<i32, String>, new_state: &BTreeMap<i3
 	changes
 }
 
-/// Apply changes to Telegram, with confirmation if many messages affected
-pub async fn apply_changes(changes: &FileChanges, group_id: u64, topic_id: u64, bot_token: &str) -> Result<()> {
+/// Apply changes to Telegram via MTProto, with confirmation if many messages affected
+pub async fn apply_changes(changes: &FileChanges, group_id: u64, client: &Client) -> Result<()> {
 	if changes.is_empty() {
 		debug!("No changes to apply");
 		return Ok(());
@@ -89,20 +90,17 @@ pub async fn apply_changes(changes: &FileChanges, group_id: u64, topic_id: u64, 
 		}
 	}
 
-	let client = reqwest::Client::new();
-	let chat_id = telegram_chat_id(group_id);
-
-	// Apply deletions
-	for msg_id in &changes.deleted {
-		match delete_message(&client, chat_id, *msg_id, bot_token).await {
-			Ok(()) => info!("Deleted message {}", msg_id),
-			Err(e) => warn!("Failed to delete message {}: {}", msg_id, e),
+	// Apply deletions (batch delete)
+	if !changes.deleted.is_empty() {
+		match mtproto::delete_messages(client, group_id, &changes.deleted).await {
+			Ok(count) => info!("Deleted {} message(s)", count),
+			Err(e) => warn!("Failed to delete messages: {}", e),
 		}
 	}
 
-	// Apply edits
+	// Apply edits (one by one)
 	for (msg_id, new_content) in &changes.edited {
-		match edit_message(&client, chat_id, topic_id, *msg_id, new_content, bot_token).await {
+		match mtproto::edit_message(client, group_id, *msg_id, new_content).await {
 			Ok(()) => info!("Edited message {}", msg_id),
 			Err(e) => warn!("Failed to edit message {}: {}", msg_id, e),
 		}
@@ -110,54 +108,6 @@ pub async fn apply_changes(changes: &FileChanges, group_id: u64, topic_id: u64, 
 
 	info!("Changes applied successfully");
 	Ok(())
-}
-
-/// Delete a message via Telegram Bot API
-async fn delete_message(client: &reqwest::Client, chat_id: i64, message_id: i32, bot_token: &str) -> Result<()> {
-	let url = format!("https://api.telegram.org/bot{}/deleteMessage", bot_token);
-
-	let params = [("chat_id", chat_id.to_string()), ("message_id", message_id.to_string())];
-
-	let res = client.post(&url).form(&params).send().await?;
-	let status = res.status();
-	let response_text = res.text().await?;
-
-	if status.is_success() {
-		let parsed: serde_json::Value = serde_json::from_str(&response_text)?;
-		if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-			return Ok(());
-		}
-		let description = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("unknown error");
-		return Err(eyre!("Telegram API error: {}", description));
-	}
-
-	Err(eyre!("HTTP error {}: {}", status, response_text))
-}
-
-/// Edit a message via Telegram Bot API
-async fn edit_message(client: &reqwest::Client, chat_id: i64, topic_id: u64, message_id: i32, new_text: &str, bot_token: &str) -> Result<()> {
-	let url = format!("https://api.telegram.org/bot{}/editMessageText", bot_token);
-
-	// Note: editMessageText doesn't need message_thread_id for forum topics
-	// The message_id is unique within the chat
-	let _ = topic_id;
-
-	let params = [("chat_id", chat_id.to_string()), ("message_id", message_id.to_string()), ("text", new_text.to_string())];
-
-	let res = client.post(&url).form(&params).send().await?;
-	let status = res.status();
-	let response_text = res.text().await?;
-
-	if status.is_success() {
-		let parsed: serde_json::Value = serde_json::from_str(&response_text)?;
-		if parsed.get("ok").and_then(|v| v.as_bool()) == Some(true) {
-			return Ok(());
-		}
-		let description = parsed.get("description").and_then(|v| v.as_str()).unwrap_or("unknown error");
-		return Err(eyre!("Telegram API error: {}", description));
-	}
-
-	Err(eyre!("HTTP error {}: {}", status, response_text))
 }
 
 /// Resolve a topic file path to (group_id, topic_id)

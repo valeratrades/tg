@@ -199,6 +199,14 @@ async fn main() -> Result<()> {
 				let old_content = std::fs::read_to_string(&path).unwrap_or_default();
 				let old_todos = parse_todos_file(&old_content);
 
+				// Count total TODOs vs trackable ones
+				let total_todo_lines = old_content.lines().filter(|l| l.contains("<!-- todo:")).count();
+				let trackable_count = old_todos.len();
+				if trackable_count == 0 && total_todo_lines > 0 {
+					eprintln!("Note: {} TODOs found but none have message IDs (old messages before ID tracking).", total_todo_lines);
+					eprintln!("Deletions from todos.md won't sync to Telegram for these items.");
+				}
+
 				// Open with editor
 				open_with_mode(&path, OpenMode::Normal)?;
 
@@ -209,20 +217,29 @@ async fn main() -> Result<()> {
 				// Find deleted TODOs (in old but not in new)
 				let deleted: Vec<_> = old_todos.difference(&new_todos).cloned().collect();
 
+				eprintln!("Tracking: {} trackable TODOs before, {} after, {} deleted", old_todos.len(), new_todos.len(), deleted.len());
+
 				if !deleted.is_empty() {
-					eprintln!("Detected {} deleted TODO(s), syncing to Telegram...", deleted.len());
+					eprintln!("Syncing {} deletion(s) to Telegram via MTProto...", deleted.len());
 
-					// Group deletions by (group_id, topic_id)
-					let mut deletions_by_topic: std::collections::BTreeMap<(u64, u64), Vec<i32>> = std::collections::BTreeMap::new();
+					// Group deletions by group_id (MTProto deletes by channel, not topic)
+					let mut deletions_by_group: std::collections::BTreeMap<u64, Vec<i32>> = std::collections::BTreeMap::new();
 					for todo in &deleted {
-						deletions_by_topic.entry((todo.group_id, todo.topic_id)).or_default().push(todo.message_id);
+						deletions_by_group.entry(todo.group_id).or_default().push(todo.message_id);
 					}
 
-					// Apply deletions for each topic
-					for ((group_id, topic_id), msg_ids) in deletions_by_topic {
-						let changes = sync::FileChanges { deleted: msg_ids, edited: vec![] };
-						sync::apply_changes(&changes, group_id, topic_id, &bot_token).await?;
+					// Create MTProto client and apply deletions
+					let (client, handle) = mtproto::create_client(&config).await?;
+
+					for (group_id, msg_ids) in deletions_by_group {
+						match mtproto::delete_messages(&client, group_id, &msg_ids).await {
+							Ok(count) => eprintln!("Deleted {} message(s) from group {}", count, group_id),
+							Err(e) => eprintln!("Failed to delete from group {}: {}", group_id, e),
+						}
 					}
+
+					client.disconnect();
+					handle.abort();
 				}
 			}
 		},

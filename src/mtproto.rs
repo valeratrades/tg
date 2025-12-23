@@ -283,3 +283,33 @@ fn sanitize_topic_name(name: &str) -> String {
 		.trim_matches('_')
 		.to_string()
 }
+
+/// Delete messages from a channel/supergroup via MTProto
+/// Returns the number of successfully deleted messages
+pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]) -> Result<usize> {
+	if message_ids.is_empty() {
+		return Ok(0);
+	}
+
+	let chat_id = telegram_chat_id(group_id);
+	let input_peer = get_input_peer(client, chat_id).await?;
+
+	// Extract channel info from InputPeer
+	let (channel_id, access_hash) = match &input_peer {
+		tl::enums::InputPeer::Channel(c) => (c.channel_id, c.access_hash),
+		_ => bail!("Expected channel peer for group {}", group_id),
+	};
+
+	let channel = tl::enums::InputChannel::Channel(tl::types::InputChannel { channel_id, access_hash });
+
+	let request = tl::functions::channels::DeleteMessages { channel, id: message_ids.to_vec() };
+
+	let result = client.invoke(&request).await?;
+
+	let pts_count = match result {
+		tl::enums::messages::AffectedMessages::Messages(m) => m.pts_count,
+	};
+
+	info!("Deleted {} messages from group {}", pts_count, group_id);
+	Ok(pts_count as usize)
+}

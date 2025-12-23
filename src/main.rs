@@ -194,7 +194,36 @@ async fn main() -> Result<()> {
 			}
 			TodosCommands::Open => {
 				let path = aggregate_todos(&config)?;
+
+				// Read the generated todos.md to get the old state
+				let old_content = std::fs::read_to_string(&path).unwrap_or_default();
+				let old_todos = parse_todos_file(&old_content);
+
+				// Open with editor
 				open_with_mode(&path, OpenMode::Normal)?;
+
+				// Read the file after editing
+				let new_content = std::fs::read_to_string(&path).unwrap_or_default();
+				let new_todos = parse_todos_file(&new_content);
+
+				// Find deleted TODOs (in old but not in new)
+				let deleted: Vec<_> = old_todos.difference(&new_todos).cloned().collect();
+
+				if !deleted.is_empty() {
+					eprintln!("Detected {} deleted TODO(s), syncing to Telegram...", deleted.len());
+
+					// Group deletions by (group_id, topic_id)
+					let mut deletions_by_topic: std::collections::BTreeMap<(u64, u64), Vec<i32>> = std::collections::BTreeMap::new();
+					for todo in &deleted {
+						deletions_by_topic.entry((todo.group_id, todo.topic_id)).or_default().push(todo.message_id);
+					}
+
+					// Apply deletions for each topic
+					for ((group_id, topic_id), msg_ids) in deletions_by_topic {
+						let changes = sync::FileChanges { deleted: msg_ids, edited: vec![] };
+						sync::apply_changes(&changes, group_id, topic_id, &bot_token).await?;
+					}
+				}
 			}
 		},
 		Commands::Init(args) => {
@@ -414,6 +443,42 @@ fn list_topics() -> Result<()> {
 	Ok(())
 }
 
+/// A tracked TODO item (with group/topic/message IDs for syncing)
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TrackedTodo {
+	group_id: u64,
+	topic_id: u64,
+	message_id: i32,
+}
+
+/// Parse todos.md and extract all tracked TODO items
+fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
+	let mut tracked = std::collections::HashSet::new();
+	// Pattern: <!-- todo:group_id:topic_id:msg_id -->
+	let todo_re = regex::Regex::new(r"<!-- todo:(\d+):(\d+):(\d+) -->").unwrap();
+
+	for line in content.lines() {
+		if let Some(caps) = todo_re.captures(line) {
+			if let (Ok(group_id), Ok(topic_id), Ok(msg_id)) = (
+				caps.get(1).unwrap().as_str().parse::<u64>(),
+				caps.get(2).unwrap().as_str().parse::<u64>(),
+				caps.get(3).unwrap().as_str().parse::<i32>(),
+			) {
+				// Only track items with valid message IDs (not 0)
+				if msg_id != 0 {
+					tracked.insert(TrackedTodo {
+						group_id,
+						topic_id,
+						message_id: msg_id,
+					});
+				}
+			}
+		}
+	}
+
+	tracked
+}
+
 /// A TODO item extracted from a topic file
 struct TodoItem {
 	/// The TODO text (after "TODO: ")
@@ -422,6 +487,12 @@ struct TodoItem {
 	source: String,
 	/// Approximate date of the message containing the TODO
 	date: Option<chrono::NaiveDate>,
+	/// Message ID from Telegram (if available)
+	message_id: Option<i32>,
+	/// Group ID for this TODO's source
+	group_id: u64,
+	/// Topic ID for this TODO's source
+	topic_id: u64,
 }
 
 /// Aggregate TODOs from all topic files into todos.md, returning the path
@@ -437,6 +508,8 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 
 	// Regex for date headers like "## Jan 03" or "## Dec 25"
 	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})$").unwrap();
+	// Regex for message ID markers like <!-- msg:123 -->
+	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+) -->").unwrap();
 
 	// Iterate over all known topics from metadata
 	for (group_id, group) in &metadata.groups {
@@ -490,7 +563,13 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 
 				// Check for TODO
 				if let Some(todo_start) = trimmed.find("TODO: ") {
-					let todo_text = trimmed[todo_start + 6..].trim();
+					// Extract message ID if present
+					let message_id = msg_id_re.captures(trimmed).and_then(|caps| caps.get(1)?.as_str().parse::<i32>().ok());
+
+					// Extract TODO text (remove the msg ID marker if present)
+					let todo_line = msg_id_re.replace(trimmed, "");
+					let todo_text = todo_line[todo_start + 6..].trim();
+
 					if !todo_text.is_empty() {
 						// Only include if within cutoff date (or no date info available)
 						let include = current_date.map(|d| d >= cutoff_date).unwrap_or(true);
@@ -499,6 +578,9 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 								text: todo_text.to_string(),
 								source: source.clone(),
 								date: current_date,
+								message_id,
+								group_id: *group_id,
+								topic_id: *topic_id,
 							});
 						}
 					}
@@ -535,7 +617,10 @@ fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
 			}
 
 			let date_str = todo.date.map(|d| format!(" ({})", d.format("%b %d"))).unwrap_or_default();
-			output.push_str(&format!("- [ ] {}{}\n", todo.text, date_str));
+			// Include tracking info: group_id:topic_id:msg_id (msg_id is 0 if not available)
+			let msg_id = todo.message_id.unwrap_or(0);
+			let tracking = format!(" <!-- todo:{}:{}:{} -->", todo.group_id, todo.topic_id, msg_id);
+			output.push_str(&format!("- [ ] {}{}{}\n", todo.text, date_str, tracking));
 		}
 	}
 

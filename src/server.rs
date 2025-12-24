@@ -244,8 +244,13 @@ async fn handle_connection(mut socket: TcpStream, _config: &AppConfig, bot_token
 
 		loop {
 			match send_message(&message, bot_token).await {
-				Ok(_) => {
-					info!("Message sent successfully to Telegram");
+				Ok(msg_id) => {
+					info!("Message sent successfully to Telegram with id {}", msg_id);
+
+					// Update the local file to add the message ID marker
+					if let Err(e) = append_msg_id_to_last_line(&chat_filepath, msg_id) {
+						warn!("Failed to add message ID marker to file: {}", e);
+					}
 					break;
 				}
 				Err(e) => {
@@ -263,6 +268,29 @@ async fn handle_connection(mut socket: TcpStream, _config: &AppConfig, bot_token
 	}
 }
 
+/// Append a message ID marker to the last non-empty line of a file
+fn append_msg_id_to_last_line(path: &std::path::Path, msg_id: i32) -> Result<()> {
+	let content = std::fs::read_to_string(path)?;
+	let lines: Vec<&str> = content.lines().collect();
+
+	// Find the last non-empty line and append the marker
+	for i in (0..lines.len()).rev() {
+		let line = lines[i].trim();
+		if !line.is_empty() && !line.starts_with("## ") && !line.starts_with(". ") {
+			// This is likely the message line we just wrote
+			let marker = format!(" <!-- msg:{} -->", msg_id);
+			let new_line = format!("{}{}", lines[i].trim_end(), marker);
+			let mut result: Vec<String> = lines[..i].iter().map(|s| s.to_string()).collect();
+			result.push(new_line);
+			result.extend(lines[i + 1..].iter().map(|s| s.to_string()));
+			std::fs::write(path, result.join("\n") + "\n")?;
+			return Ok(());
+		}
+	}
+
+	Ok(())
+}
+
 /// Extract image path from markdown image syntax: ![alt](path) or ![](path)
 fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	// Match ![...](...) pattern
@@ -276,7 +304,8 @@ fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	Some((path, caption))
 }
 
-pub async fn send_message(message: &Message, bot_token: &str) -> Result<()> {
+/// Returns the message ID assigned by Telegram
+pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 	debug!("Sending message to Telegram API");
 	let client = reqwest::Client::new();
 
@@ -317,21 +346,26 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<()> {
 			if status.is_success() {
 				debug!("Telegram API response: {}", response_text);
 				info!("Successfully sent photo to group {} topic {}", message.group_id, message.topic_id);
+
+				// Extract message_id from response
+				let response: serde_json::Value = serde_json::from_str(&response_text)?;
+				let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
+				Ok(msg_id)
 			} else {
 				warn!("Telegram API returned non-success status {}: {}", status, response_text);
+				Err(eyre::eyre!("Telegram API error: {}", status))
 			}
 		} else {
 			warn!("Image file not found: {}, sending as text", full_path.display());
-			send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await?;
+			send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await
 		}
 	} else {
-		send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await?;
+		send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await
 	}
-
-	Ok(())
 }
 
-async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<()> {
+/// Returns the message ID assigned by Telegram
+async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<i32> {
 	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
 	let chat_id = telegram_chat_id(group_id);
 
@@ -350,11 +384,15 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 	if status.is_success() {
 		debug!("Telegram API response: {}", response_text);
 		info!("Successfully sent message to group {} topic {}", group_id, topic_id);
+
+		// Extract message_id from response
+		let response: serde_json::Value = serde_json::from_str(&response_text)?;
+		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
+		Ok(msg_id)
 	} else {
 		warn!("Telegram API returned non-success status {}: {}", status, response_text);
+		Err(eyre::eyre!("Telegram API error: {}", status))
 	}
-
-	Ok(())
 }
 
 /// match duration_since_last_write {
@@ -369,7 +407,8 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 /// Format a message append with an optional message ID marker
 pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>) -> String {
 	debug!("Formatting message append");
-	assert!(last_write_datetime.is_none() || last_write_datetime.unwrap() <= now);
+	// Note: last_write_datetime can be > now when processing historical messages from Telegram
+	// (message timestamps may be slightly ahead due to server time differences)
 
 	let mut prefix = String::new();
 	if let Some(last_write_datetime) = last_write_datetime {

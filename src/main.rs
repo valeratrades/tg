@@ -65,6 +65,13 @@ enum Commands {
 	Todos(TodosCommands),
 	/// Shell aliases and hooks. Usage: `tg init <shell> | source`
 	Init(shell_init::ShellInitArgs),
+	/// Directly schedule an update (delete or edit) for a specific message
+	/// Ex:
+	/// ```sh
+	/// tg schedule-update delete 2244305221 1 2645
+	/// tg schedule-update edit 2244305221 1 2645 "new message text"
+	/// ```
+	ScheduleUpdate(ScheduleUpdateArgs),
 }
 
 #[derive(Args, Clone, Debug)]
@@ -111,6 +118,37 @@ enum TodosCommands {
 	Open,
 }
 
+#[derive(Args, Clone, Debug)]
+struct ScheduleUpdateArgs {
+	/// Action to perform
+	#[command(subcommand)]
+	action: UpdateAction,
+}
+
+#[derive(Clone, Debug, Subcommand)]
+enum UpdateAction {
+	/// Delete a message from Telegram
+	Delete {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID
+		topic_id: u64,
+		/// Message ID
+		message_id: i32,
+	},
+	/// Edit a message on Telegram
+	Edit {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID (required for local file cleanup)
+		topic_id: u64,
+		/// Message ID
+		message_id: i32,
+		/// New message content
+		new_content: String,
+	},
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
 	v_utils::clientside!();
@@ -133,14 +171,31 @@ async fn main() -> Result<()> {
 			// Try server first, fall back to direct send
 			match TcpStream::connect(&addr).await {
 				Ok(mut stream) => {
+					// Server handles file write + message ID tracking
 					let json = serde_json::to_string(&message)?;
 					stream.write_all(json.as_bytes()).await?;
 					let mut response = [0u8; 3];
 					stream.read_exact(&mut response).await?;
 				}
 				Err(_) => {
-					// Server not running, send directly
-					server::send_message(&message, &bot_token).await?;
+					// Server not running, send directly and update local file
+					let msg_id = server::send_message(&message, &bot_token).await?;
+
+					// Write to local file with message ID
+					let metadata = TopicsMetadata::load();
+					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
+
+					// Ensure directory exists
+					if let Some(parent) = chat_filepath.parent() {
+						std::fs::create_dir_all(parent)?;
+					}
+
+					// Append message with ID marker
+					let now = chrono::Utc::now();
+					let formatted = server::format_message_append_with_id(&msg_text, None, now, Some(msg_id));
+
+					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
+					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
 				}
 			}
 		}
@@ -214,26 +269,14 @@ async fn main() -> Result<()> {
 			let new_content = std::fs::read_to_string(&path).unwrap_or_default();
 			let new_state = sync::parse_file_messages(&new_content);
 
-			// Detect changes
+			// Detect changes and push to Telegram
 			let changes = sync::detect_changes(&old_state, &new_state);
-
 			if !changes.is_empty() {
-				// Resolve group ID from file path
-				if let Some((group_id, _topic_id)) = sync::resolve_topic_ids_from_path(&path) {
-					eprintln!(
-						"Detected {} changes ({} deletions, {} edits)",
-						changes.total_affected(),
-						changes.deleted.len(),
-						changes.edited.len()
-					);
-
-					// Apply changes via MTProto
-					let (client, handle) = mtproto::create_client(&config).await?;
-					sync::apply_changes(&changes, group_id, &client).await?;
-					client.disconnect();
-					handle.abort();
+				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
+					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
+					sync::push(updates, &config).await?;
 				} else {
-					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced to Telegram");
+					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced");
 				}
 			}
 		}
@@ -255,21 +298,12 @@ async fn main() -> Result<()> {
 				let total_todo_lines = old_content.lines().filter(|l| l.contains("<!-- todo:")).count();
 				let trackable_count = old_todos.len();
 				let untrackable_count = total_todo_lines - trackable_count;
-				tracing::debug!(
-					total_todos = total_todo_lines,
-					trackable = trackable_count,
-					untrackable = untrackable_count,
-					"Parsed todos.md before edit"
-				);
 
 				if trackable_count == 0 && total_todo_lines > 0 {
-					eprintln!("Note: {} TODOs found but none have message IDs (old messages before ID tracking).", total_todo_lines);
-					eprintln!("Deletions from todos.md won't sync to Telegram for these items.");
+					eprintln!("Note: {} TODOs found but none have message IDs (old messages).", total_todo_lines);
+					eprintln!("Run `tg pull --reset` to add message IDs for sync.");
 				} else if untrackable_count > 0 {
-					eprintln!(
-						"Note: {}/{} TODOs have message IDs. {} cannot be synced (old messages).",
-						trackable_count, total_todo_lines, untrackable_count
-					);
+					eprintln!("Note: {}/{} TODOs trackable. {} need `tg pull --reset`.", trackable_count, total_todo_lines, untrackable_count);
 				}
 
 				// Open with editor
@@ -279,67 +313,38 @@ async fn main() -> Result<()> {
 				let new_content = std::fs::read_to_string(&path).unwrap_or_default();
 				let new_todos = parse_todos_file(&new_content);
 
-				// Find deleted TODOs (in old but not in new)
+				// Find deleted TODOs and convert to MessageUpdates
 				let deleted: Vec<_> = old_todos.difference(&new_todos).cloned().collect();
 
-				tracing::debug!(
-					old_trackable = old_todos.len(),
-					new_trackable = new_todos.len(),
-					deleted_count = deleted.len(),
-					"Comparing todos after edit"
-				);
-				for todo in &deleted {
-					tracing::debug!(group_id = todo.group_id, topic_id = todo.topic_id, message_id = todo.message_id, "Will delete todo");
-				}
-
-				eprintln!("Tracking: {} trackable TODOs before, {} after, {} deleted", old_todos.len(), new_todos.len(), deleted.len());
-
 				if !deleted.is_empty() {
-					eprintln!("Syncing {} deletion(s) to Telegram via MTProto...", deleted.len());
-
-					// Group deletions by group_id (MTProto deletes by channel, not topic)
-					let mut deletions_by_group: std::collections::BTreeMap<u64, Vec<i32>> = std::collections::BTreeMap::new();
-					for todo in &deleted {
-						deletions_by_group.entry(todo.group_id).or_default().push(todo.message_id);
-					}
-
-					// Create MTProto client and apply deletions
-					let (client, handle) = mtproto::create_client(&config).await?;
-
-					for (group_id, msg_ids) in &deletions_by_group {
-						tracing::info!(group_id, msg_ids = ?msg_ids, "Deleting messages via MTProto");
-						match mtproto::delete_messages(&client, *group_id, msg_ids).await {
-							Ok(count) => {
-								tracing::info!(group_id, count, "Successfully deleted messages");
-								eprintln!("Deleted {} message(s) from group {}", count, group_id);
-							}
-							Err(e) => {
-								tracing::error!(group_id, error = %e, "Failed to delete messages");
-								eprintln!("Failed to delete from group {}: {}", group_id, e);
-							}
-						}
-					}
-
-					client.disconnect();
-					handle.abort();
-
-					// Also remove TODOs from source topic files so they don't reappear
-					let mut source_removals = 0;
-					for todo in &deleted {
-						match remove_todo_from_source(todo.group_id, todo.topic_id, &todo.text) {
-							Ok(true) => source_removals += 1,
-							Ok(false) => tracing::warn!(text = %todo.text, "TODO not found in source file"),
-							Err(e) => tracing::error!(error = %e, "Failed to remove TODO from source file"),
-						}
-					}
-					if source_removals > 0 {
-						eprintln!("Removed {} TODO(s) from source topic files", source_removals);
-					}
+					let updates: Vec<_> = deleted
+						.iter()
+						.map(|todo| sync::MessageUpdate::Delete {
+							group_id: todo.group_id,
+							topic_id: todo.topic_id,
+							message_id: todo.message_id,
+						})
+						.collect();
+					sync::push(updates, &config).await?;
 				}
 			}
 		},
 		Commands::Init(args) => {
 			shell_init::output(args);
+		}
+		Commands::ScheduleUpdate(args) => {
+			let update = match args.action {
+				UpdateAction::Delete { group_id, topic_id, message_id } => sync::MessageUpdate::Delete { group_id, topic_id, message_id },
+				UpdateAction::Edit {
+					group_id,
+					topic_id: _,
+					message_id,
+					new_content,
+				} => sync::MessageUpdate::Edit { group_id, message_id, new_content },
+			};
+
+			eprintln!("Scheduling update: {:?}", update);
+			sync::push(vec![update], &config).await?;
 		}
 	};
 
@@ -593,35 +598,6 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	}
 
 	tracked
-}
-
-/// Remove a TODO line from a source topic file
-fn remove_todo_from_source(group_id: u64, topic_id: u64, todo_text: &str) -> Result<bool> {
-	let metadata = TopicsMetadata::load();
-	let file_path = pull::topic_filepath(group_id, topic_id, &metadata);
-
-	if !file_path.exists() {
-		return Ok(false);
-	}
-
-	let content = std::fs::read_to_string(&file_path)?;
-	let mut lines: Vec<&str> = content.lines().collect();
-	let original_len = lines.len();
-
-	// Find and remove the line containing this TODO text
-	// Match "TODO: {text}" pattern
-	let search_pattern = format!("TODO: {}", todo_text);
-	lines.retain(|line| !line.contains(&search_pattern));
-
-	if lines.len() < original_len {
-		// Something was removed, write back
-		let new_content = lines.join("\n");
-		std::fs::write(&file_path, new_content)?;
-		tracing::info!(path = %file_path.display(), "Removed TODO from source file");
-		return Ok(true);
-	}
-
-	Ok(false)
 }
 
 /// A TODO item extracted from a topic file

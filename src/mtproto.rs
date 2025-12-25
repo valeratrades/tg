@@ -285,7 +285,7 @@ fn sanitize_topic_name(name: &str) -> String {
 }
 
 /// Delete messages from a channel/supergroup via MTProto
-/// Returns the number of successfully deleted messages
+/// Returns the number of successfully deleted messages (including already-deleted ones)
 pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]) -> Result<usize> {
 	if message_ids.is_empty() {
 		return Ok(0);
@@ -300,8 +300,54 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 		_ => bail!("Expected channel peer for group {}", group_id),
 	};
 
-	let channel = tl::enums::InputChannel::Channel(tl::types::InputChannel { channel_id, access_hash });
+	debug!(group_id, channel_id, ?message_ids, "Attempting to delete messages");
 
+	// First, verify the messages exist by fetching them
+	let get_request = tl::functions::channels::GetMessages {
+		channel: tl::enums::InputChannel::Channel(tl::types::InputChannel { channel_id, access_hash }),
+		id: message_ids.iter().map(|&id| tl::enums::InputMessage::Id(tl::types::InputMessageId { id })).collect(),
+	};
+
+	// Track how many messages are already deleted (Empty) - we'll count these as "successful"
+	let mut already_deleted_count = 0usize;
+
+	match client.invoke(&get_request).await {
+		Ok(result) => {
+			let messages = match &result {
+				tl::enums::messages::Messages::Messages(m) => &m.messages,
+				tl::enums::messages::Messages::Slice(m) => &m.messages,
+				tl::enums::messages::Messages::ChannelMessages(m) => &m.messages,
+				tl::enums::messages::Messages::NotModified(_) => &vec![],
+			};
+
+			for msg in messages {
+				match msg {
+					tl::enums::Message::Message(m) => {
+						debug!(msg_id = m.id, "Message exists, will delete");
+					}
+					tl::enums::Message::Service(s) => {
+						debug!(msg_id = s.id, "Service message, will delete");
+					}
+					tl::enums::Message::Empty(e) => {
+						// Message already deleted on Telegram - count as success
+						info!(msg_id = e.id, "Message already deleted on Telegram, treating as successful deletion");
+						already_deleted_count += 1;
+					}
+				}
+			}
+		}
+		Err(e) => {
+			warn!(error = %e, "Failed to verify messages exist before deletion");
+		}
+	}
+
+	// If all messages are already deleted, skip the delete call
+	if already_deleted_count == message_ids.len() {
+		info!(count = already_deleted_count, "All messages already deleted on Telegram");
+		return Ok(already_deleted_count);
+	}
+
+	let channel = tl::enums::InputChannel::Channel(tl::types::InputChannel { channel_id, access_hash });
 	let request = tl::functions::channels::DeleteMessages { channel, id: message_ids.to_vec() };
 
 	let result = client.invoke(&request).await?;
@@ -310,8 +356,10 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 		tl::enums::messages::AffectedMessages::Messages(m) => m.pts_count,
 	};
 
-	info!("Deleted {} messages from group {}", pts_count, group_id);
-	Ok(pts_count as usize)
+	// Total successful = actually deleted + already deleted
+	let total_success = (pts_count as usize) + already_deleted_count;
+	info!(pts_count, already_deleted_count, total_success, "Delete operation complete");
+	Ok(total_success)
 }
 
 /// Edit a message in a channel/supergroup via MTProto

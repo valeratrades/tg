@@ -218,19 +218,26 @@ pub async fn pull(config: &AppConfig, _bot_token: &str) -> Result<()> {
 
 			if messages.is_empty() {
 				debug!("No new messages for topic {}", topic_name);
-				continue;
+			} else {
+				info!("Fetched {} messages for topic {}", messages.len(), topic_name);
+
+				// Find max message ID for updating sync timestamp
+				let max_msg_id = messages.iter().map(|m| m.id).max().unwrap_or(last_synced_id);
+
+				// Merge messages into file
+				merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
+
+				// Update sync timestamp
+				sync_timestamps.topics.insert(topic_key, max_msg_id);
 			}
 
-			info!("Fetched {} messages for topic {}", messages.len(), topic_name);
-
-			// Find max message ID for updating sync timestamp
-			let max_msg_id = messages.iter().map(|m| m.id).max().unwrap_or(last_synced_id);
-
-			// Merge messages into file
-			merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
-
-			// Update sync timestamp
-			sync_timestamps.topics.insert(topic_key, max_msg_id);
+			// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
+			let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
+			if file_path.exists() {
+				if let Err(e) = cleanup_tagless_messages(&file_path) {
+					warn!("Failed to cleanup tagless messages in {}: {}", file_path.display(), e);
+				}
+			}
 		}
 	}
 
@@ -463,6 +470,62 @@ pub fn ensure_topic_dir(group_id: u64, metadata: &TopicsMetadata) -> Result<()> 
 	Ok(())
 }
 
+/// Remove tagless message lines from a topic file
+/// Tagless messages are optimistic writes that should be replaced by tagged versions from TG
+/// after sync. Lines without tags are removed, keeping:
+/// - Date headers (lines starting with "## ")
+/// - Empty lines
+/// - Lines with message ID tags (<!-- msg:N -->)
+fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
+	use regex::Regex;
+
+	let content = std::fs::read_to_string(file_path)?;
+	let msg_id_re = Regex::new(r"<!-- msg:\d+ -->").unwrap();
+
+	let mut new_lines: Vec<&str> = Vec::new();
+	let mut removed_count = 0;
+
+	for line in content.lines() {
+		let trimmed = line.trim();
+
+		// Keep empty lines
+		if trimmed.is_empty() {
+			new_lines.push(line);
+			continue;
+		}
+
+		// Keep date headers
+		if trimmed.starts_with("## ") {
+			new_lines.push(line);
+			continue;
+		}
+
+		// Keep lines with message ID tags
+		if msg_id_re.is_match(line) {
+			new_lines.push(line);
+			continue;
+		}
+
+		// This is a tagless message line - remove it
+		removed_count += 1;
+		debug!("Removing tagless line: {}", trimmed);
+	}
+
+	if removed_count > 0 {
+		info!("Cleaned up {} tagless message(s) from {}", removed_count, file_path.display());
+		let new_content = new_lines.join("\n");
+		// Preserve trailing newline if original had one
+		let final_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
+			format!("{}\n", new_content)
+		} else {
+			new_content
+		};
+		std::fs::write(file_path, final_content)?;
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -473,5 +536,44 @@ mod tests {
 		assert_eq!(sanitize_topic_name("My Topic"), "my_topic");
 		assert_eq!(sanitize_topic_name("🔥 Hot Takes"), "hot_takes");
 		assert_eq!(sanitize_topic_name("my-topic"), "my-topic");
+	}
+
+	#[test]
+	fn test_cleanup_tagless_messages() {
+		use std::io::Write as _;
+
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_cleanup.md");
+
+		// Create test file with mixed content
+		let content = r#"## Jan 03
+Hello with tag <!-- msg:123 -->
+This is tagless and should be removed
+. Another tagged message <!-- msg:456 -->
+
+## Jan 04
+Untagged message
+Tagged message <!-- msg:789 -->
+"#;
+		let mut file = std::fs::File::create(&test_file).unwrap();
+		file.write_all(content.as_bytes()).unwrap();
+
+		// Run cleanup
+		cleanup_tagless_messages(&test_file).unwrap();
+
+		// Read result
+		let result = std::fs::read_to_string(&test_file).unwrap();
+
+		// Verify: tagless messages removed, headers/tagged/empty preserved
+		assert!(result.contains("## Jan 03"));
+		assert!(result.contains("Hello with tag <!-- msg:123 -->"));
+		assert!(!result.contains("This is tagless"));
+		assert!(result.contains(". Another tagged message <!-- msg:456 -->"));
+		assert!(result.contains("## Jan 04"));
+		assert!(!result.contains("Untagged message"));
+		assert!(result.contains("Tagged message <!-- msg:789 -->"));
+
+		// Cleanup
+		std::fs::remove_file(&test_file).ok();
 	}
 }

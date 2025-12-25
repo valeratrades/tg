@@ -147,6 +147,17 @@ enum UpdateAction {
 		/// New message content
 		new_content: String,
 	},
+	/// Create (send) a new message to Telegram
+	/// Note: This is handled by the server's background tasks; using this directly
+	/// will write the message to file without a tag and queue it for sending.
+	Create {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID
+		topic_id: u64,
+		/// Message content
+		content: String,
+	},
 }
 
 #[tokio::main]
@@ -333,18 +344,57 @@ async fn main() -> Result<()> {
 			shell_init::output(args);
 		}
 		Commands::ScheduleUpdate(args) => {
-			let update = match args.action {
-				UpdateAction::Delete { group_id, topic_id, message_id } => sync::MessageUpdate::Delete { group_id, topic_id, message_id },
+			match args.action {
+				UpdateAction::Delete { group_id, topic_id, message_id } => {
+					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
+					eprintln!("Scheduling update: {:?}", update);
+					sync::push(vec![update], &config).await?;
+				}
 				UpdateAction::Edit {
 					group_id,
 					topic_id: _,
 					message_id,
 					new_content,
-				} => sync::MessageUpdate::Edit { group_id, message_id, new_content },
-			};
+				} => {
+					let update = sync::MessageUpdate::Edit { group_id, message_id, new_content };
+					eprintln!("Scheduling update: {:?}", update);
+					sync::push(vec![update], &config).await?;
+				}
+				UpdateAction::Create { group_id, topic_id, content } => {
+					// Create: write to file without tag, then send via bot API
+					// The tag will be added by sync when the message appears on TG
+					eprintln!("Creating message in group {} topic {}", group_id, topic_id);
 
-			eprintln!("Scheduling update: {:?}", update);
-			sync::push(vec![update], &config).await?;
+					// Write to local file without tag
+					let metadata = TopicsMetadata::load();
+					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
+
+					// Ensure directory exists
+					if let Some(parent) = chat_filepath.parent() {
+						std::fs::create_dir_all(parent)?;
+					}
+
+					// Append message without tag
+					let now = chrono::Utc::now();
+					let formatted = server::format_message_append(&content, None, now);
+					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
+					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
+
+					eprintln!("Wrote message to {}", chat_filepath.display());
+
+					// Send via bot API (synchronous for CLI)
+					let message = server::Message::new(group_id, topic_id, content);
+					match server::send_message(&message, &bot_token).await {
+						Ok(msg_id) => {
+							eprintln!("Message sent to Telegram with id {}", msg_id);
+							// Note: The tag will be added by the next sync
+						}
+						Err(e) => {
+							eprintln!("Failed to send message: {}. It will be retried on next server run.", e);
+						}
+					}
+				}
+			};
 		}
 	};
 

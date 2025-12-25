@@ -238,57 +238,39 @@ async fn handle_connection(mut socket: TcpStream, _config: &AppConfig, bot_token
 		}
 		debug!("Set xattr successfully");
 
-		let mut delay_secs = 1.0_f64;
-		const E: f64 = std::f64::consts::E;
-		const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+		// Spawn background task to send to Telegram (with retries)
+		// The message is written to file immediately without a tag.
+		// When the send succeeds, the next sync will pull the message from TG (with its real ID)
+		// and the tagless local message will be cleaned up.
+		let message_clone = message.clone();
+		let bot_token = bot_token.to_string();
+		tokio::spawn(async move {
+			let mut delay_secs = 1.0_f64;
+			const E: f64 = std::f64::consts::E;
+			const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
 
-		loop {
-			match send_message(&message, bot_token).await {
-				Ok(msg_id) => {
-					info!("Message sent successfully to Telegram with id {}", msg_id);
-
-					// Update the local file to add the message ID marker
-					if let Err(e) = append_msg_id_to_last_line(&chat_filepath, msg_id) {
-						warn!("Failed to add message ID marker to file: {}", e);
+			loop {
+				match send_message(&message_clone, &bot_token).await {
+					Ok(msg_id) => {
+						info!("Message sent successfully to Telegram with id {}", msg_id);
+						// No need to update local file - sync will handle it
+						break;
 					}
-					break;
-				}
-				Err(e) => {
-					let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E; // approximate total time spent retrying
-					if total_elapsed_secs >= THIRTY_MINS_SECS {
-						error!("Failed to send message to Telegram after 30+ minutes: {}", e);
-					} else {
+					Err(e) => {
+						let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
+						if total_elapsed_secs >= THIRTY_MINS_SECS {
+							error!("Failed to send message to Telegram after 30+ minutes: {}", e);
+							// Give up - the tagless message will be cleaned up on next sync
+							break;
+						}
 						warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
+						tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+						delay_secs *= E;
 					}
-					tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-					delay_secs *= E;
 				}
 			}
-		}
+		});
 	}
-}
-
-/// Append a message ID marker to the last non-empty line of a file
-fn append_msg_id_to_last_line(path: &std::path::Path, msg_id: i32) -> Result<()> {
-	let content = std::fs::read_to_string(path)?;
-	let lines: Vec<&str> = content.lines().collect();
-
-	// Find the last non-empty line and append the marker
-	for i in (0..lines.len()).rev() {
-		let line = lines[i].trim();
-		if !line.is_empty() && !line.starts_with("## ") && !line.starts_with(". ") {
-			// This is likely the message line we just wrote
-			let marker = format!(" <!-- msg:{} -->", msg_id);
-			let new_line = format!("{}{}", lines[i].trim_end(), marker);
-			let mut result: Vec<String> = lines[..i].iter().map(|s| s.to_string()).collect();
-			result.push(new_line);
-			result.extend(lines[i + 1..].iter().map(|s| s.to_string()));
-			std::fs::write(path, result.join("\n") + "\n")?;
-			return Ok(());
-		}
-	}
-
-	Ok(())
 }
 
 /// Extract image path from markdown image syntax: ![alt](path) or ![](path)

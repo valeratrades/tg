@@ -16,7 +16,7 @@ use xattr::FileExt as _;
 use crate::{
 	config::{AppConfig, TopicsMetadata, telegram_chat_id},
 	mtproto,
-	server::format_message_append_with_id,
+	server::format_message_append_with_sender,
 };
 
 /// Sanitize topic name for use as filename: lowercase, replace spaces with underscores
@@ -308,6 +308,8 @@ pub struct FetchedMessage {
 	pub date: i32,
 	pub text: String,
 	pub photo: Option<tl::types::Photo>,
+	/// True if the message was sent by the authenticated user (not a bot)
+	pub is_outgoing: bool,
 }
 
 /// Fetch messages from a forum topic using MTProto
@@ -366,6 +368,7 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						date: m.date,
 						text: m.message.clone(),
 						photo,
+						is_outgoing: m.out,
 					});
 				}
 				tl::enums::Message::Service(_) => continue,
@@ -429,15 +432,17 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 
 	for msg in messages {
 		let msg_time = DateTime::from_timestamp(msg.date as i64, 0).unwrap_or_else(Utc::now);
+		// is_outgoing=true means sent by the authenticated user, false means bot or other users
+		let sender = if msg.is_outgoing { "user" } else { "bot" };
 
 		// Handle photo messages (just note them for now, TODO: implement download)
 		if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
-			let formatted = format_message_append_with_id(&content, last_write, msg_time, Some(msg.id));
+			let formatted = format_message_append_with_sender(&content, last_write, msg_time, Some(msg.id), Some(sender));
 			file.write_all(formatted.as_bytes())?;
 			last_write = Some(msg_time);
 		} else if !msg.text.is_empty() {
-			let formatted = format_message_append_with_id(&msg.text, last_write, msg_time, Some(msg.id));
+			let formatted = format_message_append_with_sender(&msg.text, last_write, msg_time, Some(msg.id), Some(sender));
 			file.write_all(formatted.as_bytes())?;
 			last_write = Some(msg_time);
 		}

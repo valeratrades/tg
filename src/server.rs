@@ -388,6 +388,11 @@ pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime
 
 /// Format a message append with an optional message ID marker
 pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>) -> String {
+	format_message_append_with_sender(message, last_write_datetime, now, msg_id, None)
+}
+
+/// Format a message append with message ID and sender info
+pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	debug!("Formatting message append");
 	// Note: last_write_datetime can be > now when processing historical messages from Telegram
 	// (message timestamps may be slightly ahead due to server time differences)
@@ -405,7 +410,11 @@ pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<
 		}
 	}
 
-	let id_suffix = msg_id.map(|id| format!(" <!-- msg:{} -->", id)).unwrap_or_default();
+	let id_suffix = match (msg_id, sender) {
+		(Some(id), Some(s)) => format!(" <!-- msg:{} {} -->", id, s),
+		(Some(id), None) => format!(" <!-- msg:{} -->", id),
+		_ => String::new(),
+	};
 	format!("{}{}{}\n", prefix, message, id_suffix)
 }
 

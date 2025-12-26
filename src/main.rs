@@ -201,9 +201,9 @@ async fn main() -> Result<()> {
 						std::fs::create_dir_all(parent)?;
 					}
 
-					// Append message with ID marker
+					// Append message with ID marker (sent via bot API, so sender is "bot")
 					let now = chrono::Utc::now();
-					let formatted = server::format_message_append_with_id(&msg_text, None, now, Some(msg_id));
+					let formatted = server::format_message_append_with_sender(&msg_text, None, now, Some(msg_id), Some("bot"));
 
 					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
 					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
@@ -285,7 +285,7 @@ async fn main() -> Result<()> {
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
-					sync::push(updates, &config).await?;
+					sync::push(updates, &config, &bot_token).await?;
 				} else {
 					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced");
 				}
@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
 							message_id: todo.message_id,
 						})
 						.collect();
-					sync::push(updates, &config).await?;
+					sync::push(updates, &config, &bot_token).await?;
 				}
 			}
 		},
@@ -348,17 +348,30 @@ async fn main() -> Result<()> {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
 					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &config).await?;
+					sync::push(vec![update], &config, &bot_token).await?;
 				}
 				UpdateAction::Edit {
 					group_id,
-					topic_id: _,
+					topic_id,
 					message_id,
 					new_content,
 				} => {
-					let update = sync::MessageUpdate::Edit { group_id, message_id, new_content };
+					// Look up sender from the topic file
+					let metadata = TopicsMetadata::load();
+					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
+					let file_content = std::fs::read_to_string(&chat_filepath).unwrap_or_default();
+					let messages = sync::parse_file_messages(&file_content);
+					let sender = messages.get(&message_id).map(|m| m.sender).unwrap_or(sync::MessageSender::Bot);
+
+					let update = sync::MessageUpdate::Edit {
+						group_id,
+						topic_id,
+						message_id,
+						new_content,
+						sender,
+					};
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &config).await?;
+					sync::push(vec![update], &config, &bot_token).await?;
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					// Create: write to file without tag, then send via bot API

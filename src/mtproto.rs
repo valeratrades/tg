@@ -362,7 +362,7 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 	Ok(total_success)
 }
 
-/// Edit a message in a channel/supergroup via MTProto
+/// Edit a message in a channel/supergroup via MTProto (for user-sent messages)
 pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_text: &str) -> Result<()> {
 	let chat_id = telegram_chat_id(group_id);
 	let input_peer = get_input_peer(client, chat_id).await?;
@@ -381,6 +381,33 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 	};
 
 	client.invoke(&request).await?;
-	info!("Edited message {} in group {}", message_id, group_id);
+	info!("Edited message {} in group {} via MTProto", message_id, group_id);
 	Ok(())
+}
+
+/// Edit a message via Bot API (for bot-sent messages)
+/// The MTProto client is not used here, but we keep the signature consistent for the caller
+pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64, message_id: i32, new_text: &str, bot_token: &str) -> Result<()> {
+	let chat_id = telegram_chat_id(group_id);
+	let http_client = reqwest::Client::new();
+
+	let url = format!("https://api.telegram.org/bot{}/editMessageText", bot_token);
+	let mut params = vec![("chat_id", chat_id.to_string()), ("message_id", message_id.to_string()), ("text", new_text.to_string())];
+
+	// Forum topics require message_thread_id (but not for General topic which is id=1)
+	if topic_id != 1 {
+		params.push(("message_thread_id", topic_id.to_string()));
+	}
+
+	let res = http_client.post(&url).form(&params).send().await?;
+	let status = res.status();
+	let response_text = res.text().await?;
+
+	if status.is_success() {
+		info!("Edited message {} in group {} via Bot API", message_id, group_id);
+		Ok(())
+	} else {
+		warn!("Bot API edit failed with status {}: {}", status, response_text);
+		bail!("Bot API error: {} - {}", status, response_text)
+	}
 }

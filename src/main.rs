@@ -269,19 +269,27 @@ async fn main() -> Result<()> {
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
 
-			// Read and parse file content before opening
+			// Read file content before opening
 			let old_content = std::fs::read_to_string(&path).unwrap_or_default();
-			let old_state = sync::parse_file_messages(&old_content);
 
 			// Open with editor
 			open_with_mode(&path, OpenMode::Normal)?;
 
-			// Read and parse file content after closing editor
+			// Read file content after closing editor
 			let new_content = std::fs::read_to_string(&path).unwrap_or_default();
-			let new_state = sync::parse_file_messages(&new_content);
 
-			// Detect changes and push to Telegram
-			let changes = sync::detect_changes(&old_state, &new_state);
+			// Detect changes including new messages to send
+			let changes = sync::detect_changes_with_new_messages(&old_content, &new_content);
+
+			// Warn about invalid inserts (content added before last known message)
+			if changes.has_invalid_inserts() {
+				eprintln!("Warning: Cannot send messages back in time. The following content was added before the last known message:");
+				for line in &changes.invalid_inserts {
+					eprintln!("  {}", line);
+				}
+				eprintln!("These changes were not sent. Please add new messages at the end of the file.");
+			}
+
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);

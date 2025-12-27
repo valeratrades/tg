@@ -5,9 +5,10 @@ use grammers_client::{Client, SignInError};
 use grammers_mtsender::SenderPool;
 use grammers_session::storages::SqliteSession;
 use grammers_tl_types as tl;
+use tg::telegram_chat_id;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{AppConfig, TopicsMetadata, telegram_chat_id};
+use crate::config::{AppConfig, TopicsMetadata};
 
 /// Get the session file path (same convention as social_networks)
 fn session_path(username: &str) -> PathBuf {

@@ -9,12 +9,13 @@ use eyre::{Result, eyre};
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use serde::{Deserialize, Serialize};
+use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
 use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{
-	config::{AppConfig, TopicsMetadata, telegram_chat_id},
+	config::{AppConfig, TopicsMetadata},
 	mtproto,
 	server::format_message_append_with_sender,
 };

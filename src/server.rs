@@ -10,6 +10,7 @@ use eyre::Result;
 use futures::future::{Either, select};
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use serde::{Deserialize, Serialize};
+use tg::telegram_chat_id;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::{TcpListener, TcpStream},
@@ -20,7 +21,7 @@ use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
 use crate::{
-	config::{AppConfig, TopicsMetadata, telegram_chat_id},
+	config::{AppConfig, TopicsMetadata},
 	pull::{self, topic_filepath},
 };
 

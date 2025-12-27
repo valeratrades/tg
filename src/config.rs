@@ -1,27 +1,12 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tg::TelegramDestination;
 use tracing::{info, warn};
 use v_utils::{
 	macros::{MyConfigPrimitives, Settings},
 	trades::Timeframe,
 };
-
-/// Parse a channel destination string like "-1002244305221" or "-1002244305221/3"
-/// Returns (group_id, topic_id) where topic_id defaults to 1
-pub fn parse_channel_destination(dest: &str) -> Option<(u64, u64)> {
-	let dest = dest.trim().trim_matches('"');
-	if let Some((chat_part, topic_part)) = dest.split_once('/') {
-		let chat_id: i64 = chat_part.parse().ok()?;
-		let topic_id: u64 = topic_part.parse().ok()?;
-		let group_id = extract_group_id(chat_id)?;
-		Some((group_id, topic_id))
-	} else {
-		let chat_id: i64 = dest.parse().ok()?;
-		let group_id = extract_group_id(chat_id)?;
-		Some((group_id, 1)) // Default to General topic
-	}
-}
 
 #[derive(Clone, Debug, Default, MyConfigPrimitives, Settings)]
 pub struct AppConfig {
@@ -31,8 +16,9 @@ pub struct AppConfig {
 	pub max_messages_per_chat: usize,
 	/// How far back to pull TODOs from channel messages (default: 1 week)
 	pub pull_todos_over: Option<Timeframe>,
-	/// Named group destinations: name -> "chat_id" or "chat_id/topic_id"
-	pub groups: Option<std::collections::HashMap<String, String>>,
+	/// Named group destinations
+	#[primitives(skip)]
+	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
 	/// Telegram API ID from https://my.telegram.org/
 	pub api_id: Option<i32>,
 	/// Telegram API hash (can be { env = "VAR_NAME" })
@@ -53,17 +39,17 @@ impl AppConfig {
 		let mut group_ids = std::collections::HashSet::new();
 		if let Some(groups) = &self.groups {
 			for dest in groups.values() {
-				if let Some((group_id, _)) = parse_channel_destination(dest) {
-					group_ids.insert(group_id);
+				if let Some(id) = dest.group_id() {
+					group_ids.insert(id);
 				}
 			}
 		}
 		group_ids.into_iter().collect()
 	}
 
-	/// Resolve a group name to (group_id, topic_id)
-	pub fn resolve_group(&self, name: &str) -> Option<(u64, u64)> {
-		self.groups.as_ref()?.get(name).and_then(|dest| parse_channel_destination(dest))
+	/// Resolve a group name to TelegramDestination
+	pub fn resolve_group(&self, name: &str) -> Option<&TelegramDestination> {
+		self.groups.as_ref()?.get(name)
 	}
 }
 
@@ -133,7 +119,7 @@ impl TopicsMetadata {
 
 	/// Get the display name for a group
 	pub fn group_name(&self, group_id: u64) -> String {
-		self.groups.get(&group_id).and_then(|g| g.name.clone()).unwrap_or_else(|| format!("group_{}", group_id))
+		self.groups.get(&group_id).and_then(|g| g.name.clone()).unwrap_or_else(|| format!("group_{group_id}"))
 	}
 
 	/// Get the display name for a topic
@@ -141,7 +127,7 @@ impl TopicsMetadata {
 		self.groups
 			.get(&group_id)
 			.and_then(|g| g.topics.get(&topic_id).cloned())
-			.unwrap_or_else(|| format!("topic_{}", topic_id))
+			.unwrap_or_else(|| format!("topic_{topic_id}"))
 	}
 
 	/// Set a custom name for a group
@@ -156,60 +142,13 @@ impl TopicsMetadata {
 
 	/// Ensure a topic is registered (creates entry with default name if not exists)
 	pub fn ensure_topic(&mut self, group_id: u64, topic_id: u64) {
-		self.groups.entry(group_id).or_default().topics.entry(topic_id).or_insert_with(|| format!("topic_{}", topic_id));
-	}
-}
-
-/// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
-pub fn telegram_chat_id(id: u64) -> i64 {
-	format!("-100{id}").parse().unwrap()
-}
-
-/// Extract the group ID from a Telegram chat_id (strips -100 prefix)
-pub fn extract_group_id(chat_id: i64) -> Option<u64> {
-	let s = chat_id.to_string();
-	if s.starts_with("-100") {
-		s[4..].parse().ok()
-	} else if chat_id > 0 {
-		Some(chat_id as u64)
-	} else {
-		// Negative but doesn't start with -100
-		s[1..].parse().ok()
+		self.groups.entry(group_id).or_default().topics.entry(topic_id).or_insert_with(|| format!("topic_{topic_id}"));
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	#[test]
-	fn test_telegram_chat_id() {
-		assert_eq!(telegram_chat_id(2244305221), -1002244305221);
-		assert_eq!(telegram_chat_id(1), -1001);
-		assert_eq!(telegram_chat_id(123456789), -100123456789);
-	}
-
-	#[test]
-	fn test_extract_group_id() {
-		// Standard supergroup format with -100 prefix
-		assert_eq!(extract_group_id(-1002244305221), Some(2244305221));
-		assert_eq!(extract_group_id(-1001), Some(1));
-		assert_eq!(extract_group_id(-100123456789), Some(123456789));
-
-		// Positive IDs (user chats)
-		assert_eq!(extract_group_id(123456), Some(123456));
-
-		// Regular negative group IDs (old style)
-		assert_eq!(extract_group_id(-123456), Some(123456));
-	}
-
-	#[test]
-	fn test_telegram_chat_id_roundtrip() {
-		let original_id: u64 = 2244305221;
-		let telegram_id = telegram_chat_id(original_id);
-		let extracted = extract_group_id(telegram_id);
-		assert_eq!(extracted, Some(original_id));
-	}
 
 	#[test]
 	fn test_topics_metadata_defaults() {
@@ -295,9 +234,14 @@ alerts = "-1001234567890"
 		assert_eq!(config.max_messages_per_chat, 500);
 
 		// Check group resolution
-		assert_eq!(config.resolve_group("general"), Some((2244305221, 1)));
-		assert_eq!(config.resolve_group("work"), Some((2244305221, 3)));
-		assert_eq!(config.resolve_group("alerts"), Some((1234567890, 1)));
+		let general = config.resolve_group("general").unwrap();
+		assert_eq!(general.as_group_topic(), Some((2244305221, 1)));
+
+		let work = config.resolve_group("work").unwrap();
+		assert_eq!(work.as_group_topic(), Some((2244305221, 3)));
+
+		let alerts = config.resolve_group("alerts").unwrap();
+		assert_eq!(alerts.as_group_topic(), Some((1234567890, 1)));
 
 		// Check derived forum_group_ids
 		let mut group_ids = config.forum_group_ids();

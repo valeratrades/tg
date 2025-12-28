@@ -252,7 +252,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	// Update local files for successful creates: add message ID tags
 	// We group by topic to batch updates
 	if !successful_creates.is_empty() {
-		use chrono::Utc;
+		use jiff::Timestamp;
 
 		use crate::server::format_message_append_with_sender;
 
@@ -291,7 +291,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 
 			// Now append the messages with proper tags
 			// Get the last write time from existing file content to format correctly
-			let now = Utc::now();
+			let now = Timestamp::now();
 			for (content, msg_id) in messages {
 				let formatted = format_message_append_with_sender(&content, None, now, Some(msg_id), Some("bot"));
 				file_content.push_str(&formatted);
@@ -347,7 +347,7 @@ pub struct FileContentInfo {
 	/// All tagged messages with their line numbers
 	pub tagged_messages: BTreeMap<i32, ParsedMessage>,
 	/// Lines that are not tagged messages (line_number, content)
-	/// Includes date headers (## MMM DD) and message prefixes (. )
+	/// Includes date headers (## MMM DD or ## MMM DD, YYYY) and message prefixes (. )
 	pub untagged_lines: Vec<(usize, String)>,
 }
 
@@ -405,8 +405,8 @@ pub fn detect_changes_with_new_messages(old_content: &str, new_content: &str) ->
 		if trimmed.is_empty() {
 			continue;
 		}
-		// Skip date headers (## MMM DD)
-		if trimmed.starts_with("## ") && trimmed.len() <= 10 {
+		// Skip date headers (## MMM DD or ## MMM DD, YYYY)
+		if trimmed.starts_with("## ") && trimmed.len() <= 16 {
 			continue;
 		}
 

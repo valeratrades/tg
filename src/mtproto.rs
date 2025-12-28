@@ -18,18 +18,19 @@ fn session_path(username: &str) -> PathBuf {
 /// Create and authenticate a Telegram MTProto client.
 /// Uses credentials from the app config, with env var fallbacks.
 pub async fn create_client(config: &LiveSettings) -> Result<(Client, tokio::task::JoinHandle<()>)> {
-	let api_id = config.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
-	let api_hash = config
+	let cfg = config.config();
+	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
+	let api_hash = cfg
 		.api_hash
 		.clone()
 		.or_else(|| std::env::var("TELEGRAM_API_HASH").ok())
 		.ok_or_else(|| eyre!("api_hash not configured (set in config or TELEGRAM_API_HASH env)"))?;
-	let phone = config
+	let phone = cfg
 		.phone
 		.clone()
 		.or_else(|| std::env::var("PHONE_NUMBER_FR").ok())
 		.ok_or_else(|| eyre!("phone not configured (set in config or PHONE_NUMBER_FR env)"))?;
-	let username = config.username.clone().unwrap_or_else(|| "@user".to_string());
+	let username = cfg.username.clone().unwrap_or_else(|| "@user".to_string());
 
 	let session_file = session_path(&username);
 	info!("Using session file: {}", session_file.display());
@@ -237,9 +238,10 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 /// Discover and update topics metadata for all configured groups
 pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	// Check if credentials are configured (either in config or env vars)
-	let has_api_id = config.api_id.is_some();
-	let has_api_hash = config.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
-	let has_phone = config.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
+	let cfg = config.config();
+	let has_api_id = cfg.api_id.is_some();
+	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
+	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
 
 	if !has_api_id || !has_api_hash || !has_phone {
 		warn!("Telegram MTProto credentials not configured (api_id/api_hash/phone).");
@@ -250,7 +252,7 @@ pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	let (client, handle) = create_client(config).await?;
 	let mut metadata = TopicsMetadata::load();
 
-	for group_id in config.forum_group_ids() {
+	for group_id in cfg.forum_group_ids() {
 		info!("Fetching topics for group {}...", group_id);
 
 		match fetch_forum_topics(&client, group_id).await {

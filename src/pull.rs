@@ -4,10 +4,10 @@ use std::{
 	path::PathBuf,
 };
 
-use chrono::{DateTime, Utc};
 use eyre::{Result, eyre};
 use grammers_client::Client;
 use grammers_tl_types as tl;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
@@ -88,7 +88,8 @@ pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &
 	let mut topics_metadata = TopicsMetadata::load();
 
 	// First, get group names via Bot API
-	for group_id in config.forum_group_ids() {
+	let cfg = config.config();
+	for group_id in cfg.forum_group_ids() {
 		let chat_id = telegram_chat_id(group_id);
 
 		let url = format!("https://api.telegram.org/bot{}/getChat", bot_token);
@@ -165,9 +166,10 @@ pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
 /// Run a single pull operation for all configured forum groups using MTProto
 pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 	// Check if MTProto credentials are available
-	let has_api_id = config.api_id.is_some();
-	let has_api_hash = config.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
-	let has_phone = config.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
+	let cfg = config.config();
+	let has_api_id = cfg.api_id.is_some();
+	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
+	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
 
 	if !has_api_id || !has_api_hash || !has_phone {
 		warn!("MTProto credentials not configured. Cannot pull messages.");
@@ -182,7 +184,7 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 	// Create MTProto client
 	let (client, handle) = mtproto::create_client(config).await?;
 
-	for group_id in config.forum_group_ids() {
+	for group_id in cfg.forum_group_ids() {
 		let group = match topics_metadata.groups.get(&group_id) {
 			Some(g) => g,
 			None => {
@@ -209,7 +211,7 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 			debug!("Pulling topic {} (last_synced_id={})", topic_name, last_synced_id);
 
 			// Fetch messages for this topic
-			let messages = match fetch_topic_messages(&client, &input_peer, topic_id as i32, last_synced_id, config.max_messages_per_chat).await {
+			let messages = match fetch_topic_messages(&client, &input_peer, topic_id as i32, last_synced_id, cfg.max_messages_per_chat).await {
 				Ok(m) => m,
 				Err(e) => {
 					warn!("Failed to fetch messages for topic {}: {}", topic_name, e);
@@ -218,9 +220,9 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 			};
 
 			if messages.is_empty() {
-				debug!("No new messages for topic {}", topic_name);
+				eprintln!("[FETCH] {} (topic {}): 0 messages", topic_name, topic_id);
 			} else {
-				info!("Fetched {} messages for topic {}", messages.len(), topic_name);
+				eprintln!("[FETCH] {} (topic {}): {} messages", topic_name, topic_id, messages.len());
 
 				// Find max message ID for updating sync timestamp
 				let max_msg_id = messages.iter().map(|m| m.id).max().unwrap_or(last_synced_id);
@@ -235,8 +237,13 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 			// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
 			let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
 			if file_path.exists() {
+				let before = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
 				if let Err(e) = cleanup_tagless_messages(&file_path) {
 					warn!("Failed to cleanup tagless messages in {}: {}", file_path.display(), e);
+				}
+				let after = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
+				if before != after {
+					eprintln!("[CLEANUP] {} changed from {} to {} lines", file_path.display(), before, after);
 				}
 			}
 		}
@@ -409,15 +416,15 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: &[FetchedMessage], metadata: &TopicsMetadata) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
+	eprintln!("[MERGE] {} messages to {}", messages.len(), chat_filepath.display());
 
 	// Read existing xattr for last write time
-	let last_write_datetime: Option<DateTime<Utc>> = std::fs::File::open(&chat_filepath)
+	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
 		.ok()
 		.and_then(|file| file.get_xattr("user.last_changed").ok())
 		.flatten()
 		.and_then(|v| String::from_utf8(v).ok())
-		.and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-		.map(|dt| dt.with_timezone(&Utc));
+		.and_then(|s| s.parse::<Timestamp>().ok());
 
 	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath)?;
 
@@ -432,7 +439,7 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	let mut last_write = last_write_datetime;
 
 	for msg in messages {
-		let msg_time = DateTime::from_timestamp(msg.date as i64, 0).unwrap_or_else(Utc::now);
+		let msg_time = Timestamp::from_second(msg.date as i64).unwrap_or_else(|_| Timestamp::now());
 		// is_outgoing=true means sent by the authenticated user, false means bot or other users
 		let sender = if msg.is_outgoing { "user" } else { "bot" };
 
@@ -449,10 +456,21 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 		}
 	}
 
+	// Ensure all writes are flushed to disk before cleanup runs
+	file.sync_all()?;
+
 	// Update xattr
 	if let Some(last) = last_write {
-		file.set_xattr("user.last_changed", last.to_rfc3339().as_bytes())?;
+		file.set_xattr("user.last_changed", last.to_string().as_bytes())?;
 	}
+
+	// Explicitly close the file before cleanup runs
+	drop(file);
+
+	// Verify write succeeded
+	let final_content = std::fs::read_to_string(&chat_filepath)?;
+	let line_count = final_content.lines().count();
+	eprintln!("[MERGE] After write: {} lines", line_count);
 
 	Ok(())
 }
@@ -476,19 +494,21 @@ pub fn ensure_topic_dir(group_id: u64, metadata: &TopicsMetadata) -> Result<()> 
 	Ok(())
 }
 
-/// Remove tagless message lines from a topic file
-/// Tagless messages are optimistic writes that should be replaced by tagged versions from TG
-/// after sync. Lines without tags are removed, keeping:
-/// - Date headers (lines starting with "## ")
-/// - Empty lines
-/// - Lines with message ID tags (<!-- msg:N -->)
+/// Clean up a topic file:
+/// 1. Remove tagless message lines (optimistic writes that should be replaced by tagged versions)
+/// 2. Remove empty date sections (date headers followed by only empty lines or another header)
+/// 3. Collapse multiple consecutive empty lines into one
 fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 	use regex::Regex;
 
 	let content = std::fs::read_to_string(file_path)?;
-	let msg_id_re = Regex::new(r"<!-- msg:\d+ -->").unwrap();
+	// Match both old format <!-- msg:123 --> and new format <!-- msg:123 sender -->
+	let msg_id_re = Regex::new(r"<!-- msg:\d+").unwrap();
+	// Match both old format (## Jan 03) and new format (## Jan 03, 2025)
+	let date_header_re = Regex::new(r"^## [A-Za-z]{3} \d{1,2}(, \d{4})?$").unwrap();
 
-	let mut new_lines: Vec<&str> = Vec::new();
+	// First pass: remove tagless message lines
+	let mut filtered_lines: Vec<&str> = Vec::new();
 	let mut removed_count = 0;
 
 	for line in content.lines() {
@@ -496,36 +516,89 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 
 		// Keep empty lines
 		if trimmed.is_empty() {
-			new_lines.push(line);
+			filtered_lines.push(line);
 			continue;
 		}
 
 		// Keep date headers
-		if trimmed.starts_with("## ") {
-			new_lines.push(line);
+		if date_header_re.is_match(trimmed) {
+			filtered_lines.push(line);
 			continue;
 		}
 
 		// Keep lines with message ID tags
 		if msg_id_re.is_match(line) {
-			new_lines.push(line);
+			filtered_lines.push(line);
 			continue;
 		}
 
 		// This is a tagless message line - remove it
 		removed_count += 1;
-		debug!("Removing tagless line: {}", trimmed);
+		eprintln!("[CLEANUP] Removing: {}", &trimmed[..trimmed.len().min(80)]);
+	}
+
+	// Second pass: remove empty date sections and collapse empty lines
+	let mut final_lines: Vec<&str> = Vec::new();
+	let mut i = 0;
+	while i < filtered_lines.len() {
+		let line = filtered_lines[i];
+		let trimmed = line.trim();
+
+		// Skip consecutive empty lines (keep only one)
+		if trimmed.is_empty() {
+			if final_lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+				i += 1;
+				continue;
+			}
+			final_lines.push(line);
+			i += 1;
+			continue;
+		}
+
+		// Check if this is a date header
+		if date_header_re.is_match(trimmed) {
+			// Look ahead to see if there's any content before the next header or end
+			let mut has_content = false;
+			let mut j = i + 1;
+			while j < filtered_lines.len() {
+				let next_trimmed = filtered_lines[j].trim();
+				if next_trimmed.is_empty() {
+					j += 1;
+					continue;
+				}
+				if date_header_re.is_match(next_trimmed) {
+					// Hit another date header without content
+					break;
+				}
+				// Found content
+				has_content = true;
+				break;
+			}
+
+			if has_content {
+				final_lines.push(line);
+			} else {
+				removed_count += 1;
+				debug!("Removing empty date section: {}", trimmed);
+			}
+			i += 1;
+			continue;
+		}
+
+		// Regular content line
+		final_lines.push(line);
+		i += 1;
+	}
+
+	// Remove trailing empty lines
+	while final_lines.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+		final_lines.pop();
 	}
 
 	if removed_count > 0 {
-		info!("Cleaned up {} tagless message(s) from {}", removed_count, file_path.display());
-		let new_content = new_lines.join("\n");
-		// Preserve trailing newline if original had one
-		let final_content = if content.ends_with('\n') && !new_content.ends_with('\n') {
-			format!("{}\n", new_content)
-		} else {
-			new_content
-		};
+		info!("Cleaned up {} lines from {}", removed_count, file_path.display());
+		let new_content = final_lines.join("\n");
+		let final_content = if !new_content.is_empty() { format!("{}\n", new_content) } else { new_content };
 		std::fs::write(file_path, final_content)?;
 	}
 
@@ -578,6 +651,51 @@ Tagged message <!-- msg:789 -->
 		assert!(result.contains("## Jan 04"));
 		assert!(!result.contains("Untagged message"));
 		assert!(result.contains("Tagged message <!-- msg:789 -->"));
+
+		// Cleanup
+		std::fs::remove_file(&test_file).ok();
+	}
+
+	#[test]
+	fn test_cleanup_empty_date_sections() {
+		use std::io::Write as _;
+
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_cleanup_empty.md");
+
+		// Create test file with empty date sections
+		let content = r#"## Dec 25
+Message on Dec 25 <!-- msg:100 -->
+
+## Dec 26
+
+## Dec 27
+
+## Dec 27
+
+## Dec 28
+Message on Dec 28 <!-- msg:101 -->
+"#;
+		let mut file = std::fs::File::create(&test_file).unwrap();
+		file.write_all(content.as_bytes()).unwrap();
+
+		// Run cleanup
+		cleanup_tagless_messages(&test_file).unwrap();
+
+		// Read result
+		let result = std::fs::read_to_string(&test_file).unwrap();
+
+		// Verify: empty date sections removed
+		assert!(result.contains("## Dec 25"));
+		assert!(result.contains("Message on Dec 25"));
+		assert!(!result.contains("## Dec 26")); // Empty section removed
+		assert!(!result.contains("## Dec 27")); // Empty sections removed
+		assert!(result.contains("## Dec 28"));
+		assert!(result.contains("Message on Dec 28"));
+
+		// Count occurrences of date headers
+		let dec_28_count = result.matches("## Dec 28").count();
+		assert_eq!(dec_28_count, 1, "Should have exactly one Dec 28 header");
 
 		// Cleanup
 		std::fs::remove_file(&test_file).ok();

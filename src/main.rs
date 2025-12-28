@@ -3,9 +3,9 @@ use std::{
 	process::{Command, Stdio},
 };
 
-use chrono::Datelike;
 use clap::{Args, Parser, Subcommand};
 use eyre::{Result, bail, eyre};
+use jiff::{Timestamp, ToSpan, civil::Date};
 use server::Message;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
 					}
 
 					// Append message with ID marker (sent via bot API, so sender is "bot")
-					let now = chrono::Utc::now();
+					let now = Timestamp::now();
 					let formatted = server::format_message_append_with_sender(&msg_text, None, now, Some(msg_id), Some("bot"));
 
 					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
@@ -398,7 +398,7 @@ async fn main() -> Result<()> {
 					}
 
 					// Append message without tag
-					let now = chrono::Utc::now();
+					let now = Timestamp::now();
 					let formatted = server::format_message_append(&content, None, now);
 					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
 					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
@@ -680,7 +680,7 @@ struct TodoItem {
 	/// Source topic path (relative to data dir)
 	source: String,
 	/// Approximate date of the message containing the TODO
-	date: Option<chrono::NaiveDate>,
+	date: Option<Date>,
 	/// Message ID from Telegram (if available)
 	message_id: Option<i32>,
 	/// Group ID for this TODO's source
@@ -690,22 +690,27 @@ struct TodoItem {
 }
 
 /// Aggregate TODOs from all topic files into todos.md, returning the path
-fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
+fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	use std::io::Read as _;
 
+	let cfg = settings.config();
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
-	let cutoff_duration = config.pull_todos_over().duration();
-	let cutoff_date = chrono::Utc::now().naive_utc().date() - chrono::Duration::from_std(cutoff_duration).unwrap_or(chrono::Duration::weeks(1));
+	let cutoff_duration = cfg.pull_todos_over().duration();
+	let today = Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+	let cutoff_span = jiff::Span::try_from(cutoff_duration).unwrap_or_else(|_| 1.week());
+	let cutoff_date = today.checked_sub(cutoff_span).unwrap_or(today);
 
 	let metadata = TopicsMetadata::load();
 	let mut todos: Vec<TodoItem> = Vec::new();
 
-	// Regex for date headers like "## Jan 03" or "## Dec 25"
-	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})$").unwrap();
+	// Regex for date headers - both old format "## Jan 03" and new format "## Jan 03, 2025"
+	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
 	// Regex for message ID markers like <!-- msg:123 -->
 	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+) -->").unwrap();
 	// Regex for message block start (`. ` prefix or date header)
 	let msg_block_start_re = regex::Regex::new(r"^(\. |## )").unwrap();
+
+	let current_year = today.year();
 
 	// Iterate over all known topics from metadata
 	for (group_id, group) in &metadata.groups {
@@ -718,8 +723,7 @@ fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 				continue;
 			}
 
-			let mut current_date: Option<chrono::NaiveDate> = None;
-			let current_year = chrono::Utc::now().year();
+			let mut current_date: Option<Date> = None;
 
 			// Parse file into message blocks to associate TODOs with their message IDs
 			// A message block is: all lines from one message start until the next
@@ -751,9 +755,11 @@ fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 						// Check for date header
 						if let Some(caps) = date_header_re.captures(trimmed) {
 							let month_str = caps.get(1).unwrap().as_str();
-							let day: u32 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+							let day: i8 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+							// Year is optional - if missing, infer from current year
+							let explicit_year: Option<i16> = caps.get(3).and_then(|m| m.as_str().parse().ok());
 
-							let month = match month_str.to_lowercase().as_str() {
+							let month: i8 = match month_str.to_lowercase().as_str() {
 								"jan" => 1,
 								"feb" => 2,
 								"mar" => 3,
@@ -769,15 +775,18 @@ fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 								_ => continue,
 							};
 
-							// Assume current year, but handle year boundary
-							let mut year = current_year;
-							if let Some(date) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
-								// If this date is in the future, it's probably from last year
-								if date > chrono::Utc::now().naive_utc().date() {
-									year -= 1;
+							// Use explicit year if available, otherwise infer
+							let year = explicit_year.unwrap_or_else(|| {
+								// If no year in header, assume current year but handle boundary
+								if let Ok(date) = Date::new(current_year, month, day) {
+									// If this date is in the future, it's probably from last year
+									if date > today { current_year - 1 } else { current_year }
+								} else {
+									current_year
 								}
-								current_date = chrono::NaiveDate::from_ymd_opt(year, month, day);
-							}
+							});
+
+							current_date = Date::new(year, month, day).ok();
 							continue;
 						}
 
@@ -822,7 +831,7 @@ fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 	let todos_path = data_dir.join("todos.md");
 	let mut output = String::new();
 	output.push_str("# TODOs\n\n");
-	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", config.pull_todos_over()));
+	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", cfg.pull_todos_over()));
 
 	if todos.is_empty() {
 		output.push_str("No TODOs found.\n");
@@ -837,7 +846,7 @@ fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 				current_source = Some(&todo.source);
 			}
 
-			let date_str = todo.date.map(|d| format!(" ({})", d.format("%b %d"))).unwrap_or_default();
+			let date_str = todo.date.map(|d| format!(" ({})", d.strftime("%b %d"))).unwrap_or_default();
 			// Include tracking info: group_id:topic_id:msg_id (msg_id is 0 if not available)
 			let msg_id = todo.message_id.unwrap_or(0);
 			let tracking = format!(" <!-- todo:{}:{}:{} -->", todo.group_id, todo.topic_id, msg_id);

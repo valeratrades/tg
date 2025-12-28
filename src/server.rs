@@ -5,10 +5,10 @@ use std::{
 	sync::{Arc, OnceLock},
 };
 
-use chrono::{DateTime, TimeDelta, Utc};
 use eyre::Result;
 use futures::future::{Either, select};
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tg::telegram_chat_id;
 use tokio::{
@@ -52,7 +52,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	info!("Discovering forum topics for configured groups...");
 	pull::discover_and_create_topic_files(&settings, &bot_token).await?;
 
-	let addr = format!("127.0.0.1:{}", settings.localhost_port);
+	let addr = format!("127.0.0.1:{}", settings.config().localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);
@@ -183,10 +183,9 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 			.map(|v| String::from_utf8_lossy(&v).into_owned());
 		let last_write_datetime = last_write_tag
 			.as_deref()
-			.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok())
-			.map(|dt| dt.with_timezone(&chrono::Utc));
+			.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok());
 
-		let message_append_repr = format_message_append(&message.message, last_write_datetime, Utc::now());
+		let message_append_repr = format_message_append(&message.message, last_write_datetime, Timestamp::now());
 		debug!("Formatted message append: {:?}", message_append_repr);
 
 		// Ensure the parent directory exists
@@ -232,7 +231,7 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 		}
 		debug!("Wrote message to file");
 
-		let now_rfc3339 = Utc::now().to_rfc3339();
+		let now_rfc3339 = Timestamp::now().to_string();
 		if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
 			error!("Failed to set xattr: {}", e);
 			return;
@@ -383,30 +382,36 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 ///     >= 6 minutes && same day => append with a newline before
 ///     >= 6 minutes && different day => append with a newline before and after
 /// }
-pub fn format_message_append(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+pub fn format_message_append(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp) -> String {
 	format_message_append_with_id(message, last_write_datetime, now, None)
 }
 
 /// Format a message append with an optional message ID marker
-pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>) -> String {
+pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>) -> String {
 	format_message_append_with_sender(message, last_write_datetime, now, msg_id, None)
 }
 
 /// Format a message append with message ID and sender info
-pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<DateTime<Utc>>, now: DateTime<Utc>, msg_id: Option<i32>, sender: Option<&str>) -> String {
+pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	debug!("Formatting message append");
 	// Note: last_write_datetime can be > now when processing historical messages from Telegram
 	// (message timestamps may be slightly ahead due to server time differences)
 
 	let mut prefix = String::new();
 	if let Some(last_write_datetime) = last_write_datetime {
-		let duration = now.signed_duration_since(last_write_datetime);
+		// Use SignedDuration for exact time difference
+		let duration = now.duration_since(last_write_datetime);
+		let six_minutes = jiff::SignedDuration::from_mins(6);
 
-		if duration >= TimeDelta::minutes(6) {
-			if now.format("%d/%m").to_string() == last_write_datetime.format("%d/%m").to_string() {
+		if duration >= six_minutes {
+			// Compare year-month-day to handle year boundaries correctly
+			let now_date = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+			let last_date = last_write_datetime.to_zoned(jiff::tz::TimeZone::UTC).date();
+			let same_day = now_date == last_date;
+			if same_day {
 				prefix = "\n. ".to_string();
 			} else {
-				prefix = format!("\n## {}\n", now.format("%b %d"));
+				prefix = format!("\n## {}\n", now_date.strftime("%b %d, %Y"));
 			}
 		}
 	}
@@ -432,12 +437,12 @@ mod tests {
 
 		let zeta_dist = ReimanZeta::new(1.0, 4320);
 
-		let mut accumulated_offset = DateTime::UNIX_EPOCH;
+		let mut accumulated_offset = Timestamp::UNIX_EPOCH;
 		for i in 0..10 {
 			let time_offset_mins = zeta_dist.sample(Some(i));
-			let time_offset = TimeDelta::seconds(time_offset_mins as i64 * 60);
-			accumulated_offset += time_offset;
-			let message = accumulated_offset.format("%Y-%m-%d %H:%M:%S").to_string(); // for ease of testing
+			let time_offset = jiff::Span::new().minutes(time_offset_mins as i64);
+			accumulated_offset = accumulated_offset.checked_add(time_offset).unwrap();
+			let message = accumulated_offset.strftime("%Y-%m-%d %H:%M:%S").to_string(); // for ease of testing
 
 			messages.push((message, accumulated_offset));
 		}
@@ -454,7 +459,7 @@ mod tests {
 		insta::assert_snapshot!(formatted_messages, @r###"
   1970-01-01 06:30:00
 
-  ## Jan 03
+  ## Jan 03, 1970
   1970-01-03 15:41:00
 
   . 1970-01-03 15:49:00

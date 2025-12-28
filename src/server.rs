@@ -391,6 +391,29 @@ pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<
 	format_message_append_with_sender(message, last_write_datetime, now, msg_id, None)
 }
 
+/// Check if a message contains patterns that could break our markdown format
+fn needs_markdown_wrapping(message: &str) -> bool {
+	// Patterns that could break our format:
+	// - Double newlines (paragraph breaks)
+	// - Lines starting with # (headers)
+	// - Lines starting with ## (our date headers)
+	// - Lines starting with . followed by space (our message separator)
+	message.contains("\n\n")
+		|| message.lines().any(|line| {
+			let trimmed = line.trim();
+			trimmed.starts_with('#') || trimmed.starts_with(". ")
+		})
+}
+
+/// Wrap message in markdown code block if it contains special patterns
+fn maybe_wrap_markdown(message: &str) -> String {
+	if needs_markdown_wrapping(message) {
+		format!("```md\n{}\n```", message)
+	} else {
+		message.to_string()
+	}
+}
+
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	debug!("Formatting message append");
@@ -416,12 +439,15 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 		}
 	}
 
+	// Wrap message if it contains patterns that could break our format
+	let formatted_message = maybe_wrap_markdown(message);
+
 	let id_suffix = match (msg_id, sender) {
 		(Some(id), Some(s)) => format!(" <!-- msg:{} {} -->", id, s),
 		(Some(id), None) => format!(" <!-- msg:{} -->", id),
 		_ => String::new(),
 	};
-	format!("{}{}{}\n", prefix, message, id_suffix)
+	format!("{}{}{}\n", prefix, formatted_message, id_suffix)
 }
 
 #[cfg(test)]
@@ -490,5 +516,54 @@ mod tests {
   }
   "###);
 		Ok(())
+	}
+
+	#[test]
+	fn test_multiline_message_with_special_patterns() {
+		// This message has patterns that would break our format:
+		// - Double newline (paragraph break)
+		// - Line starting with # (header)
+		let message = "TODO: integrate resume into the site\n\n# Impl details\nwhile at it, add photo and general info on yourself at the top of /contact\n\n// will no longer need separate repo for it";
+
+		let now = Timestamp::UNIX_EPOCH;
+		let formatted = format_message_append_with_sender(message, None, now, Some(123), Some("user"));
+
+		// Should be wrapped in ```md block
+		insta::assert_snapshot!(formatted, @r###"
+		```md
+		TODO: integrate resume into the site
+
+		# Impl details
+		while at it, add photo and general info on yourself at the top of /contact
+
+		// will no longer need separate repo for it
+		``` <!-- msg:123 user -->
+		"###);
+	}
+
+	#[test]
+	fn test_simple_message_not_wrapped() {
+		// Simple message without special patterns should NOT be wrapped
+		let message = "just a simple message";
+
+		let now = Timestamp::UNIX_EPOCH;
+		let formatted = format_message_append_with_sender(message, None, now, Some(456), Some("bot"));
+
+		insta::assert_snapshot!(formatted, @r###"
+		just a simple message <!-- msg:456 bot -->
+		"###);
+	}
+
+	#[test]
+	fn test_message_with_dot_prefix_wrapped() {
+		// Message starting with ". " would be confused with our separator
+		let message = ". this looks like a separator\nbut it's actually content";
+
+		let now = Timestamp::UNIX_EPOCH;
+		let formatted = format_message_append_with_sender(message, None, now, Some(789), Some("user"));
+
+		// Should be wrapped
+		assert!(formatted.contains("```md"));
+		assert!(formatted.contains("```"));
 	}
 }

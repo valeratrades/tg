@@ -220,9 +220,9 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 			};
 
 			if messages.is_empty() {
-				eprintln!("[FETCH] {} (topic {}): 0 messages", topic_name, topic_id);
+				debug!("No new messages for topic {}", topic_name);
 			} else {
-				eprintln!("[FETCH] {} (topic {}): {} messages", topic_name, topic_id, messages.len());
+				info!("Fetched {} messages for topic {}", messages.len(), topic_name);
 
 				// Find max message ID for updating sync timestamp
 				let max_msg_id = messages.iter().map(|m| m.id).max().unwrap_or(last_synced_id);
@@ -243,7 +243,7 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 				}
 				let after = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
 				if before != after {
-					eprintln!("[CLEANUP] {} changed from {} to {} lines", file_path.display(), before, after);
+					debug!("Cleanup changed {} from {} to {} lines", file_path.display(), before, after);
 				}
 			}
 		}
@@ -416,7 +416,7 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: &[FetchedMessage], metadata: &TopicsMetadata) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
-	eprintln!("[MERGE] {} messages to {}", messages.len(), chat_filepath.display());
+	debug!("Merging {} messages to {}", messages.len(), chat_filepath.display());
 
 	// Read existing xattr for last write time
 	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
@@ -470,7 +470,7 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	// Verify write succeeded
 	let final_content = std::fs::read_to_string(&chat_filepath)?;
 	let line_count = final_content.lines().count();
-	eprintln!("[MERGE] After write: {} lines", line_count);
+	debug!(lines = line_count, "merge: after write");
 
 	Ok(())
 }
@@ -510,9 +510,23 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 	// First pass: remove tagless message lines
 	let mut filtered_lines: Vec<&str> = Vec::new();
 	let mut removed_count = 0;
+	let mut in_code_block = false;
 
 	for line in content.lines() {
 		let trimmed = line.trim();
+
+		// Track code block state (```md blocks used for complex messages)
+		if trimmed.starts_with("```") {
+			in_code_block = !in_code_block;
+			filtered_lines.push(line);
+			continue;
+		}
+
+		// Keep all lines inside code blocks
+		if in_code_block {
+			filtered_lines.push(line);
+			continue;
+		}
 
 		// Keep empty lines
 		if trimmed.is_empty() {
@@ -534,7 +548,7 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 
 		// This is a tagless message line - remove it
 		removed_count += 1;
-		eprintln!("[CLEANUP] Removing: {}", &trimmed[..trimmed.len().min(80)]);
+		debug!(line = &trimmed[..trimmed.len().min(80)], "cleanup: removing tagless line");
 	}
 
 	// Second pass: remove empty date sections and collapse empty lines

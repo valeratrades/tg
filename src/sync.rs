@@ -5,7 +5,7 @@ use regex::Regex;
 use tracing::{debug, info, warn};
 
 use crate::{
-	config::{AppConfig, TopicsMetadata},
+	config::{LiveSettings, TopicsMetadata},
 	mtproto,
 	pull::topic_filepath,
 };
@@ -50,7 +50,7 @@ pub enum MessageUpdate {
 /// - Deletes/edits messages on Telegram via MTProto (user messages) or Bot API (bot messages)
 /// - Creates new messages via Bot API
 /// - Removes deleted message lines from local topic files
-pub async fn push(updates: Vec<MessageUpdate>, config: &AppConfig, bot_token: &str) -> Result<()> {
+pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token: &str) -> Result<()> {
 	if updates.is_empty() {
 		debug!("No updates to push");
 		return Ok(());

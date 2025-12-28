@@ -16,7 +16,7 @@ use v_utils::{
 	trades::Timeframe,
 };
 
-use crate::config::{AppConfig, SettingsFlags, TopicsMetadata};
+use crate::config::{LiveSettings, SettingsFlags, TopicsMetadata};
 
 pub mod config;
 mod mtproto;
@@ -162,9 +162,11 @@ enum UpdateAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+	use std::{sync::Arc, time::Duration};
+
 	v_utils::clientside!();
 	let cli = Cli::parse();
-	let config = AppConfig::try_build(cli.settings).expect("Failed to read config file");
+	let settings = Arc::new(LiveSettings::new(cli.settings, Duration::from_secs(5)).expect("Failed to read config file"));
 	config::init_data_dir();
 	let bot_token = match cli.token {
 		Some(t) => t,
@@ -177,7 +179,7 @@ async fn main() -> Result<()> {
 			let msg_text = args.message.join(" ");
 
 			let message = Message::new(group_id, topic_id, msg_text.clone());
-			let addr = format!("127.0.0.1:{}", config.localhost_port);
+			let addr = format!("127.0.0.1:{}", settings.config().localhost_port);
 
 			// Try server first, fall back to direct send
 			match TcpStream::connect(&addr).await {
@@ -220,7 +222,7 @@ async fn main() -> Result<()> {
 			println!("{pretty_json}");
 		}
 		Commands::Server(args) => {
-			server::run(config, bot_token, args.pull_interval).await?;
+			server::run(Arc::clone(&settings), bot_token, args.pull_interval).await?;
 		}
 		Commands::Pull(args) => {
 			if args.reset {
@@ -264,7 +266,7 @@ async fn main() -> Result<()> {
 
 				eprintln!("Re-pulling all messages...");
 			}
-			pull::pull(&config, &bot_token).await?;
+			pull::pull(&settings, &bot_token).await?;
 		}
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
@@ -293,7 +295,7 @@ async fn main() -> Result<()> {
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
-					sync::push(updates, &config, &bot_token).await?;
+					sync::push(updates, &settings, &bot_token).await?;
 				} else {
 					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced");
 				}
@@ -304,10 +306,10 @@ async fn main() -> Result<()> {
 		}
 		Commands::Todos(cmd) => match cmd {
 			TodosCommands::Compile => {
-				aggregate_todos(&config)?;
+				aggregate_todos(&settings)?;
 			}
 			TodosCommands::Open => {
-				let path = aggregate_todos(&config)?;
+				let path = aggregate_todos(&settings)?;
 
 				// Read the generated todos.md to get the old state
 				let old_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -344,7 +346,7 @@ async fn main() -> Result<()> {
 							message_id: todo.message_id,
 						})
 						.collect();
-					sync::push(updates, &config, &bot_token).await?;
+					sync::push(updates, &settings, &bot_token).await?;
 				}
 			}
 		},
@@ -356,7 +358,7 @@ async fn main() -> Result<()> {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
 					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &config, &bot_token).await?;
+					sync::push(vec![update], &settings, &bot_token).await?;
 				}
 				UpdateAction::Edit {
 					group_id,
@@ -379,7 +381,7 @@ async fn main() -> Result<()> {
 						sender,
 					};
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &config, &bot_token).await?;
+					sync::push(vec![update], &settings, &bot_token).await?;
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					// Create: write to file without tag, then send via bot API
@@ -688,7 +690,7 @@ struct TodoItem {
 }
 
 /// Aggregate TODOs from all topic files into todos.md, returning the path
-fn aggregate_todos(config: &config::AppConfig) -> Result<std::path::PathBuf> {
+fn aggregate_todos(config: &LiveSettings) -> Result<std::path::PathBuf> {
 	use std::io::Read as _;
 
 	let data_dir = crate::server::DATA_DIR.get().unwrap();

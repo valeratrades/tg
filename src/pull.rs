@@ -15,7 +15,7 @@ use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{
-	config::{AppConfig, TopicsMetadata},
+	config::{LiveSettings, TopicsMetadata},
 	mtproto,
 	server::format_message_append_with_sender,
 };
@@ -83,7 +83,7 @@ struct TelegramChatInfo {
 /// Fetch group info and discover topics for all configured groups.
 /// Creates topic files for each discovered topic in the XDG data home.
 /// Uses MTProto API (via grammers) to list all forum topics directly.
-pub async fn discover_and_create_topic_files(config: &AppConfig, bot_token: &str) -> Result<()> {
+pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &str) -> Result<()> {
 	let client = reqwest::Client::new();
 	let mut topics_metadata = TopicsMetadata::load();
 
@@ -163,7 +163,7 @@ pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
 }
 
 /// Run a single pull operation for all configured forum groups using MTProto
-pub async fn pull(config: &AppConfig, _bot_token: &str) -> Result<()> {
+pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 	// Check if MTProto credentials are available
 	let has_api_id = config.api_id.is_some();
 	let has_api_hash = config.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();

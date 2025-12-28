@@ -2,7 +2,7 @@ use std::{
 	io::{Read, Seek, SeekFrom, Write},
 	path::PathBuf,
 	pin::{Pin, pin},
-	sync::OnceLock,
+	sync::{Arc, OnceLock},
 };
 
 use chrono::{DateTime, TimeDelta, Utc};
@@ -21,7 +21,7 @@ use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
 use crate::{
-	config::{AppConfig, TopicsMetadata},
+	config::{LiveSettings, TopicsMetadata},
 	pull::{self, topic_filepath},
 };
 
@@ -45,14 +45,14 @@ enum TaskResult {
 
 /// # Panics
 /// On unsuccessful io operations
-pub async fn run(config: AppConfig, bot_token: String, pull_interval: Timeframe) -> Result<()> {
+pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
 
 	// Discover forum topics and create topic files at startup
 	info!("Discovering forum topics for configured groups...");
-	pull::discover_and_create_topic_files(&config, &bot_token).await?;
+	pull::discover_and_create_topic_files(&settings, &bot_token).await?;
 
-	let addr = format!("127.0.0.1:{}", config.localhost_port);
+	let addr = format!("127.0.0.1:{}", settings.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);
@@ -60,29 +60,29 @@ pub async fn run(config: AppConfig, bot_token: String, pull_interval: Timeframe)
 	let interval_duration = pull_interval.duration();
 	info!("Pull interval: {}", pull_interval);
 
-	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, AppConfig, String)> + Send>>;
+	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, String)> + Send>>;
 	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
 	// Initial pull task
 	let pull_interval_timer = tokio::time::interval(interval_duration);
-	let config_clone = config.clone();
+	let settings_clone = Arc::clone(&settings);
 	let token_clone = bot_token.clone();
 	futures.push(Box::pin(async move {
 		let mut interval = pull_interval_timer;
 		interval.tick().await;
 
-		match pull::pull(&config_clone, &token_clone).await {
+		match pull::pull(&settings_clone, &token_clone).await {
 			Ok(()) => debug!("Pull completed successfully"),
 			Err(e) => warn!("Pull failed: {}", e),
 		}
 
-		(TaskResult::PullDone(interval), config_clone, token_clone)
+		(TaskResult::PullDone(interval), settings_clone, token_clone)
 	}));
 
 	loop {
 		enum Event {
 			NewConnection(std::io::Result<(TcpStream, std::net::SocketAddr)>),
-			TaskCompleted(Option<(TaskResult, AppConfig, String)>),
+			TaskCompleted(Option<(TaskResult, Arc<LiveSettings>, String)>),
 		}
 
 		let event = {
@@ -100,30 +100,30 @@ pub async fn run(config: AppConfig, bot_token: String, pull_interval: Timeframe)
 				let (socket, addr) = accept_result?;
 				info!("Accepted connection from: {}", addr);
 
-				let config_clone = config.clone();
+				let settings_clone = Arc::clone(&settings);
 				let token_clone = bot_token.clone();
 				futures.push(Box::pin(async move {
-					handle_connection(socket, &config_clone, &token_clone).await;
-					(TaskResult::ConnectionDone, config_clone, token_clone)
+					handle_connection(socket, &settings_clone, &token_clone).await;
+					(TaskResult::ConnectionDone, settings_clone, token_clone)
 				}));
 			}
-			Event::TaskCompleted(Some((result, config_ret, token_ret))) => match result {
+			Event::TaskCompleted(Some((result, settings_ret, token_ret))) => match result {
 				TaskResult::ConnectionDone => {
 					debug!("Connection task completed");
 				}
 				TaskResult::PullDone(mut interval) => {
 					debug!("Pull task completed, re-queuing");
-					let config_clone = config_ret;
+					let settings_clone = settings_ret;
 					let token_clone = token_ret;
 					futures.push(Box::pin(async move {
 						interval.tick().await;
 
-						match pull::pull(&config_clone, &token_clone).await {
+						match pull::pull(&settings_clone, &token_clone).await {
 							Ok(()) => debug!("Pull completed successfully"),
 							Err(e) => warn!("Pull failed: {}", e),
 						}
 
-						(TaskResult::PullDone(interval), config_clone, token_clone)
+						(TaskResult::PullDone(interval), settings_clone, token_clone)
 					}));
 				}
 			},
@@ -139,7 +139,7 @@ pub async fn run(config: AppConfig, bot_token: String, pull_interval: Timeframe)
 	Ok(())
 }
 
-async fn handle_connection(mut socket: TcpStream, _config: &AppConfig, bot_token: &str) {
+async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str) {
 	let mut buf = vec![0; 1024];
 
 	while let Ok(n) = socket.read(&mut buf).await {

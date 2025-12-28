@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use tg::TelegramDestination;
 use tracing::{info, warn};
 use v_utils::{
-	macros::{MyConfigPrimitives, Settings},
+	macros::{LiveSettings, MyConfigPrimitives, Settings},
 	trades::Timeframe,
 };
 
-#[derive(Clone, Debug, Default, MyConfigPrimitives, Settings)]
+#[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
 pub struct AppConfig {
 	#[settings(default = 8123)]
 	pub localhost_port: u16,

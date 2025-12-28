@@ -8,7 +8,7 @@ use grammers_tl_types as tl;
 use tg::telegram_chat_id;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{AppConfig, TopicsMetadata};
+use crate::config::{LiveSettings, TopicsMetadata};
 
 /// Get the session file path (same convention as social_networks)
 fn session_path(username: &str) -> PathBuf {
@@ -17,7 +17,7 @@ fn session_path(username: &str) -> PathBuf {
 
 /// Create and authenticate a Telegram MTProto client.
 /// Uses credentials from the app config, with env var fallbacks.
-pub async fn create_client(config: &AppConfig) -> Result<(Client, tokio::task::JoinHandle<()>)> {
+pub async fn create_client(config: &LiveSettings) -> Result<(Client, tokio::task::JoinHandle<()>)> {
 	let api_id = config.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
 	let api_hash = config
 		.api_hash
@@ -235,7 +235,7 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 }
 
 /// Discover and update topics metadata for all configured groups
-pub async fn discover_all_topics(config: &AppConfig) -> Result<()> {
+pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	// Check if credentials are configured (either in config or env vars)
 	let has_api_id = config.api_id.is_some();
 	let has_api_hash = config.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();

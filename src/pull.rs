@@ -268,7 +268,11 @@ async fn get_input_peer(client: &Client, group_id: u64) -> Result<tl::enums::Inp
 	// chat_id is like -1002244305221, we want 2244305221
 	let expected_id = if chat_id < 0 {
 		let s = chat_id.to_string();
-		if s.starts_with("-100") { s[4..].parse::<i64>().unwrap_or(0) } else { chat_id.abs() }
+		if let Some(stripped) = s.strip_prefix("-100") {
+			stripped.parse::<i64>().unwrap_or(0)
+		} else {
+			chat_id.abs()
+		}
 	} else {
 		chat_id
 	};

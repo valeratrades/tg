@@ -9,7 +9,7 @@ use v_utils::{
 };
 
 #[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
-pub struct AppConfig {
+pub(crate) struct AppConfig {
 	#[settings(default = 8123)]
 	pub localhost_port: u16,
 	#[settings(default = 1000)]
@@ -31,7 +31,7 @@ pub struct AppConfig {
 
 impl AppConfig {
 	pub fn pull_todos_over(&self) -> Timeframe {
-		self.pull_todos_over.clone().unwrap_or_else(|| Timeframe::from(&"1w"))
+		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
 	}
 
 	/// Get unique group IDs from all group destinations
@@ -48,6 +48,7 @@ impl AppConfig {
 	}
 
 	/// Resolve a group name to TelegramDestination
+	#[cfg(test)]
 	pub fn resolve_group(&self, name: &str) -> Option<&TelegramDestination> {
 		self.groups.as_ref()?.get(name)
 	}

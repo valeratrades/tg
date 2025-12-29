@@ -189,11 +189,11 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 		debug!("Formatted message append: {:?}", message_append_repr);
 
 		// Ensure the parent directory exists
-		if let Some(parent) = chat_filepath.parent() {
-			if let Err(e) = std::fs::create_dir_all(parent) {
-				error!("Failed to create directory '{}': {}", parent.display(), e);
-				return;
-			}
+		if let Some(parent) = chat_filepath.parent()
+			&& let Err(e) = std::fs::create_dir_all(parent)
+		{
+			error!("Failed to create directory '{}': {}", parent.display(), e);
+			return;
 		}
 
 		let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {

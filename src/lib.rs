@@ -198,8 +198,8 @@ pub fn telegram_chat_id(id: u64) -> i64 {
 /// Extract the group ID from a Telegram chat_id (strips -100 prefix)
 pub fn extract_group_id(chat_id: i64) -> Option<u64> {
 	let s = chat_id.to_string();
-	if s.starts_with("-100") {
-		s[4..].parse().ok()
+	if let Some(stripped) = s.strip_prefix("-100") {
+		stripped.parse().ok()
 	} else if chat_id > 0 {
 		Some(chat_id as u64)
 	} else {

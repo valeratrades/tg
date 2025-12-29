@@ -225,13 +225,12 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			let new_lines: Vec<&str> = content
 				.lines()
 				.filter(|line| {
-					if let Some(caps) = msg_id_re.captures(line) {
-						if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-							if msg_id_set.contains(&id) {
-								removed += 1;
-								return false;
-							}
-						}
+					if let Some(caps) = msg_id_re.captures(line)
+						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
+						&& msg_id_set.contains(&id)
+					{
+						removed += 1;
+						return false;
 					}
 					true
 				})
@@ -325,14 +324,14 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: (\w+))? -->").unwrap();
 
 	for line in content.lines() {
-		if let Some(caps) = msg_id_re.captures(line) {
-			if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-				// Extract sender (default to Bot for backwards compatibility)
-				let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
-				// Extract content by removing the message ID marker
-				let content = msg_id_re.replace(line, "").trim().to_string();
-				messages.insert(id, ParsedMessage { content, sender });
-			}
+		if let Some(caps) = msg_id_re.captures(line)
+			&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
+		{
+			// Extract sender (default to Bot for backwards compatibility)
+			let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
+			// Extract content by removing the message ID marker
+			let content = msg_id_re.replace(line, "").trim().to_string();
+			messages.insert(id, ParsedMessage { content, sender });
 		}
 	}
 
@@ -456,13 +455,13 @@ fn coalesce_new_messages(lines: &[String]) -> Vec<String> {
 		}
 
 		// ". " prefix indicates start of a new message block
-		if trimmed.starts_with(". ") {
+		if let Some(stripped) = trimmed.strip_prefix(". ") {
 			// Save current message if non-empty
 			if !current_message.is_empty() {
 				messages.push(current_message.trim().to_string());
 			}
 			// Start new message without the ". " prefix
-			current_message = trimmed[2..].to_string();
+			current_message = stripped.to_string();
 		} else if current_message.is_empty() {
 			// First line of a new message
 			current_message = trimmed.to_string();
@@ -542,7 +541,7 @@ pub fn detect_changes(old_state: &BTreeMap<i32, ParsedMessage>, new_state: &BTre
 	let mut changes = FileChanges::default();
 
 	// Find deleted messages (in old but not in new)
-	for (id, _msg) in old_state {
+	for id in old_state.keys() {
 		if !new_state.contains_key(id) {
 			changes.deleted.push(*id);
 		}
@@ -550,11 +549,11 @@ pub fn detect_changes(old_state: &BTreeMap<i32, ParsedMessage>, new_state: &BTre
 
 	// Find edited messages (in both but content differs)
 	for (id, new_msg) in new_state {
-		if let Some(old_msg) = old_state.get(id) {
-			if old_msg.content != new_msg.content {
-				// Use the sender from the old state (that's who sent it originally)
-				changes.edited.push((*id, new_msg.content.clone(), old_msg.sender));
-			}
+		if let Some(old_msg) = old_state.get(id)
+			&& old_msg.content != new_msg.content
+		{
+			// Use the sender from the old state (that's who sent it originally)
+			changes.edited.push((*id, new_msg.content.clone(), old_msg.sender));
 		}
 	}
 

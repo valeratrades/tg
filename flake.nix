@@ -4,7 +4,7 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
     pre-commit-hooks.url = "github:cachix/git-hooks.nix/ca5b894d3e3e151ffc1db040b6ce4dcc75d31c37";
-    v-utils.url = "github:valeratrades/.github";
+    v-utils.url = "github:valeratrades/.github/v1.2.1";
   };
 
   outputs =
@@ -25,8 +25,9 @@
           pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
-          workflowContents = v-utils.ci {
-            inherit pkgs;
+          github = v-utils.github {
+            inherit pkgs pname;
+            langs = [ "rs" ];
             lastSupportedVersion = "nightly-2025-10-10";
             jobsErrors = [ "rust-tests" ];
             jobsWarnings = [
@@ -82,21 +83,13 @@
               inherit stdenv;
               shellHook =
                 pre-commit-check.shellHook +
-                workflowContents.shellHook +
+                github.shellHook +
                 ''
                   cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
 
-                  ${v-utils.hooks.appendCustom} ./.git/hooks/pre-commit
-                  cp -f ${(v-utils.hooks.treefmt) { inherit pkgs; }} ./.treefmt.toml
-                  cp -f ${(v-utils.hooks.preCommit) { inherit pkgs pname; }} ./.git/hooks/custom.sh
+                  cp -f ${(v-utils.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
 
                   mkdir -p ./.cargo
-                  cp -f ${
-                    (v-utils.files.gitignore {
-                      inherit pkgs;
-                      langs = [ "rs" ];
-                    })
-                  } ./.gitignore
                   cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
                   cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
                   cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
@@ -109,12 +102,13 @@
               };
 
               packages = [
-                mold-wrapped
+                mold
                 openssl
                 pkg-config
                 rust
               ]
-              ++ pre-commit-check.enabledPackages;
+              ++ pre-commit-check.enabledPackages
+              ++ github.enabledPackages;
             };
         }
       )
@@ -123,7 +117,7 @@
       homeManagerModules."${pname}" = { config, lib, pkgs, ... }:
         let
           inherit (lib) mkEnableOption mkOption mkIf;
-          inherit (lib.types) package path nullOr str;
+          inherit (lib.types) package path nullOr;
           cfg = config."${pname}";
         in
         {

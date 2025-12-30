@@ -1,17 +1,12 @@
-use std::{
-	collections::BTreeMap,
-	io::{Read, Seek, SeekFrom, Write},
-	path::PathBuf,
-};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use eyre::{Result, eyre};
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
-use v_utils::xdg_state_file;
 use xattr::FileExt as _;
 
 use crate::{
@@ -30,38 +25,27 @@ fn sanitize_topic_name(name: &str) -> String {
 		.to_string()
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct SyncTimestamps {
-	/// Maps "group_id/topic_id" -> last synced message_id
-	pub topics: BTreeMap<String, i32>,
-}
+/// Extract the highest message ID from a file's content by parsing `<!-- msg:ID ... -->` tags
+fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
+	use regex::Regex;
 
-impl SyncTimestamps {
-	pub fn load() -> Self {
-		let path = Self::file_path();
-		if !path.exists() {
-			return Self::default();
-		}
+	let content = match std::fs::read_to_string(file_path) {
+		Ok(c) => c,
+		Err(_) => return 0,
+	};
 
-		match std::fs::read_to_string(&path) {
-			Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-			Err(e) => {
-				warn!("Failed to read sync_timestamps.json: {}", e);
-				Self::default()
+	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let mut max_id = 0;
+
+	for cap in msg_id_re.captures_iter(&content) {
+		if let Some(id_match) = cap.get(1) {
+			if let Ok(id) = id_match.as_str().parse::<i32>() {
+				max_id = max_id.max(id);
 			}
 		}
 	}
 
-	pub fn save(&self) -> Result<()> {
-		let path = Self::file_path();
-		let content = serde_json::to_string_pretty(self)?;
-		std::fs::write(&path, content)?;
-		Ok(())
-	}
-
-	pub fn file_path() -> PathBuf {
-		xdg_state_file!("sync_timestamps.json")
-	}
+	max_id
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,9 +161,8 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 		return Ok(());
 	}
 
-	let mut sync_timestamps = SyncTimestamps::load();
 	let topics_metadata = TopicsMetadata::load();
-	info!("Starting pull via MTProto, loaded sync timestamps for {} topics", sync_timestamps.topics.len());
+	info!("Starting pull via MTProto...");
 
 	// Create MTProto client
 	let (client, handle) = mtproto::create_client(config).await?;
@@ -205,10 +188,11 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 		};
 
 		for (&topic_id, topic_name) in &group.topics {
-			let topic_key = format!("{}/{}", group_id, topic_id);
-			let last_synced_id = sync_timestamps.topics.get(&topic_key).copied().unwrap_or(0);
+			let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
+			// Extract last message ID directly from the file content
+			let last_synced_id = extract_max_message_id(&file_path);
 
-			debug!("Pulling topic {} (last_synced_id={})", topic_name, last_synced_id);
+			debug!("Pulling topic {} (last_synced_id={} from file)", topic_name, last_synced_id);
 
 			// Fetch messages for this topic
 			let messages = match fetch_topic_messages(&client, &input_peer, topic_id as i32, last_synced_id, cfg.max_messages_per_chat).await {
@@ -224,18 +208,11 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 			} else {
 				info!("Fetched {} messages for topic {}", messages.len(), topic_name);
 
-				// Find max message ID for updating sync timestamp
-				let max_msg_id = messages.iter().map(|m| m.id).max().unwrap_or(last_synced_id);
-
 				// Merge messages into file
 				merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
-
-				// Update sync timestamp
-				sync_timestamps.topics.insert(topic_key, max_msg_id);
 			}
 
 			// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
-			let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
 			if file_path.exists() {
 				let before = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
 				if let Err(e) = cleanup_tagless_messages(&file_path) {
@@ -249,9 +226,7 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 		}
 	}
 
-	// Save updated timestamps
-	sync_timestamps.save()?;
-	info!("Pull complete, saved sync timestamps");
+	info!("Pull complete");
 
 	// Disconnect client
 	client.disconnect();

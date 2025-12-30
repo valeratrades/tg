@@ -238,14 +238,7 @@ async fn main() -> Result<()> {
 					return Ok(());
 				}
 
-				// Clear sync timestamps
-				let sync_path = pull::SyncTimestamps::file_path();
-				if sync_path.exists() {
-					std::fs::remove_file(&sync_path)?;
-					eprintln!("Cleared sync timestamps");
-				}
-
-				// Clear topic files
+				// Clear topic files (sync state is now derived from file content)
 				let data_dir = server::DATA_DIR.get().unwrap();
 				let metadata = TopicsMetadata::load();
 				for (group_id, group) in &metadata.groups {

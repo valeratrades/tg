@@ -1,12 +1,10 @@
-use std::io::{Read, Seek, SeekFrom, Write};
-
-use eyre::{Result, eyre};
+use eyre::{Result, bail, eyre};
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use jiff::Timestamp;
 use serde::Deserialize;
 use tg::telegram_chat_id;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
@@ -48,13 +46,175 @@ fn extract_max_message_id_from_content(content: &str) -> i32 {
 	max_id
 }
 
+fn parse_month(s: &str) -> Option<i8> {
+	match s {
+		"Jan" => Some(1),
+		"Feb" => Some(2),
+		"Mar" => Some(3),
+		"Apr" => Some(4),
+		"May" => Some(5),
+		"Jun" => Some(6),
+		"Jul" => Some(7),
+		"Aug" => Some(8),
+		"Sep" => Some(9),
+		"Oct" => Some(10),
+		"Nov" => Some(11),
+		"Dec" => Some(12),
+		_ => None,
+	}
+}
+
+/// Backfill years for date headers that don't have them.
+/// Uses the first header WITH a year as anchor, then walks backwards inferring years.
+/// If month increases going backwards, we crossed a year boundary.
+///
+/// Note: This can incorrectly merge months from different years if user had exactly
+/// 11 months of inactivity (e.g., Jan 2023 and Jan 2024 would both become Jan 2024).
+/// This edge case is rare and acceptable.
+fn backfill_date_header_years(content: &str) -> String {
+	use regex::Regex;
+
+	let date_header_re = Regex::new(r"^(## )([A-Za-z]{3}) (\d{1,2})(, (\d{4}))?$").unwrap();
+
+	// First pass: collect all date headers with their line indices and parsed info
+	struct DateHeader {
+		line_idx: usize,
+		month: i8,
+		day: i8,
+		year: Option<i16>,
+		full_line: String,
+	}
+
+	let lines: Vec<&str> = content.lines().collect();
+	let mut headers: Vec<DateHeader> = Vec::new();
+
+	for (idx, line) in lines.iter().enumerate() {
+		let trimmed = line.trim();
+		if let Some(caps) = date_header_re.captures(trimmed) {
+			let month_str = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+			let day: i8 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
+			let year: Option<i16> = caps.get(5).and_then(|m| m.as_str().parse().ok());
+
+			if let Some(month) = parse_month(month_str) {
+				headers.push(DateHeader {
+					line_idx: idx,
+					month,
+					day,
+					year,
+					full_line: trimmed.to_string(),
+				});
+			}
+		}
+	}
+
+	if headers.is_empty() {
+		return content.to_string();
+	}
+
+	// Find first header with a year (anchor point)
+	let anchor_idx = headers.iter().position(|h| h.year.is_some());
+
+	let Some(anchor_idx) = anchor_idx else {
+		// No headers have years - can't infer anything
+		// Use current year for all (will be fixed on next pull with new messages)
+		let current_year = jiff::Zoned::now().year();
+		let mut result_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+		for header in &headers {
+			let new_line = format!("## {} {:02}, {}", month_name(header.month), header.day, current_year);
+			result_lines[header.line_idx] = new_line;
+		}
+		return result_lines.join("\n");
+	};
+
+	// Walk backwards from anchor, inferring years
+	let mut inferred_years: Vec<i16> = vec![0; headers.len()];
+	inferred_years[anchor_idx] = headers[anchor_idx].year.unwrap();
+
+	// Backward pass
+	for i in (0..anchor_idx).rev() {
+		let next_year = inferred_years[i + 1];
+		let next_month = headers[i + 1].month;
+		let curr_month = headers[i].month;
+
+		// If current month > next month, we crossed a year boundary going backwards
+		inferred_years[i] = if curr_month > next_month { next_year - 1 } else { next_year };
+	}
+
+	// Forward pass from anchor
+	for i in (anchor_idx + 1)..headers.len() {
+		let prev_year = inferred_years[i - 1];
+		let prev_month = headers[i - 1].month;
+		let curr_month = headers[i].month;
+
+		// If current month < previous month, we crossed a year boundary going forward
+		inferred_years[i] = if curr_month < prev_month { prev_year + 1 } else { prev_year };
+	}
+
+	// Build result with updated headers
+	let mut result_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+	for (i, header) in headers.iter().enumerate() {
+		if header.year.is_none() {
+			let new_line = format!("## {} {:02}, {}", month_name(header.month), header.day, inferred_years[i]);
+			info!("Backfilled year: {} -> {}", header.full_line, new_line);
+			result_lines[header.line_idx] = new_line;
+		}
+	}
+
+	result_lines.join("\n")
+}
+
+fn month_name(month: i8) -> &'static str {
+	match month {
+		1 => "Jan",
+		2 => "Feb",
+		3 => "Mar",
+		4 => "Apr",
+		5 => "May",
+		6 => "Jun",
+		7 => "Jul",
+		8 => "Aug",
+		9 => "Sep",
+		10 => "Oct",
+		11 => "Nov",
+		12 => "Dec",
+		_ => "???",
+	}
+}
+
+/// Backfill date header years in a file if any headers are missing years
+fn backfill_file_date_headers(file_path: &std::path::Path) -> Result<()> {
+	let content = std::fs::read_to_string(file_path)?;
+
+	// Check if any headers need backfilling
+	let has_headers_without_years = content.lines().any(|line| {
+		let trimmed = line.trim();
+		// Match headers like "## Dec 25" (without year)
+		trimmed.starts_with("## ")
+			&& trimmed.len() > 3
+			&& !trimmed.contains(',') // no comma means no year
+			&& trimmed.chars().skip(3).take(3).all(|c| c.is_alphabetic())
+	});
+
+	if !has_headers_without_years {
+		return Ok(());
+	}
+
+	let backfilled = backfill_date_header_years(&content);
+	if backfilled != content {
+		std::fs::write(file_path, backfilled)?;
+	}
+
+	Ok(())
+}
+
 /// Extract the last date header from file content and parse it as a date
 /// Date headers look like `## Dec 25, 2024` or `## Jan 03`
+/// Only returns dates from headers WITH explicit years (after backfill)
 fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 	use regex::Regex;
 
-	// Match date headers: ## Dec 25, 2024 or ## Dec 25
-	let date_header_re = Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
+	// Only match date headers with explicit years
+	let date_header_re = Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2}), (\d{4})$").unwrap();
 
 	let mut last_date: Option<jiff::civil::Date> = None;
 
@@ -63,29 +223,12 @@ fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 		if let Some(caps) = date_header_re.captures(trimmed) {
 			let month_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
 			let day: i8 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
-			let year: i16 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or_else(|| {
-				// If no year, assume current year
-				jiff::Zoned::now().year()
-			});
+			let year: i16 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
 
-			let month = match month_str {
-				"Jan" => 1,
-				"Feb" => 2,
-				"Mar" => 3,
-				"Apr" => 4,
-				"May" => 5,
-				"Jun" => 6,
-				"Jul" => 7,
-				"Aug" => 8,
-				"Sep" => 9,
-				"Oct" => 10,
-				"Nov" => 11,
-				"Dec" => 12,
-				_ => continue,
-			};
-
-			if let Ok(date) = jiff::civil::Date::new(year, month, day) {
-				last_date = Some(date);
+			if let Some(month) = parse_month(month_str) {
+				if let Ok(date) = jiff::civil::Date::new(year, month, day) {
+					last_date = Some(date);
+				}
 			}
 		}
 	}
@@ -234,6 +377,14 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 
 		for (&topic_id, topic_name) in &group.topics {
 			let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
+
+			// Always backfill date header years if needed (runs even without new messages)
+			if file_path.exists() {
+				if let Err(e) = backfill_file_date_headers(&file_path) {
+					warn!("Failed to backfill date headers in {}: {}", file_path.display(), e);
+				}
+			}
+
 			// Extract last message ID directly from the file content
 			let last_synced_id = extract_max_message_id(&file_path);
 
@@ -438,25 +589,55 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 	Ok(messages)
 }
 
+/// Validate that message IDs in file content are strictly increasing
+/// Returns Ok(()) if valid, Err with details if not
+fn validate_message_ids_increasing(content: &str) -> Result<()> {
+	use regex::Regex;
+
+	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let mut prev_id: Option<i32> = None;
+
+	for cap in msg_id_re.captures_iter(content) {
+		if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+			if let Some(prev) = prev_id {
+				if id <= prev {
+					bail!("Message IDs not strictly increasing: {} followed by {}", prev, id);
+				}
+			}
+			prev_id = Some(id);
+		}
+	}
+
+	Ok(())
+}
+
 /// Merge MTProto messages into a topic file
 async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: &[FetchedMessage], metadata: &TopicsMetadata) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
 	debug!("Merging {} messages to {}", messages.len(), chat_filepath.display());
 
-	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath)?;
+	let file_contents = std::fs::read_to_string(&chat_filepath).unwrap_or_default();
 
-	// Trim trailing whitespace, keeping at most one newline
-	let mut file_contents = String::new();
-	file.read_to_string(&mut file_contents)?;
-	let trimmed_len = file_contents.trim_end().len();
-	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
-	file.set_len(truncate_to as u64)?;
-	file.seek(SeekFrom::End(0))?;
+	// Sanity check: verify message IDs in file are strictly increasing
+	// If not, the file is corrupted and needs manual intervention
+	if let Err(e) = validate_message_ids_increasing(&file_contents) {
+		error!("Message ID validation failed for {}: {}", chat_filepath.display(), e);
+		error!("File may be corrupted. Consider: git checkout -- {}", chat_filepath.display());
+		bail!("Corrupted file detected: {}", e);
+	}
+
+	// Backfill years for old date headers that don't have them
+	// This uses the first header WITH a year as anchor and infers backwards
+	let file_contents = backfill_date_header_years(&file_contents);
+
+	// Write backfilled content and prepare for appending
+	let trimmed_content = file_contents.trim_end();
+	let file_contents_with_newline = if trimmed_content.is_empty() { String::new() } else { format!("{}\n", trimmed_content) };
 
 	// Extract the last date from existing file content (from date headers like `## Dec 25, 2024`)
-	// This is more reliable than xattr which can become stale after truncation
-	let last_date_in_file = extract_last_date_from_content(&file_contents);
+	// Only use headers with explicit years (after backfill, all should have years)
+	let last_date_in_file = extract_last_date_from_content(&file_contents_with_newline);
 	let last_write_datetime: Option<Timestamp> = last_date_in_file.and_then(|date| {
 		// Convert date to timestamp at end of day (23:59:59) so messages on the same day
 		// don't trigger a new date header
@@ -464,6 +645,7 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	});
 
 	let mut last_write = last_write_datetime;
+	let mut new_content = file_contents_with_newline;
 
 	for msg in messages {
 		let msg_time = Timestamp::from_second(msg.date as i64).unwrap_or_else(|_| Timestamp::now());
@@ -474,20 +656,17 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 		if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
 			let formatted = format_message_append_with_sender(&content, last_write, msg_time, Some(msg.id), Some(sender));
-			file.write_all(formatted.as_bytes())?;
+			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		} else if !msg.text.is_empty() {
 			let formatted = format_message_append_with_sender(&msg.text, last_write, msg_time, Some(msg.id), Some(sender));
-			file.write_all(formatted.as_bytes())?;
+			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		}
 	}
 
-	// Ensure all writes are flushed to disk before cleanup runs
-	file.sync_all()?;
-
-	// Explicitly close the file before cleanup runs
-	drop(file);
+	// Write the complete file
+	std::fs::write(&chat_filepath, &new_content)?;
 
 	Ok(())
 }
@@ -784,11 +963,10 @@ next message <!-- msg:124 bot -->
 		let date = extract_last_date_from_content(content);
 		assert_eq!(date, Some(jiff::civil::Date::new(2024, 12, 26).unwrap()));
 
-		// Test without year (should default to current year)
+		// Test without year - should return None (only explicit years are used)
 		let content = "## Jan 03\nmessage";
 		let date = extract_last_date_from_content(content);
-		let current_year = jiff::Zoned::now().year();
-		assert_eq!(date, Some(jiff::civil::Date::new(current_year, 1, 3).unwrap()));
+		assert_eq!(date, None);
 
 		// Test empty content
 		let date = extract_last_date_from_content("");
@@ -798,6 +976,52 @@ next message <!-- msg:124 bot -->
 		let content = "just some message <!-- msg:123 -->";
 		let date = extract_last_date_from_content(content);
 		assert_eq!(date, None);
+	}
+
+	#[test]
+	fn test_backfill_date_header_years() {
+		// Test backfilling with anchor in middle
+		let content = "## Nov 15\nmsg\n## Dec 25, 2024\nmsg\n## Jan 03\nmsg";
+		let result = backfill_date_header_years(content);
+		assert!(result.contains("## Nov 15, 2024"));
+		assert!(result.contains("## Dec 25, 2024"));
+		assert!(result.contains("## Jan 03, 2025")); // crossed year boundary
+
+		// Test year boundary going backwards (Dec -> Nov means same year)
+		let content = "## Oct 01\nmsg\n## Nov 15\nmsg\n## Dec 25, 2024\nmsg";
+		let result = backfill_date_header_years(content);
+		assert!(result.contains("## Oct 01, 2024"));
+		assert!(result.contains("## Nov 15, 2024"));
+		assert!(result.contains("## Dec 25, 2024"));
+
+		// Test no anchor (no years at all) - should use current year
+		let content = "## Jan 03\nmsg\n## Feb 15\nmsg";
+		let result = backfill_date_header_years(content);
+		let current_year = jiff::Zoned::now().year();
+		assert!(result.contains(&format!("## Jan 03, {}", current_year)));
+		assert!(result.contains(&format!("## Feb 15, {}", current_year)));
+	}
+
+	#[test]
+	fn test_validate_message_ids_increasing() {
+		// Valid: strictly increasing
+		let content = "msg <!-- msg:100 -->\nmsg <!-- msg:200 -->\nmsg <!-- msg:300 -->";
+		assert!(validate_message_ids_increasing(content).is_ok());
+
+		// Invalid: not increasing
+		let content = "msg <!-- msg:200 -->\nmsg <!-- msg:100 -->";
+		assert!(validate_message_ids_increasing(content).is_err());
+
+		// Invalid: equal IDs
+		let content = "msg <!-- msg:100 -->\nmsg <!-- msg:100 -->";
+		assert!(validate_message_ids_increasing(content).is_err());
+
+		// Valid: empty content
+		assert!(validate_message_ids_increasing("").is_ok());
+
+		// Valid: single message
+		let content = "msg <!-- msg:100 -->";
+		assert!(validate_message_ids_increasing(content).is_ok());
 	}
 
 	#[test]

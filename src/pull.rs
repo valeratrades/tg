@@ -7,7 +7,6 @@ use jiff::Timestamp;
 use serde::Deserialize;
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
-use xattr::FileExt as _;
 
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
@@ -27,23 +26,71 @@ fn sanitize_topic_name(name: &str) -> String {
 
 /// Extract the highest message ID from a file's content by parsing `<!-- msg:ID ... -->` tags
 fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
-	use regex::Regex;
-
 	let content = match std::fs::read_to_string(file_path) {
 		Ok(c) => c,
 		Err(_) => return 0,
 	};
+	extract_max_message_id_from_content(&content)
+}
+
+fn extract_max_message_id_from_content(content: &str) -> i32 {
+	use regex::Regex;
 
 	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
 	let mut max_id = 0;
 
-	for cap in msg_id_re.captures_iter(&content) {
+	for cap in msg_id_re.captures_iter(content) {
 		if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
 			max_id = max_id.max(id);
 		}
 	}
 
 	max_id
+}
+
+/// Extract the last date header from file content and parse it as a date
+/// Date headers look like `## Dec 25, 2024` or `## Jan 03`
+fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
+	use regex::Regex;
+
+	// Match date headers: ## Dec 25, 2024 or ## Dec 25
+	let date_header_re = Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
+
+	let mut last_date: Option<jiff::civil::Date> = None;
+
+	for line in content.lines() {
+		let trimmed = line.trim();
+		if let Some(caps) = date_header_re.captures(trimmed) {
+			let month_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+			let day: i8 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
+			let year: i16 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or_else(|| {
+				// If no year, assume current year
+				jiff::Zoned::now().year()
+			});
+
+			let month = match month_str {
+				"Jan" => 1,
+				"Feb" => 2,
+				"Mar" => 3,
+				"Apr" => 4,
+				"May" => 5,
+				"Jun" => 6,
+				"Jul" => 7,
+				"Aug" => 8,
+				"Sep" => 9,
+				"Oct" => 10,
+				"Nov" => 11,
+				"Dec" => 12,
+				_ => continue,
+			};
+
+			if let Ok(date) = jiff::civil::Date::new(year, month, day) {
+				last_date = Some(date);
+			}
+		}
+	}
+
+	last_date
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,14 +444,6 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
 	debug!("Merging {} messages to {}", messages.len(), chat_filepath.display());
 
-	// Read existing xattr for last write time
-	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
-		.ok()
-		.and_then(|file| file.get_xattr("user.last_changed").ok())
-		.flatten()
-		.and_then(|v| String::from_utf8(v).ok())
-		.and_then(|s| s.parse::<Timestamp>().ok());
-
 	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath)?;
 
 	// Trim trailing whitespace, keeping at most one newline
@@ -414,6 +453,15 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
 	file.set_len(truncate_to as u64)?;
 	file.seek(SeekFrom::End(0))?;
+
+	// Extract the last date from existing file content (from date headers like `## Dec 25, 2024`)
+	// This is more reliable than xattr which can become stale after truncation
+	let last_date_in_file = extract_last_date_from_content(&file_contents);
+	let last_write_datetime: Option<Timestamp> = last_date_in_file.and_then(|date| {
+		// Convert date to timestamp at end of day (23:59:59) so messages on the same day
+		// don't trigger a new date header
+		date.at(23, 59, 59, 0).to_zoned(jiff::tz::TimeZone::UTC).ok().map(|z| z.timestamp())
+	});
 
 	let mut last_write = last_write_datetime;
 
@@ -437,11 +485,6 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 
 	// Ensure all writes are flushed to disk before cleanup runs
 	file.sync_all()?;
-
-	// Update xattr
-	if let Some(last) = last_write {
-		file.set_xattr("user.last_changed", last.to_string().as_bytes())?;
-	}
 
 	// Explicitly close the file before cleanup runs
 	drop(file);
@@ -489,7 +532,8 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 	for line in content.lines() {
 		let trimmed = line.trim();
 
-		// Track code block state (`````md blocks used for complex messages)
+		// Track code block state (5+ backtick blocks used for complex messages)
+		// Check for 5 or more backticks (our minimum fence length)
 		if trimmed.contains("`````") {
 			in_code_block = !in_code_block;
 			filtered_lines.push(line);
@@ -687,5 +731,85 @@ Message on Dec 28 <!-- msg:101 -->
 
 		// Cleanup
 		std::fs::remove_file(&test_file).ok();
+	}
+
+	#[test]
+	fn test_cleanup_preserves_code_block_content() {
+		use std::io::Write as _;
+
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_cleanup_codeblock.md");
+
+		// Create test file with 5-backtick code block (multiline message format)
+		// Tag is on same line as closing fence, consistent with regular messages
+		let content = r#"## Dec 27
+some message <!-- msg:100 -->
+
+`````md
+TODO: integrate resume into the site
+
+# Impl details
+while at it, add photo and general info on yourself at the top of /contact
+
+// will no longer need separate repo for it
+````` <!-- msg:123 user -->
+next message <!-- msg:124 bot -->
+"#;
+		let mut file = std::fs::File::create(&test_file).unwrap();
+		file.write_all(content.as_bytes()).unwrap();
+
+		// Run cleanup
+		cleanup_tagless_messages(&test_file).unwrap();
+
+		// Read result
+		let result = std::fs::read_to_string(&test_file).unwrap();
+
+		// Verify: all content inside code block is preserved
+		assert!(result.contains("`````md"), "Opening fence should be preserved");
+		assert!(result.contains("TODO: integrate resume into the site"), "Content line 1 should be preserved");
+		assert!(result.contains("# Impl details"), "Header inside block should be preserved");
+		assert!(result.contains("while at it, add photo"), "Content line 2 should be preserved");
+		assert!(result.contains("// will no longer need"), "Content line 3 should be preserved");
+		assert!(result.contains("````` <!-- msg:123 user -->"), "Closing fence with tag should be preserved");
+		assert!(result.contains("next message <!-- msg:124 bot -->"), "Next message should be preserved");
+
+		// Cleanup
+		std::fs::remove_file(&test_file).ok();
+	}
+
+	#[test]
+	fn test_extract_last_date_from_content() {
+		// Test with year
+		let content = "## Dec 25, 2024\nmessage\n## Dec 26, 2024\nmessage";
+		let date = extract_last_date_from_content(content);
+		assert_eq!(date, Some(jiff::civil::Date::new(2024, 12, 26).unwrap()));
+
+		// Test without year (should default to current year)
+		let content = "## Jan 03\nmessage";
+		let date = extract_last_date_from_content(content);
+		let current_year = jiff::Zoned::now().year();
+		assert_eq!(date, Some(jiff::civil::Date::new(current_year, 1, 3).unwrap()));
+
+		// Test empty content
+		let date = extract_last_date_from_content("");
+		assert_eq!(date, None);
+
+		// Test content with no date headers
+		let content = "just some message <!-- msg:123 -->";
+		let date = extract_last_date_from_content(content);
+		assert_eq!(date, None);
+	}
+
+	#[test]
+	fn test_extract_max_message_id_from_content() {
+		let content = "msg <!-- msg:100 -->\nmsg <!-- msg:200 -->\nmsg <!-- msg:150 -->";
+		assert_eq!(extract_max_message_id_from_content(content), 200);
+
+		let content = "";
+		assert_eq!(extract_max_message_id_from_content(content), 0);
+
+		// Test with sender info
+		let content = "msg <!-- msg:300 user -->\nmsg <!-- msg:250 bot -->";
+		assert_eq!(extract_max_message_id_from_content(content), 300);
 	}
 }

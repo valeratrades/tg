@@ -398,11 +398,28 @@ fn needs_markdown_wrapping(message: &str) -> bool {
 	// - Lines starting with # (headers)
 	// - Lines starting with ## (our date headers)
 	// - Lines starting with . followed by space (our message separator)
+	// - Backticks (``` or more) that could interfere with code blocks
 	message.contains("\n\n")
+		|| message.contains("```")
 		|| message.lines().any(|line| {
 			let trimmed = line.trim();
 			trimmed.starts_with('#') || trimmed.starts_with(". ")
 		})
+}
+
+/// Find the longest sequence of backticks in a message
+fn max_backtick_run(message: &str) -> usize {
+	let mut max = 0;
+	let mut current = 0;
+	for c in message.chars() {
+		if c == '`' {
+			current += 1;
+			max = max.max(current);
+		} else {
+			current = 0;
+		}
+	}
+	max
 }
 
 /// Format a message append with message ID and sender info
@@ -436,19 +453,22 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 	};
 
 	// Wrap in code block if message has patterns that break our format
-	// Use 5 backticks to avoid collision with code inside the message
+	// Use enough backticks to avoid collision with code inside the message (min 5)
 	// No need for ". " prefix when wrapped - the code block itself separates
+	// Tag goes on its own line after the closing fence
 	let formatted = if needs_markdown_wrapping(message) {
-		format!("`````md\n{}\n`````", message)
+		let fence_len = max_backtick_run(message).max(4) + 1; // at least 5, or 1 more than content
+		let fence = "`".repeat(fence_len);
+		format!("{}md\n{}\n{}{}", fence, message, fence, id_suffix)
 	} else if needs_dot_prefix {
-		format!(". {}", message)
+		format!(". {}{}", message, id_suffix)
 	} else {
-		message.to_string()
+		format!("{}{}", message, id_suffix)
 	};
 
 	// Assemble final output
 	let prefix = if date_header.is_some() || needs_dot_prefix { "\n" } else { "" };
-	format!("{}{}{}{}\n", date_header.unwrap_or_default(), prefix, formatted, id_suffix)
+	format!("{}{}{}\n", date_header.unwrap_or_default(), prefix, formatted)
 }
 
 #[cfg(test)]

@@ -341,6 +341,8 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						continue;
 					}
 
+					debug!(id = m.id, out = m.out, text = %m.message, "raw message");
+
 					// Extract photo if present
 					let photo = m.media.as_ref().and_then(|media| match media {
 						tl::enums::MessageMedia::Photo(p) => p.photo.as_ref().and_then(|photo| match photo {
@@ -446,11 +448,6 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	// Explicitly close the file before cleanup runs
 	drop(file);
 
-	// Verify write succeeded
-	let final_content = std::fs::read_to_string(&chat_filepath)?;
-	let line_count = final_content.lines().count();
-	debug!(lines = line_count, "merge: after write");
-
 	Ok(())
 }
 
@@ -495,8 +492,32 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 		let trimmed = line.trim();
 
 		// Track code block state (```md blocks used for complex messages)
-		if trimmed.starts_with("```") {
-			in_code_block = !in_code_block;
+		// Opening fence: contains ```md or ```<lang> (letters after ```)
+		// Closing fence: ``` followed by space/tag or end of line
+		if trimmed.contains("```") {
+			// Check if this is an opening fence (has language specifier like ```md)
+			let is_opening = trimmed.contains("```md") || trimmed.contains("```rust") || trimmed.contains("```sh");
+			// Check if this is a closing fence (``` followed by space, tag, or end)
+			let is_closing = {
+				if let Some(pos) = trimmed.find("```") {
+					let after = &trimmed[pos + 3..];
+					// Closing if nothing after, or starts with space/tag
+					after.is_empty() || after.starts_with(' ') || after.starts_with('<')
+				} else {
+					false
+				}
+			};
+
+			if is_opening && !in_code_block {
+				in_code_block = true;
+			} else if is_closing && in_code_block {
+				in_code_block = false;
+			}
+			// If neither clear case, just toggle (legacy behavior)
+			else if !is_opening && !is_closing {
+				in_code_block = !in_code_block;
+			}
+
 			filtered_lines.push(line);
 			continue;
 		}

@@ -52,7 +52,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	info!("Discovering forum topics for configured groups...");
 	pull::discover_and_create_topic_files(&settings, &bot_token).await?;
 
-	let addr = format!("127.0.0.1:{}", settings.config().localhost_port);
+	let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {}", addr);

@@ -88,7 +88,7 @@ pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &
 	let mut topics_metadata = TopicsMetadata::load();
 
 	// First, get group names via Bot API
-	let cfg = config.config();
+	let cfg = config.config()?;
 	for group_id in cfg.forum_group_ids() {
 		let chat_id = telegram_chat_id(group_id);
 
@@ -166,7 +166,7 @@ pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
 /// Run a single pull operation for all configured forum groups using MTProto
 pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 	// Check if MTProto credentials are available
-	let cfg = config.config();
+	let cfg = config.config()?;
 	let has_api_id = cfg.api_id.is_some();
 	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
 	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();

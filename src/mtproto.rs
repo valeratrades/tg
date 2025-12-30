@@ -18,7 +18,7 @@ fn session_path(username: &str) -> PathBuf {
 /// Create and authenticate a Telegram MTProto client.
 /// Uses credentials from the app config, with env var fallbacks.
 pub async fn create_client(config: &LiveSettings) -> Result<(Client, tokio::task::JoinHandle<()>)> {
-	let cfg = config.config();
+	let cfg = config.config()?;
 	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
 	let api_hash = cfg
 		.api_hash
@@ -240,7 +240,7 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 /// Discover and update topics metadata for all configured groups
 pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	// Check if credentials are configured (either in config or env vars)
-	let cfg = config.config();
+	let cfg = config.config()?;
 	let has_api_id = cfg.api_id.is_some();
 	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
 	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();

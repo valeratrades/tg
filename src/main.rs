@@ -179,7 +179,7 @@ async fn main() -> Result<()> {
 			let msg_text = args.message.join(" ");
 
 			let message = Message::new(group_id, topic_id, msg_text.clone());
-			let addr = format!("127.0.0.1:{}", settings.config().localhost_port);
+			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
 			// Try server first, fall back to direct send
 			match TcpStream::connect(&addr).await {
@@ -693,7 +693,7 @@ struct TodoItem {
 fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	use std::io::Read as _;
 
-	let cfg = settings.config();
+	let cfg = settings.config()?;
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 	let cutoff_duration = cfg.pull_todos_over().duration();
 	let today = Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();

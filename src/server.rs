@@ -405,49 +405,50 @@ fn needs_markdown_wrapping(message: &str) -> bool {
 		})
 }
 
-/// Wrap message in markdown code block if it contains special patterns
-fn maybe_wrap_markdown(message: &str) -> String {
-	if needs_markdown_wrapping(message) {
-		format!("```md\n{}\n```", message)
-	} else {
-		message.to_string()
-	}
-}
-
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	debug!("Formatting message append");
-	// Note: last_write_datetime can be > now when processing historical messages from Telegram
-	// (message timestamps may be slightly ahead due to server time differences)
-
-	let mut prefix = String::new();
-	if let Some(last_write_datetime) = last_write_datetime {
-		// Use SignedDuration for exact time difference
-		let duration = now.duration_since(last_write_datetime);
-		let six_minutes = jiff::SignedDuration::from_mins(6);
-
-		if duration >= six_minutes {
-			// Compare year-month-day to handle year boundaries correctly
-			let now_date = now.to_zoned(jiff::tz::TimeZone::UTC).date();
-			let last_date = last_write_datetime.to_zoned(jiff::tz::TimeZone::UTC).date();
-			let same_day = now_date == last_date;
-			if same_day {
-				prefix = "\n. ".to_string();
-			} else {
-				prefix = format!("\n## {}\n", now_date.strftime("%b %d, %Y"));
-			}
-		}
-	}
-
-	// Wrap message if it contains patterns that could break our format
-	let formatted_message = maybe_wrap_markdown(message);
 
 	let id_suffix = match (msg_id, sender) {
 		(Some(id), Some(s)) => format!(" <!-- msg:{} {} -->", id, s),
 		(Some(id), None) => format!(" <!-- msg:{} -->", id),
 		_ => String::new(),
 	};
-	format!("{}{}{}\n", prefix, formatted_message, id_suffix)
+
+	// Determine if we need a time gap separator or date header
+	let (date_header, needs_dot_prefix) = if let Some(last_write_datetime) = last_write_datetime {
+		let duration = now.duration_since(last_write_datetime);
+		let six_minutes = jiff::SignedDuration::from_mins(6);
+
+		if duration >= six_minutes {
+			let now_date = now.to_zoned(jiff::tz::TimeZone::UTC).date();
+			let last_date = last_write_datetime.to_zoned(jiff::tz::TimeZone::UTC).date();
+			if now_date == last_date {
+				(None, true)
+			} else {
+				(Some(format!("\n## {}\n", now_date.strftime("%b %d, %Y"))), false)
+			}
+		} else {
+			(None, false)
+		}
+	} else {
+		(None, false)
+	};
+
+	// Wrap in code block if message has patterns that break our format
+	// Use 5 backticks to avoid collision with code inside the message
+	// No need for ". " prefix when wrapped - the code block itself separates
+	let formatted = if needs_markdown_wrapping(message) {
+		format!("`````md\n{}\n`````", message)
+	} else if needs_dot_prefix {
+		format!(". {}", message)
+	} else {
+		message.to_string()
+	};
+
+	// Assemble final output
+	let prefix = if date_header.is_some() || needs_dot_prefix { "\n" } else { "" };
+	format!("{}{}{}{}\n", date_header.unwrap_or_default(), prefix, formatted, id_suffix)
 }
 
 #[cfg(test)]
@@ -482,26 +483,27 @@ mod tests {
 			formatted_messages.push_str(&m);
 		}
 
-		insta::assert_snapshot!(formatted_messages, @r###"
-  1970-01-01 06:30:00
+		insta::assert_snapshot!(formatted_messages, @"
+		1970-01-01 06:30:00
 
-  ## Jan 03, 1970
-  1970-01-03 15:41:00
+		## Jan 03, 1970
 
-  . 1970-01-03 15:49:00
-  1970-01-03 15:50:00
+		1970-01-03 15:41:00
 
-  . 1970-01-03 16:56:00
+		. 1970-01-03 15:49:00
+		1970-01-03 15:50:00
 
-  . 1970-01-03 17:08:00
+		. 1970-01-03 16:56:00
 
-  . 1970-01-03 17:19:00
-  1970-01-03 17:20:00
+		. 1970-01-03 17:08:00
 
-  . 1970-01-03 17:33:00
+		. 1970-01-03 17:19:00
+		1970-01-03 17:20:00
 
-  . 1970-01-03 20:36:00
-  "###);
+		. 1970-01-03 17:33:00
+
+		. 1970-01-03 20:36:00
+		");
 	}
 
 	#[test]
@@ -529,16 +531,16 @@ mod tests {
 		let formatted = format_message_append_with_sender(message, None, now, Some(123), Some("user"));
 
 		// Should be wrapped in ```md block
-		insta::assert_snapshot!(formatted, @r###"
-		```md
+		insta::assert_snapshot!(formatted, @"
+		`````md
 		TODO: integrate resume into the site
 
 		# Impl details
 		while at it, add photo and general info on yourself at the top of /contact
 
 		// will no longer need separate repo for it
-		``` <!-- msg:123 user -->
-		"###);
+		````` <!-- msg:123 user -->
+		");
 	}
 
 	#[test]

@@ -38,10 +38,8 @@ fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
 	let mut max_id = 0;
 
 	for cap in msg_id_re.captures_iter(&content) {
-		if let Some(id_match) = cap.get(1) {
-			if let Ok(id) = id_match.as_str().parse::<i32>() {
-				max_id = max_id.max(id);
-			}
+		if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+			max_id = max_id.max(id);
 		}
 	}
 
@@ -491,33 +489,9 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 	for line in content.lines() {
 		let trimmed = line.trim();
 
-		// Track code block state (```md blocks used for complex messages)
-		// Opening fence: contains ```md or ```<lang> (letters after ```)
-		// Closing fence: ``` followed by space/tag or end of line
-		if trimmed.contains("```") {
-			// Check if this is an opening fence (has language specifier like ```md)
-			let is_opening = trimmed.contains("```md") || trimmed.contains("```rust") || trimmed.contains("```sh");
-			// Check if this is a closing fence (``` followed by space, tag, or end)
-			let is_closing = {
-				if let Some(pos) = trimmed.find("```") {
-					let after = &trimmed[pos + 3..];
-					// Closing if nothing after, or starts with space/tag
-					after.is_empty() || after.starts_with(' ') || after.starts_with('<')
-				} else {
-					false
-				}
-			};
-
-			if is_opening && !in_code_block {
-				in_code_block = true;
-			} else if is_closing && in_code_block {
-				in_code_block = false;
-			}
-			// If neither clear case, just toggle (legacy behavior)
-			else if !is_opening && !is_closing {
-				in_code_block = !in_code_block;
-			}
-
+		// Track code block state (`````md blocks used for complex messages)
+		if trimmed.contains("`````") {
+			in_code_block = !in_code_block;
 			filtered_lines.push(line);
 			continue;
 		}

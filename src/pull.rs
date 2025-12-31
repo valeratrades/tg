@@ -1,10 +1,10 @@
-use eyre::{Result, bail, eyre};
+use eyre::{Result, eyre};
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use jiff::Timestamp;
 use serde::Deserialize;
 use tg::telegram_chat_id;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
@@ -589,9 +589,9 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 	Ok(messages)
 }
 
-/// Validate that message IDs in file content are strictly increasing
-/// Returns Ok(()) if valid, Err with details if not
-fn validate_message_ids_increasing(content: &str) -> Result<()> {
+/// Check if message IDs in file content are strictly increasing
+/// Returns true if valid, false if reordering is needed
+fn are_message_ids_increasing(content: &str) -> bool {
 	use regex::Regex;
 
 	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
@@ -601,14 +601,202 @@ fn validate_message_ids_increasing(content: &str) -> Result<()> {
 		if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
 			if let Some(prev) = prev_id {
 				if id <= prev {
-					bail!("Message IDs not strictly increasing: {} followed by {}", prev, id);
+					return false;
 				}
 			}
 			prev_id = Some(id);
 		}
 	}
 
-	Ok(())
+	true
+}
+
+/// A message block extracted from file content for reordering
+#[derive(Debug)]
+struct MessageBlock {
+	/// The message ID from the tag
+	id: i32,
+	/// The full content lines of this message (may span multiple lines for code blocks)
+	lines: Vec<String>,
+}
+
+/// Reorder messages in file content so IDs are strictly increasing.
+/// Preserves date headers and places messages under the correct date based on their original position.
+/// Returns the reordered content.
+fn reorder_messages_by_id(content: &str) -> String {
+	use regex::Regex;
+
+	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let date_header_re = Regex::new(r"^## [A-Za-z]{3} \d{1,2}(, \d{4})?$").unwrap();
+
+	// Parse content into sections: date headers and message blocks
+	#[derive(Debug)]
+	enum Section {
+		DateHeader(String),
+		Message(MessageBlock),
+		Empty,
+	}
+
+	let lines: Vec<&str> = content.lines().collect();
+	let mut sections: Vec<Section> = Vec::new();
+	let mut i = 0;
+
+	while i < lines.len() {
+		let line = lines[i];
+		let trimmed = line.trim();
+
+		// Empty line
+		if trimmed.is_empty() {
+			sections.push(Section::Empty);
+			i += 1;
+			continue;
+		}
+
+		// Date header
+		if date_header_re.is_match(trimmed) {
+			sections.push(Section::DateHeader(line.to_string()));
+			i += 1;
+			continue;
+		}
+
+		// Check if this is a message with ID tag on this line
+		if let Some(cap) = msg_id_re.captures(line) {
+			if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+				sections.push(Section::Message(MessageBlock { id, lines: vec![line.to_string()] }));
+				i += 1;
+				continue;
+			}
+		}
+
+		// Check for code block start (5+ backticks) - multiline message
+		if trimmed.contains("`````") {
+			let mut block_lines = vec![line.to_string()];
+			i += 1;
+
+			// Find closing fence
+			while i < lines.len() {
+				let next_line = lines[i];
+				block_lines.push(next_line.to_string());
+
+				// Check if this is a closing fence (line with only backticks)
+				let next_trimmed = next_line.trim();
+				if next_trimmed.chars().all(|c| c == '`') && next_trimmed.len() >= 5 {
+					// Pure backtick fence - tag should be on the next line
+					i += 1;
+					if i < lines.len() {
+						let tag_line = lines[i];
+						if let Some(cap) = msg_id_re.captures(tag_line) {
+							if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+								block_lines.push(tag_line.to_string());
+								sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
+								i += 1;
+							}
+						}
+					}
+					break;
+				} else if next_line.contains("`````") {
+					// Legacy format: closing fence has the tag on the same line
+					if let Some(cap) = msg_id_re.captures(next_line) {
+						if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+							sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
+						}
+					}
+					i += 1;
+					break;
+				}
+				i += 1;
+			}
+			continue;
+		}
+
+		// Unknown line (shouldn't happen after cleanup, but skip it)
+		i += 1;
+	}
+
+	// Extract messages and their associated date headers
+	// We'll collect (date_header_index, message) pairs
+	let mut date_indexed_messages: Vec<(usize, MessageBlock)> = Vec::new();
+	let mut current_date_idx: Option<usize> = None;
+
+	for (idx, section) in sections.iter().enumerate() {
+		match section {
+			Section::DateHeader(_) => current_date_idx = Some(idx),
+			Section::Message(msg) => {
+				date_indexed_messages.push((
+					current_date_idx.unwrap_or(0),
+					MessageBlock {
+						id: msg.id,
+						lines: msg.lines.clone(),
+					},
+				));
+			}
+			Section::Empty => {}
+		}
+	}
+
+	// Sort messages by ID
+	date_indexed_messages.sort_by_key(|(_, msg)| msg.id);
+
+	// Collect date headers in order
+	let date_headers: Vec<(usize, String)> = sections
+		.iter()
+		.enumerate()
+		.filter_map(|(idx, s)| if let Section::DateHeader(h) = s { Some((idx, h.clone())) } else { None })
+		.collect();
+
+	// Rebuild content: for each date header, emit messages that were originally under it (now sorted)
+	let mut result_lines: Vec<String> = Vec::new();
+	let mut used_messages: std::collections::HashSet<i32> = std::collections::HashSet::new();
+
+	for (date_idx, date_header) in &date_headers {
+		// Find next date header index (or end)
+		let next_date_idx = date_headers.iter().find(|(idx, _)| idx > date_idx).map(|(idx, _)| *idx).unwrap_or(usize::MAX);
+
+		// Get messages that belong to this date section (by original position)
+		let section_messages: Vec<&MessageBlock> = date_indexed_messages
+			.iter()
+			.filter(|(orig_date_idx, msg)| *orig_date_idx >= *date_idx && *orig_date_idx < next_date_idx && !used_messages.contains(&msg.id))
+			.map(|(_, msg)| msg)
+			.collect();
+
+		if section_messages.is_empty() {
+			// Skip empty date sections
+			continue;
+		}
+
+		// Add date header
+		result_lines.push(date_header.clone());
+
+		// Add messages in sorted order
+		for msg in section_messages {
+			for line in &msg.lines {
+				result_lines.push(line.clone());
+			}
+			used_messages.insert(msg.id);
+		}
+
+		// Add blank line between sections
+		result_lines.push(String::new());
+	}
+
+	// Handle any messages without a date header (shouldn't happen normally)
+	let remaining: Vec<&MessageBlock> = date_indexed_messages.iter().filter(|(_, msg)| !used_messages.contains(&msg.id)).map(|(_, msg)| msg).collect();
+
+	if !remaining.is_empty() {
+		for msg in remaining {
+			for line in &msg.lines {
+				result_lines.push(line.clone());
+			}
+		}
+	}
+
+	// Remove trailing empty lines
+	while result_lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+		result_lines.pop();
+	}
+
+	let result = result_lines.join("\n");
+	if !result.is_empty() { format!("{}\n", result) } else { result }
 }
 
 /// Merge MTProto messages into a topic file
@@ -617,14 +805,15 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
 	debug!("Merging {} messages to {}", messages.len(), chat_filepath.display());
 
-	let file_contents = std::fs::read_to_string(&chat_filepath).unwrap_or_default();
+	let mut file_contents = std::fs::read_to_string(&chat_filepath).unwrap_or_default();
 
-	// Sanity check: verify message IDs in file are strictly increasing
-	// If not, the file is corrupted and needs manual intervention
-	if let Err(e) = validate_message_ids_increasing(&file_contents) {
-		error!("Message ID validation failed for {}: {}", chat_filepath.display(), e);
-		error!("File may be corrupted. Consider: git checkout -- {}", chat_filepath.display());
-		bail!("Corrupted file detected: {}", e);
+	// Check if message IDs are strictly increasing; if not, reorder them
+	if !are_message_ids_increasing(&file_contents) {
+		warn!("Message IDs not strictly increasing in {}, reordering...", chat_filepath.display());
+		file_contents = reorder_messages_by_id(&file_contents);
+		// Write the reordered content back
+		std::fs::write(&chat_filepath, &file_contents)?;
+		info!("Reordered messages in {}", chat_filepath.display());
 	}
 
 	// Backfill years for old date headers that don't have them
@@ -957,6 +1146,47 @@ next message <!-- msg:124 bot -->
 	}
 
 	#[test]
+	fn test_cleanup_preserves_new_codeblock_format() {
+		use std::io::Write as _;
+
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_cleanup_new_codeblock.md");
+
+		// Create test file with new format: closing fence on its own line, tag on next line
+		let content = r#"## Dec 27
+some message <!-- msg:100 -->
+
+`````md
+Multi-line message
+
+With paragraph
+`````
+<!-- msg:123 user -->
+next message <!-- msg:124 bot -->
+"#;
+		let mut file = std::fs::File::create(&test_file).unwrap();
+		file.write_all(content.as_bytes()).unwrap();
+
+		// Run cleanup
+		cleanup_tagless_messages(&test_file).unwrap();
+
+		// Read result
+		let result = std::fs::read_to_string(&test_file).unwrap();
+
+		// Verify: all content is preserved
+		assert!(result.contains("`````md"), "Opening fence should be preserved");
+		assert!(result.contains("Multi-line message"), "Content should be preserved");
+		assert!(result.contains("With paragraph"), "Content should be preserved");
+		// Check that the closing fence is on its own line (pure backticks)
+		assert!(result.lines().any(|l| l.trim() == "`````"), "Pure closing fence should be preserved");
+		assert!(result.contains("<!-- msg:123 user -->"), "Tag should be preserved");
+		assert!(result.contains("next message <!-- msg:124 bot -->"), "Next message should be preserved");
+
+		// Cleanup
+		std::fs::remove_file(&test_file).ok();
+	}
+
+	#[test]
 	fn test_extract_last_date_from_content() {
 		// Test with year
 		let content = "## Dec 25, 2024\nmessage\n## Dec 26, 2024\nmessage";
@@ -1003,25 +1233,61 @@ next message <!-- msg:124 bot -->
 	}
 
 	#[test]
-	fn test_validate_message_ids_increasing() {
+	fn test_are_message_ids_increasing() {
 		// Valid: strictly increasing
 		let content = "msg <!-- msg:100 -->\nmsg <!-- msg:200 -->\nmsg <!-- msg:300 -->";
-		assert!(validate_message_ids_increasing(content).is_ok());
+		assert!(are_message_ids_increasing(content));
 
 		// Invalid: not increasing
 		let content = "msg <!-- msg:200 -->\nmsg <!-- msg:100 -->";
-		assert!(validate_message_ids_increasing(content).is_err());
+		assert!(!are_message_ids_increasing(content));
 
 		// Invalid: equal IDs
 		let content = "msg <!-- msg:100 -->\nmsg <!-- msg:100 -->";
-		assert!(validate_message_ids_increasing(content).is_err());
+		assert!(!are_message_ids_increasing(content));
 
 		// Valid: empty content
-		assert!(validate_message_ids_increasing("").is_ok());
+		assert!(are_message_ids_increasing(""));
 
 		// Valid: single message
 		let content = "msg <!-- msg:100 -->";
-		assert!(validate_message_ids_increasing(content).is_ok());
+		assert!(are_message_ids_increasing(content));
+	}
+
+	#[test]
+	fn test_reorder_messages_by_id() {
+		// Test basic reordering
+		let content = "## Dec 25, 2024\nmsg B <!-- msg:200 -->\nmsg A <!-- msg:100 -->\nmsg C <!-- msg:300 -->\n";
+		let result = reorder_messages_by_id(content);
+		assert!(are_message_ids_increasing(&result));
+		// Check that messages are in correct order
+		let pos_a = result.find("msg:100").unwrap();
+		let pos_b = result.find("msg:200").unwrap();
+		let pos_c = result.find("msg:300").unwrap();
+		assert!(pos_a < pos_b);
+		assert!(pos_b < pos_c);
+
+		// Test with multiple date sections
+		let content = "## Dec 25, 2024\nmsg 2 <!-- msg:200 -->\nmsg 1 <!-- msg:100 -->\n\n## Dec 26, 2024\nmsg 4 <!-- msg:400 -->\nmsg 3 <!-- msg:300 -->\n";
+		let result = reorder_messages_by_id(content);
+		assert!(are_message_ids_increasing(&result));
+		// Verify structure preserved
+		assert!(result.contains("## Dec 25, 2024"));
+		assert!(result.contains("## Dec 26, 2024"));
+
+		// Test with code blocks (multiline messages) - legacy format
+		let content = "## Dec 27, 2024\n`````md\ncode content\n````` <!-- msg:200 user -->\nsimple msg <!-- msg:100 bot -->\n";
+		let result = reorder_messages_by_id(content);
+		assert!(are_message_ids_increasing(&result));
+		// Code block content should be preserved
+		assert!(result.contains("code content"));
+
+		// Test with new format code blocks (tag on separate line)
+		let content = "## Dec 27, 2024\n`````md\nnew format content\n`````\n<!-- msg:200 user -->\nsimple msg <!-- msg:100 bot -->\n";
+		let result = reorder_messages_by_id(content);
+		assert!(are_message_ids_increasing(&result));
+		// Code block content should be preserved
+		assert!(result.contains("new format content"));
 	}
 
 	#[test]

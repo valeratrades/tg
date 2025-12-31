@@ -315,13 +315,13 @@ mod tests {
 	fn test_deserialize_group_numeric() {
 		let json = r#""2244305221""#;
 		let dest: TelegramDestination = from_str(json).unwrap();
-		assert_debug_snapshot!(dest, @r###"
-  Group(
-      Id(
-          2244305221,
-      ),
-  )
-  "###);
+		assert_debug_snapshot!(dest, @"
+		Group(
+		    Id(
+		        2244305221,
+		    ),
+		)
+		");
 
 		// All these should parse to the same group
 		let cases = [r#"2244305221"#, r#""-1002244305221""#, r#"-1002244305221"#];
@@ -335,37 +335,37 @@ mod tests {
 	fn test_deserialize_group_topic() {
 		let json = r#""2244305221/7""#;
 		let dest: TelegramDestination = from_str(json).unwrap();
-		assert_debug_snapshot!(dest, @r###"
-  GroupTopic {
-      group: Id(
-          2244305221,
-      ),
-      topic_id: 7,
-  }
-  "###);
+		assert_debug_snapshot!(dest, @"
+		GroupTopic {
+		    group: Id(
+		        2244305221,
+		    ),
+		    topic_id: 7,
+		}
+		");
 	}
 
 	#[test]
 	fn test_deserialize_username() {
 		let json = r#""WatchingTT""#;
 		let dest: TelegramDestination = from_str(json).unwrap();
-		assert_debug_snapshot!(dest, @r###"
-  Group(
-      AtName(
-          "WatchingTT",
-      ),
-  )
-  "###);
+		assert_debug_snapshot!(dest, @r#"
+		Group(
+		    AtName(
+		        "WatchingTT",
+		    ),
+		)
+		"#);
 
 		let json_with_at = r#""@WatchingTT""#;
 		let dest_with_at: TelegramDestination = from_str(json_with_at).unwrap();
-		assert_debug_snapshot!(dest_with_at, @r###"
-  Group(
-      AtName(
-          "@WatchingTT",
-      ),
-  )
-  "###);
+		assert_debug_snapshot!(dest_with_at, @r#"
+		Group(
+		    AtName(
+		        "@WatchingTT",
+		    ),
+		)
+		"#);
 	}
 
 	#[test]
@@ -395,31 +395,31 @@ watching = "WatchingTT"
 
 		let config_groups: BTreeMap<String, TelegramDestination> = toml::from_str(toml_str).unwrap();
 
-		assert_debug_snapshot!(config_groups, @r###"
-  {
-      "alerts": GroupTopic {
-          group: Id(
-              2244305223,
-          ),
-          topic_id: 7,
-      },
-      "journal": Group(
-          Id(
-              2244305222,
-          ),
-      ),
-      "watching": Group(
-          AtName(
-              "WatchingTT",
-          ),
-      ),
-      "wtt": Group(
-          Id(
-              2244305221,
-          ),
-      ),
-  }
-  "###);
+		assert_debug_snapshot!(config_groups, @r#"
+		{
+		    "alerts": GroupTopic {
+		        group: Id(
+		            2244305223,
+		        ),
+		        topic_id: 7,
+		    },
+		    "journal": Group(
+		        Id(
+		            2244305222,
+		        ),
+		    ),
+		    "watching": Group(
+		        AtName(
+		            "WatchingTT",
+		        ),
+		    ),
+		    "wtt": Group(
+		        Id(
+		            2244305221,
+		        ),
+		    ),
+		}
+		"#);
 	}
 
 	#[test]

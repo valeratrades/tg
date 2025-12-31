@@ -323,16 +323,69 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	// Match both old format `<!-- msg:ID -->` and new format `<!-- msg:ID sender -->`
 	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: (\w+))? -->").unwrap();
 
-	for line in content.lines() {
+	let lines: Vec<&str> = content.lines().collect();
+	let mut i = 0;
+
+	while i < lines.len() {
+		let line = lines[i];
+		let trimmed = line.trim();
+
+		// Check if this is a code block start (5+ backticks with md)
+		if trimmed.starts_with("`````") && trimmed.contains("md") {
+			// Collect code block content until closing fence
+			let mut block_content = Vec::new();
+			i += 1;
+
+			while i < lines.len() {
+				let next_line = lines[i];
+				let next_trimmed = next_line.trim();
+
+				// Check for closing fence (pure backticks, 5+)
+				if next_trimmed.chars().all(|c| c == '`') && next_trimmed.len() >= 5 {
+					// New format: tag on next line
+					i += 1;
+					if i < lines.len() {
+						if let Some(caps) = msg_id_re.captures(lines[i]) {
+							if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
+								let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
+								let msg_content = block_content.join("\n");
+								messages.insert(id, ParsedMessage { content: msg_content, sender });
+							}
+						}
+					}
+					i += 1;
+					break;
+				} else if next_trimmed.contains("`````") {
+					// Legacy format: closing fence has tag on same line
+					if let Some(caps) = msg_id_re.captures(next_line) {
+						if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
+							let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
+							let msg_content = block_content.join("\n");
+							messages.insert(id, ParsedMessage { content: msg_content, sender });
+						}
+					}
+					i += 1;
+					break;
+				}
+
+				block_content.push(next_line);
+				i += 1;
+			}
+			continue;
+		}
+
+		// Simple single-line message with tag on same line
 		if let Some(caps) = msg_id_re.captures(line)
 			&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 		{
 			// Extract sender (default to Bot for backwards compatibility)
 			let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
 			// Extract content by removing the message ID marker
-			let content = msg_id_re.replace(line, "").trim().to_string();
-			messages.insert(id, ParsedMessage { content, sender });
+			let msg_content = msg_id_re.replace(line, "").trim().to_string();
+			messages.insert(id, ParsedMessage { content: msg_content, sender });
 		}
+
+		i += 1;
 	}
 
 	messages
@@ -613,6 +666,41 @@ This is a test <!-- msg:456 bot -->
 		assert_eq!(messages.get(&456).map(|m| m.sender), Some(MessageSender::Bot));
 		assert_eq!(messages.get(&789).map(|m| &m.content), Some(&". Another message".to_string()));
 		assert_eq!(messages.get(&789).map(|m| m.sender), Some(MessageSender::User));
+	}
+
+	#[test]
+	fn test_parse_file_messages_new_codeblock_format() {
+		// New format: closing fence on its own line, tag on next line
+		let content = r#"`````md
+This is a multi-line message
+
+With paragraph breaks
+`````
+<!-- msg:123 bot -->
+
+simple message <!-- msg:456 user -->
+"#;
+
+		let messages = parse_file_messages(content);
+		assert_eq!(messages.len(), 2);
+		assert_eq!(messages.get(&123).map(|m| &m.content), Some(&"This is a multi-line message\n\nWith paragraph breaks".to_string()));
+		assert_eq!(messages.get(&123).map(|m| m.sender), Some(MessageSender::Bot));
+		assert_eq!(messages.get(&456).map(|m| &m.content), Some(&"simple message".to_string()));
+		assert_eq!(messages.get(&456).map(|m| m.sender), Some(MessageSender::User));
+	}
+
+	#[test]
+	fn test_parse_file_messages_legacy_codeblock_format() {
+		// Legacy format: closing fence has tag on same line
+		let content = r#"`````md
+Legacy multi-line message
+````` <!-- msg:789 bot -->
+"#;
+
+		let messages = parse_file_messages(content);
+		assert_eq!(messages.len(), 1);
+		assert_eq!(messages.get(&789).map(|m| &m.content), Some(&"Legacy multi-line message".to_string()));
+		assert_eq!(messages.get(&789).map(|m| m.sender), Some(MessageSender::Bot));
 	}
 
 	#[test]

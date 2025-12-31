@@ -459,7 +459,8 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 	let formatted = if needs_markdown_wrapping(message) {
 		let fence_len = max_backtick_run(message).max(4) + 1; // at least 5, or 1 more than content
 		let fence = "`".repeat(fence_len);
-		format!("{}md\n{}\n{}{}", fence, message, fence, id_suffix)
+		// Closing fence must be on its own line (CommonMark spec), tag goes on next line
+		format!("{}md\n{}\n{}\n{}", fence, message, fence, id_suffix.trim_start())
 	} else if needs_dot_prefix {
 		format!(". {}{}", message, id_suffix)
 	} else {
@@ -530,13 +531,13 @@ mod tests {
 	fn deser_message() -> Result<()> {
 		let message_str = r#"{"group_id":2244305221,"topic_id":3,"message":"a message"}"#;
 		let message: Message = serde_json::from_str(message_str)?;
-		insta::assert_debug_snapshot!(message, @r###"
-  Message {
-      group_id: 2244305221,
-      topic_id: 3,
-      message: "a message",
-  }
-  "###);
+		insta::assert_debug_snapshot!(message, @r#"
+		Message {
+		    group_id: 2244305221,
+		    topic_id: 3,
+		    message: "a message",
+		}
+		"#);
 		Ok(())
 	}
 
@@ -559,7 +560,8 @@ mod tests {
 		while at it, add photo and general info on yourself at the top of /contact
 
 		// will no longer need separate repo for it
-		````` <!-- msg:123 user -->
+		`````
+		<!-- msg:123 user -->
 		");
 	}
 
@@ -571,9 +573,7 @@ mod tests {
 		let now = Timestamp::UNIX_EPOCH;
 		let formatted = format_message_append_with_sender(message, None, now, Some(456), Some("bot"));
 
-		insta::assert_snapshot!(formatted, @r###"
-		just a simple message <!-- msg:456 bot -->
-		"###);
+		insta::assert_snapshot!(formatted, @"just a simple message <!-- msg:456 bot -->");
 	}
 
 	#[test]
@@ -587,5 +587,58 @@ mod tests {
 		// Should be wrapped
 		assert!(formatted.contains("```md"));
 		assert!(formatted.contains("```"));
+	}
+
+	#[test]
+	fn test_code_block_closing_fence_is_valid_commonmark() {
+		// Per CommonMark spec, a closing code fence must contain ONLY fence characters
+		// (optionally followed by whitespace). Adding <!-- msg:xxx --> on the same line
+		// breaks the fence, causing the code block to not close properly.
+		//
+		// This test ensures we produce valid CommonMark output.
+		let message = "Some message\n\nWith paragraph break";
+
+		let now = Timestamp::UNIX_EPOCH;
+		let formatted = format_message_append_with_sender(message, None, now, Some(999), Some("bot"));
+
+		// The closing fence line should be ONLY backticks (no comment on same line)
+		let lines: Vec<&str> = formatted.lines().collect();
+
+		// Find the closing fence line
+		let fence_line_idx = lines.iter().position(|l| l.starts_with("`````") && !l.contains("md")).unwrap();
+		let fence_line = lines[fence_line_idx];
+
+		// The fence line should contain ONLY backticks (possibly with trailing newline already stripped)
+		assert!(fence_line.chars().all(|c| c == '`'), "Closing fence should contain only backticks, got: {:?}", fence_line);
+
+		// The msg tag should be on the NEXT line
+		let tag_line = lines[fence_line_idx + 1];
+		assert!(tag_line.contains("<!-- msg:999 bot -->"), "Tag should be on line after closing fence, got: {:?}", tag_line);
+	}
+
+	#[test]
+	fn test_message_containing_code_blocks_formats_correctly() {
+		// Reproduce the issue from tooling.md - messages that themselves contain code blocks
+		let message = r#"do note that milestones can easily consist of just one issue, so no problems there.
+
+Q: what do we do for operating on multiple milestones though? Will need some naming standard wtih inverent sorting properties. But dates won't work out of the box, as some task-sets don't have them set in stone
+A: wait, but we can have explicit (or even implicit) deadline move semantics, like existing `milestones` currently do"#;
+
+		let now = Timestamp::UNIX_EPOCH;
+		let formatted = format_message_append_with_sender(message, None, now, Some(2797), Some("bot"));
+
+		// Should be wrapped due to double newlines
+		assert!(formatted.contains("`````md"), "Should start with 5-backtick fence");
+
+		// Verify proper CommonMark structure
+		let lines: Vec<&str> = formatted.lines().collect();
+		let closing_fence_idx = lines.iter().rposition(|l| l.starts_with("`````") && !l.contains("md")).unwrap();
+
+		// Closing fence should be pure backticks
+		assert!(
+			lines[closing_fence_idx].chars().all(|c| c == '`'),
+			"Closing fence must be only backticks: {:?}",
+			lines[closing_fence_idx]
+		);
 	}
 }

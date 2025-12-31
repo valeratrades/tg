@@ -22,8 +22,8 @@ impl Shell {
 		format!(
 			r#"
 # {EXE_NAME} aliases
-function tga; {EXE_NAME} send alerts $argv 2>/dev/null; end
-function tgg; {EXE_NAME} send general $argv 2>/dev/null; end
+function tga; {EXE_NAME} send -c alerts $argv 2>/dev/null; end
+function tgg; {EXE_NAME} send -c general $argv 2>/dev/null; end
 alias tgo="{EXE_NAME} open"
 alias tgd="{EXE_NAME} todos open"
 "#

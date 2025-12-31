@@ -4,6 +4,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
+use clap_stdin::MaybeStdin;
 use eyre::{Result, bail, eyre};
 use jiff::{Timestamp, ToSpan, civil::Date};
 use server::Message;
@@ -38,11 +39,12 @@ pub struct Cli {
 
 #[derive(Clone, Debug, Subcommand)]
 enum Commands {
-	/// Send a message to a topic
+	/// Send a message to a channel/topic
 	/// Ex:
 	/// ```sh
-	/// tg send journal "today I'm feeling blue"
+	/// tg send -c journal "today I'm feeling blue"
 	/// tg send -g 2244305221 -t 7 "direct message"
+	/// echo "piped message" | tg send -c journal -
 	/// ```
 	Send(SendArgs),
 	/// Get information about the bot
@@ -76,17 +78,17 @@ enum Commands {
 
 #[derive(Args, Clone, Debug)]
 struct SendArgs {
-	/// Pattern to match topic name (uses fzf if multiple matches)
-	topic: Option<String>,
+	/// Pattern to match channel/topic name (uses fzf if multiple matches)
+	#[arg(short, long)]
+	channel: Option<String>,
 	/// Direct group ID (bypasses pattern matching)
 	#[arg(short, long)]
 	group_id: Option<u64>,
 	/// Direct topic ID (requires --group-id)
 	#[arg(short, long)]
 	topic_id: Option<u64>,
-	/// Message to send
-	#[arg(allow_hyphen_values = true)]
-	message: Vec<String>,
+	/// Message to send. Pass '-' to read from stdin.
+	message: MaybeStdin<String>,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -176,7 +178,7 @@ async fn main() -> Result<()> {
 	match cli.command {
 		Commands::Send(args) => {
 			let (group_id, topic_id) = resolve_send_destination(&args)?;
-			let msg_text = args.message.join(" ");
+			let msg_text = args.message.to_string();
 
 			let message = Message::new(group_id, topic_id, msg_text.clone());
 			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
@@ -417,7 +419,7 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 
-/// Resolve send destination from topic name using metadata
+/// Resolve send destination from channel name using metadata
 fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 	// If direct IDs are provided, use them
 	if let Some(group_id) = args.group_id {
@@ -425,7 +427,7 @@ fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 		return Ok((group_id, topic_id));
 	}
 
-	let pattern = args.topic.as_deref().ok_or_else(|| eyre!("Topic name required"))?;
+	let pattern = args.channel.as_deref().ok_or_else(|| eyre!("Channel name required (use -c/--channel)"))?;
 	let metadata = TopicsMetadata::load();
 	let pattern_lower = pattern.to_lowercase();
 

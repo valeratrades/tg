@@ -3,7 +3,101 @@
 use eyre::{Result, eyre};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-/// Top-level identifier for a Telegram channel or group
+/// Identifier for a Telegram user or bot.
+///
+/// Can be either a username (with or without `@` prefix) or a numeric user ID.
+/// Unlike channels/groups, user IDs don't use the `-100` prefix.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+pub enum Username {
+	/// Username like "@username" or "username"
+	At(String),
+	/// Numeric user ID (positive integer, no prefix)
+	Id(u64),
+}
+
+impl Username {
+	/// Get the identifier as a string suitable for Telegram API.
+	/// For usernames, ensures `@` prefix. For IDs, returns the numeric string.
+	pub fn api_param(&self) -> String {
+		match self {
+			Self::At(name) =>
+				if name.starts_with('@') {
+					name.clone()
+				} else {
+					format!("@{name}")
+				},
+			Self::Id(id) => id.to_string(),
+		}
+	}
+
+	/// Get the numeric ID if available
+	pub fn numeric_id(&self) -> Option<u64> {
+		match self {
+			Self::At(_) => None,
+			Self::Id(id) => Some(*id),
+		}
+	}
+
+	/// Get the username string if available (without `@` prefix)
+	pub fn name(&self) -> Option<&str> {
+		match self {
+			Self::At(name) => Some(name.trim_start_matches('@')),
+			Self::Id(_) => None,
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for Username {
+	fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+	where
+		D: Deserializer<'de>, {
+		#[derive(Deserialize)]
+		#[serde(untagged)]
+		enum Helper {
+			Unsigned(u64),
+			Signed(i64),
+			String(String),
+		}
+
+		let helper = Helper::deserialize(deserializer)?;
+		match helper {
+			Helper::Unsigned(id) => Ok(Username::Id(id)),
+			Helper::Signed(id) =>
+				if id < 0 {
+					Err(de::Error::custom("User IDs cannot be negative"))
+				} else {
+					Ok(Username::Id(id as u64))
+				},
+			Helper::String(s) => parse_username(&s).map_err(de::Error::custom),
+		}
+	}
+}
+
+fn parse_username(s: &str) -> Result<Username> {
+	let trimmed = s.trim();
+
+	// Check if it's a username (starts with @)
+	if trimmed.starts_with('@') {
+		return Ok(Username::At(trimmed.to_string()));
+	}
+
+	// Try to parse as numeric ID first
+	if let Ok(id) = trimmed.parse::<u64>() {
+		return Ok(Username::Id(id));
+	}
+
+	// If it looks like a username (alphanumeric + underscores), treat as username
+	if trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') {
+		return Ok(Username::At(trimmed.to_string()));
+	}
+
+	Err(eyre!("Invalid username: {}", trimmed))
+}
+
+/// Top-level identifier for a Telegram channel or group.
+///
+/// This type is specifically for channels/supergroups which use the `-100` prefix
+/// in their full chat IDs.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
 pub enum TopLevelId {
 	/// Username like "@channel_name" or "channel_name"
@@ -383,5 +477,63 @@ watching = "WatchingTT"
 		let tg_id = telegram_chat_id(original_id);
 		let extracted = extract_group_id(tg_id);
 		assert_eq!(extracted, Some(original_id));
+	}
+
+	// Username tests
+	#[test]
+	fn test_username_numeric() {
+		let id: Username = from_str("123456789").unwrap();
+		assert_eq!(id, Username::Id(123456789));
+		assert_eq!(id.numeric_id(), Some(123456789));
+		assert_eq!(id.name(), None);
+		assert_eq!(id.api_param(), "123456789");
+	}
+
+	#[test]
+	fn test_username_at() {
+		let id: Username = from_str(r#""johndoe""#).unwrap();
+		assert_eq!(id, Username::At("johndoe".to_string()));
+		assert_eq!(id.numeric_id(), None);
+		assert_eq!(id.name(), Some("johndoe"));
+		assert_eq!(id.api_param(), "@johndoe");
+	}
+
+	#[test]
+	fn test_username_with_at_prefix() {
+		let id: Username = from_str(r#""@johndoe""#).unwrap();
+		assert_eq!(id, Username::At("@johndoe".to_string()));
+		assert_eq!(id.numeric_id(), None);
+		assert_eq!(id.name(), Some("johndoe"));
+		assert_eq!(id.api_param(), "@johndoe");
+	}
+
+	#[test]
+	fn test_username_with_numbers() {
+		// Usernames can contain numbers but can't be all numbers
+		let id: Username = from_str(r#""john123""#).unwrap();
+		assert_eq!(id, Username::At("john123".to_string()));
+	}
+
+	#[test]
+	fn test_username_rejects_negative() {
+		// User IDs can't be negative (unlike channel IDs with -100 prefix)
+		let result: Result<Username, _> = from_str("-123456");
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_username_from_toml() {
+		#[derive(Deserialize)]
+		struct Config {
+			user: Username,
+		}
+
+		let toml_str = r#"user = 123456"#;
+		let config: Config = toml::from_str(toml_str).unwrap();
+		assert_eq!(config.user, Username::Id(123456));
+
+		let toml_str = r#"user = "testuser""#;
+		let config: Config = toml::from_str(toml_str).unwrap();
+		assert_eq!(config.user, Username::At("testuser".to_string()));
 	}
 }

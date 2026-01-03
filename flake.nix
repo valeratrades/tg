@@ -38,6 +38,10 @@
             licenses = [{ license = v-utils.files.licenses.nsfw; }];
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
           };
+          rs = v-utils.rs {
+            inherit pkgs;
+            build.enable = true;
+          };
         in
         {
           packages =
@@ -49,7 +53,7 @@
               };
             in
             {
-              default = rustPlatform.buildRustPackage rec {
+              default = rustPlatform.buildRustPackage {
                 inherit pname;
                 version = manifest.version;
 
@@ -71,13 +75,9 @@
                 pre-commit-check.shellHook +
                 github.shellHook +
                 readme.shellHook +
+                rs.shellHook +
                 ''
                   cp -f ${(v-utils.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
-
-                  mkdir -p ./.cargo
-                  cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
-                  cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
-                  cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
                 '';
               env = {
                 RUST_BACKTRACE = 1;

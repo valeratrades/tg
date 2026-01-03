@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tg::TelegramDestination;
-use tracing::{info, warn};
+use tracing::warn;
 use v_utils::{
 	macros::{LiveSettings, MyConfigPrimitives, Settings},
 	trades::Timeframe,
@@ -57,22 +57,9 @@ impl AppConfig {
 /// Initialize the data directory (call after config is loaded)
 pub fn init_data_dir() {
 	use crate::server::DATA_DIR;
-
-	let data_dir_path = std::env::var("XDG_DATA_HOME")
-		.map(PathBuf::from)
-		.unwrap_or_else(|_| {
-			warn!("XDG_DATA_HOME not set, using ~/.local/share");
-			dirs::data_dir().unwrap_or_else(|| PathBuf::from("."))
-		})
-		.join("tg");
-
-	info!("Initializing data directory: {}", data_dir_path.display());
-	let data_dir = DATA_DIR.get_or_init(|| data_dir_path);
-
-	if let Err(e) = std::fs::create_dir_all(data_dir) {
-		panic!("Failed to create data directory '{}': {}", data_dir.display(), e);
-	}
-	info!("Data directory ready: {}", data_dir.display());
+	// xdg_state_dir! creates the directory and returns the path
+	let data_dir = DATA_DIR.get_or_init(|| v_utils::xdg_state_dir!(""));
+	tracing::info!("Data directory ready: {}", data_dir.display());
 }
 
 /// Metadata for discovered topics in forum groups

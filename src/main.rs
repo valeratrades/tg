@@ -847,7 +847,11 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	}
 
 	std::fs::write(&todos_path, &output)?;
-	println!("Wrote {} TODOs to {}", todos.len(), todos_path.display());
+	if todos.is_empty() {
+		println!("No TODOs found");
+	} else {
+		println!("Wrote {} TODOs to {}", todos.len(), todos_path.display());
+	}
 
 	Ok(todos_path)
 }

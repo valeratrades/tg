@@ -8,6 +8,7 @@
 [<img alt="ci warnings" src="https://img.shields.io/github/actions/workflow/status/valeratrades/tg/warnings.yml?branch=master&style=for-the-badge&style=flat-square&label=warnings&labelColor=d16002" height="20">](https://github.com/valeratrades/tg/actions?query=branch%3Amaster) <!--NB: Won't find it if repo is private-->
 
 `tg` tool allows you to interact with a Telegram bot to send messages, get bot information, and list channels configured in your configuration file. I use it to keep my quick notes.
+If the broader architecture is of interest, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 <!-- markdownlint-disable -->
 <details>
 <summary>
@@ -117,7 +118,7 @@ export PHONE_NUMBER_FR="+1234567890"             # alternative to config
 #### License
 
 <sup>
-	Licensed under <a href="LICENSE">Blue Oak 1.0.0</a>
+	Licensed under <a href="LICENSE">GLWTS</a>
 </sup>
 
 <br>

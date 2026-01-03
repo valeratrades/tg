@@ -195,7 +195,8 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	}
 
 	let metadata = TopicsMetadata::load();
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+) -->").unwrap();
+	// Match both old format `<!-- msg:ID -->` and new format `<!-- msg:ID sender -->`
+	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: \w+)? -->").unwrap();
 
 	for (group_id, items) in &successful_deletions {
 		// Group by topic_id

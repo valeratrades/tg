@@ -934,7 +934,17 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 
 		// This is a tagless message line - remove it
 		removed_count += 1;
-		debug!(line = &trimmed[..trimmed.len().min(80)], "cleanup: removing tagless line");
+		let truncated = if trimmed.len() <= 80 {
+			trimmed
+		} else {
+			// Find a valid char boundary at or before byte 80
+			let mut end = 80;
+			while end > 0 && !trimmed.is_char_boundary(end) {
+				end -= 1;
+			}
+			&trimmed[..end]
+		};
+		debug!(line = truncated, "cleanup: removing tagless line");
 	}
 
 	// Second pass: remove empty date sections and collapse empty lines

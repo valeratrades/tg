@@ -44,12 +44,7 @@
             inherit pkgs pname;
             lastSupportedVersion = "nightly-1.92";
             rootDir = ./.;
-            licenses = [
-              {
-                name = "Blue Oak 1.0.0";
-                outPath = "LICENSE";
-              }
-            ];
+            licenses = [{ license = v-utils.files.licenses.nsfw; }];
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
           };
         in
@@ -84,17 +79,14 @@
               shellHook =
                 pre-commit-check.shellHook +
                 github.shellHook +
+                readme.shellHook +
                 ''
-                  cp -f ${v-utils.files.licenses.blue_oak} ./LICENSE
-
                   cp -f ${(v-utils.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
 
                   mkdir -p ./.cargo
                   cp -f ${(v-utils.files.rust.config { inherit pkgs; })} ./.cargo/config.toml
                   cp -f ${(v-utils.files.rust.rustfmt { inherit pkgs; })} ./rustfmt.toml
                   cp -f ${(v-utils.files.rust.toolchain { inherit pkgs; })} ./.cargo/rust-toolchain.toml
-
-                  cp -f ${readme} ./README.md
                 '';
               env = {
                 RUST_BACKTRACE = 1;

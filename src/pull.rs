@@ -265,7 +265,7 @@ pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &
 		let chat_id = telegram_chat_id(group_id);
 
 		let url = format!("https://api.telegram.org/bot{}/getChat", bot_token);
-		let res = client.get(&url).query(&[("chat_id", chat_id.to_string())]).send().await?;
+		let res: reqwest::Response = client.get(&url).query(&[("chat_id", chat_id.to_string())]).send().await?;
 		let response: GetChatResponse = res.json().await?;
 
 		if !response.ok {

@@ -404,7 +404,7 @@ pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64
 		params.push(("message_thread_id", topic_id.to_string()));
 	}
 
-	let res = http_client.post(&url).form(&params).send().await?;
+	let res: reqwest::Response = http_client.post(&url).form(&params).send().await?;
 	let status = res.status();
 	let response_text = res.text().await?;
 

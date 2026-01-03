@@ -12,10 +12,7 @@ use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpStream,
 };
-use v_utils::{
-	io::{OpenMode, open_with_mode},
-	trades::Timeframe,
-};
+use v_utils::{io::file_open::open, trades::Timeframe};
 
 use crate::config::{LiveSettings, SettingsFlags, TopicsMetadata};
 
@@ -217,7 +214,7 @@ async fn main() -> Result<()> {
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
 			let client = reqwest::Client::new();
-			let res = client.get(&url).send().await?;
+			let res: reqwest::Response = client.get(&url).send().await?;
 
 			let parsed_json: serde_json::Value = serde_json::from_str(&res.text().await?).expect("Failed to parse JSON");
 			let pretty_json = serde_json::to_string_pretty(&parsed_json).expect("Failed to pretty print JSON");
@@ -270,7 +267,7 @@ async fn main() -> Result<()> {
 			let old_content = std::fs::read_to_string(&path).unwrap_or_default();
 
 			// Open with editor
-			open_with_mode(&path, OpenMode::Normal)?;
+			open(&path)?;
 
 			// Read file content after closing editor
 			let new_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -323,7 +320,7 @@ async fn main() -> Result<()> {
 				}
 
 				// Open with editor
-				open_with_mode(&path, OpenMode::Normal)?;
+				open(&path)?;
 
 				// Read the file after editing
 				let new_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -700,8 +697,8 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 
 	// Regex for date headers - both old format "## Jan 03" and new format "## Jan 03, 2025"
 	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
-	// Regex for message ID markers like <!-- msg:123 -->
-	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+) -->").unwrap();
+	// Regex for message ID markers - both old format <!-- msg:123 --> and new format <!-- msg:123 sender -->
+	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+)(?: \w+)? -->").unwrap();
 	// Regex for message block start (`. ` prefix or date header)
 	let msg_block_start_re = regex::Regex::new(r"^(\. |## )").unwrap();
 

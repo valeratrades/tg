@@ -321,7 +321,7 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 				form = form.text("caption", cap);
 			}
 
-			let res = client.post(&url).multipart(form).send().await?;
+			let res: reqwest::Response = client.post(&url).multipart(form).send().await?;
 			let status = res.status();
 			let response_text = res.text().await?;
 
@@ -358,7 +358,7 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 	}
 
 	debug!("Posting text to Telegram API");
-	let res = client.post(&url).form(&params).send().await?;
+	let res: reqwest::Response = client.post(&url).form(&params).send().await?;
 
 	let status = res.status();
 	let response_text = res.text().await?;

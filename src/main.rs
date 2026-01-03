@@ -822,7 +822,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	// Write todos.md
 	let todos_path = data_dir.join("todos.md");
 	let mut output = String::new();
-	output.push_str("# TODOs\n\n");
+	output.push_str("# TODOs\n");
 	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", cfg.pull_todos_over()));
 
 	if todos.is_empty() {
@@ -834,7 +834,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 				if current_source.is_some() {
 					output.push('\n');
 				}
-				output.push_str(&format!("## {}\n\n", todo.source));
+				output.push_str(&format!("## {}\n", todo.source));
 				current_source = Some(&todo.source);
 			}
 

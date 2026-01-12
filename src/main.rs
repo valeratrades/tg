@@ -287,7 +287,7 @@ async fn main() -> Result<()> {
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
-					sync::push(updates, &settings, &bot_token).await?;
+					sync::push_via_server(updates, &settings).await?;
 				} else {
 					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced");
 				}
@@ -338,7 +338,7 @@ async fn main() -> Result<()> {
 							message_id: todo.message_id,
 						})
 						.collect();
-					sync::push(updates, &settings, &bot_token).await?;
+					sync::push_via_server(updates, &settings).await?;
 				}
 			}
 		},
@@ -350,7 +350,7 @@ async fn main() -> Result<()> {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
 					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &settings, &bot_token).await?;
+					sync::push_via_server(vec![update], &settings).await?;
 				}
 				UpdateAction::Edit {
 					group_id,
@@ -373,7 +373,7 @@ async fn main() -> Result<()> {
 						sender,
 					};
 					eprintln!("Scheduling update: {:?}", update);
-					sync::push(vec![update], &settings, &bot_token).await?;
+					sync::push_via_server(vec![update], &settings).await?;
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					// Create: write to file without tag, then send via bot API

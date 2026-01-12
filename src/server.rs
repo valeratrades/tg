@@ -35,6 +35,23 @@ pub struct Message {
 	pub message: String,
 }
 
+/// Request types that the server can handle
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum ServerRequest {
+	/// Send a new message (legacy format, also supports bare Message object)
+	Send(Message),
+	/// Push updates (delete/edit/create) to Telegram via MTProto
+	Push { updates: Vec<crate::sync::MessageUpdate> },
+}
+
+/// Response from the server
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ServerResponse {
+	pub success: bool,
+	pub error: Option<String>,
+}
+
 /// Result from completing a task
 enum TaskResult {
 	/// Connection finished (closed or error)
@@ -139,8 +156,9 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	Ok(())
 }
 
-async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str) {
-	let mut buf = vec![0; 1024];
+async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_token: &str) {
+	// Use a larger buffer for push requests which can contain many updates
+	let mut buf = vec![0; 64 * 1024];
 
 	while let Ok(n) = socket.read(&mut buf).await {
 		if n == 0 {
@@ -150,127 +168,177 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 
 		let received = String::from_utf8_lossy(&buf[0..n]);
 		debug!("Received raw message: {}", received);
-		let message: Message = match serde_json::from_str(&received) {
-			Ok(m) => m,
-			Err(e) => {
-				error!("Failed to deserialize message: {}. Raw: {}", e, received);
-				return;
-			}
+
+		// Try parsing as ServerRequest first (has "type" field), fall back to legacy Message
+		let request: ServerRequest = if let Ok(req) = serde_json::from_str(&received) {
+			req
+		} else if let Ok(msg) = serde_json::from_str::<Message>(&received) {
+			// Legacy format: bare Message object
+			ServerRequest::Send(msg)
+		} else {
+			error!("Failed to deserialize request. Raw: {}", received);
+			let response = ServerResponse {
+				success: false,
+				error: Some("Invalid request format".to_string()),
+			};
+			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
+			return;
 		};
 
-		if let Err(e) = socket.write_all(b"200").await {
-			error!("Failed to send acknowledgment: {}", e);
-			return;
-		}
-		debug!("Sent acknowledgment");
-
-		let metadata = TopicsMetadata::load();
-		let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
-		info!(
-			"Processing message for group {} topic {} to file: {}",
-			message.group_id,
-			message.topic_id,
-			chat_filepath.display()
-		);
-
-		let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
-			.ok()
-			.and_then(|file| {
-				debug!("Reading xattr from existing file");
-				file.get_xattr("user.last_changed").ok()
-			})
-			.flatten()
-			.map(|v| String::from_utf8_lossy(&v).into_owned());
-		let last_write_datetime = last_write_tag
-			.as_deref()
-			.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok());
-
-		let message_append_repr = format_message_append(&message.message, last_write_datetime, Timestamp::now());
-		debug!("Formatted message append: {:?}", message_append_repr);
-
-		// Ensure the parent directory exists
-		if let Some(parent) = chat_filepath.parent()
-			&& let Err(e) = std::fs::create_dir_all(parent)
-		{
-			error!("Failed to create directory '{}': {}", parent.display(), e);
-			return;
-		}
-
-		let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
-			Ok(f) => {
-				debug!("Opened chat file successfully");
-				f
+		match request {
+			ServerRequest::Send(message) => {
+				// Handle send request (legacy behavior)
+				handle_send_message(&mut socket, message, bot_token).await;
 			}
-			Err(e) => {
-				error!("Failed to open chat file '{}': {}", chat_filepath.display(), e);
-				return;
+			ServerRequest::Push { updates } => {
+				// Handle push request via MTProto
+				handle_push_updates(&mut socket, updates, settings, bot_token).await;
 			}
-		};
+		}
+	}
+}
 
-		// Trim trailing whitespace, keeping at most one newline
-		let mut file_contents = String::new();
-		if let Err(e) = file.read_to_string(&mut file_contents) {
-			error!("Failed to read file contents: {}", e);
+/// Handle a push request by executing sync::push() with the MTProto client
+async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, settings: &LiveSettings, bot_token: &str) {
+	info!("Received push request with {} updates", updates.len());
+
+	let result = crate::sync::push(updates, settings, bot_token).await;
+
+	let response = match result {
+		Ok(()) => {
+			info!("Push completed successfully");
+			ServerResponse { success: true, error: None }
+		}
+		Err(e) => {
+			error!("Push failed: {}", e);
+			ServerResponse {
+				success: false,
+				error: Some(e.to_string()),
+			}
+		}
+	};
+
+	let response_json = serde_json::to_string(&response).unwrap();
+	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
+		error!("Failed to send push response: {}", e);
+	}
+}
+
+/// Handle a send message request (legacy behavior)
+async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str) {
+	// Send legacy "200" ack for backwards compatibility
+	if let Err(e) = socket.write_all(b"200").await {
+		error!("Failed to send acknowledgment: {}", e);
+		return;
+	}
+	debug!("Sent acknowledgment");
+
+	let metadata = TopicsMetadata::load();
+	let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
+	info!(
+		"Processing message for group {} topic {} to file: {}",
+		message.group_id,
+		message.topic_id,
+		chat_filepath.display()
+	);
+
+	let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
+		.ok()
+		.and_then(|file| {
+			debug!("Reading xattr from existing file");
+			file.get_xattr("user.last_changed").ok()
+		})
+		.flatten()
+		.map(|v| String::from_utf8_lossy(&v).into_owned());
+	let last_write_datetime = last_write_tag
+		.as_deref()
+		.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok());
+
+	let message_append_repr = format_message_append(&message.message, last_write_datetime, Timestamp::now());
+	debug!("Formatted message append: {:?}", message_append_repr);
+
+	// Ensure the parent directory exists
+	if let Some(parent) = chat_filepath.parent()
+		&& let Err(e) = std::fs::create_dir_all(parent)
+	{
+		error!("Failed to create directory '{}': {}", parent.display(), e);
+		return;
+	}
+
+	let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
+		Ok(f) => {
+			debug!("Opened chat file successfully");
+			f
+		}
+		Err(e) => {
+			error!("Failed to open chat file '{}': {}", chat_filepath.display(), e);
 			return;
 		}
-		let trimmed_len = file_contents.trim_end().len();
-		// Cap at file length to avoid extending the file if it doesn't end with whitespace
-		let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
-		if let Err(e) = file.set_len(truncate_to as u64) {
-			error!("Failed to truncate file: {}", e);
-			return;
-		}
-		if let Err(e) = file.seek(SeekFrom::End(0)) {
-			error!("Failed to seek to end of file: {}", e);
-			return;
-		}
+	};
 
-		if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
-			error!("Failed to write message to file: {}", e);
-			return;
-		}
-		debug!("Wrote message to file");
+	// Trim trailing whitespace, keeping at most one newline
+	let mut file_contents = String::new();
+	if let Err(e) = file.read_to_string(&mut file_contents) {
+		error!("Failed to read file contents: {}", e);
+		return;
+	}
+	let trimmed_len = file_contents.trim_end().len();
+	// Cap at file length to avoid extending the file if it doesn't end with whitespace
+	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
+	if let Err(e) = file.set_len(truncate_to as u64) {
+		error!("Failed to truncate file: {}", e);
+		return;
+	}
+	if let Err(e) = file.seek(SeekFrom::End(0)) {
+		error!("Failed to seek to end of file: {}", e);
+		return;
+	}
 
-		let now_rfc3339 = Timestamp::now().to_string();
-		if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
-			error!("Failed to set xattr: {}", e);
-			return;
-		}
-		debug!("Set xattr successfully");
+	if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
+		error!("Failed to write message to file: {}", e);
+		return;
+	}
+	debug!("Wrote message to file");
 
-		// Spawn background task to send to Telegram (with retries)
-		// The message is written to file immediately without a tag.
-		// When the send succeeds, the next sync will pull the message from TG (with its real ID)
-		// and the tagless local message will be cleaned up.
-		let message_clone = message.clone();
-		let bot_token = bot_token.to_string();
-		tokio::spawn(async move {
-			let mut delay_secs = 1.0_f64;
-			const E: f64 = std::f64::consts::E;
-			const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+	let now_rfc3339 = Timestamp::now().to_string();
+	if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
+		error!("Failed to set xattr: {}", e);
+		return;
+	}
+	debug!("Set xattr successfully");
 
-			loop {
-				match send_message(&message_clone, &bot_token).await {
-					Ok(msg_id) => {
-						info!("Message sent successfully to Telegram with id {}", msg_id);
-						// No need to update local file - sync will handle it
+	// Spawn background task to send to Telegram (with retries)
+	// The message is written to file immediately without a tag.
+	// When the send succeeds, the next sync will pull the message from TG (with its real ID)
+	// and the tagless local message will be cleaned up.
+	let message_clone = message.clone();
+	let bot_token = bot_token.to_string();
+	tokio::spawn(async move {
+		let mut delay_secs = 1.0_f64;
+		const E: f64 = std::f64::consts::E;
+		const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+
+		loop {
+			match send_message(&message_clone, &bot_token).await {
+				Ok(msg_id) => {
+					info!("Message sent successfully to Telegram with id {}", msg_id);
+					// No need to update local file - sync will handle it
+					break;
+				}
+				Err(e) => {
+					let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
+					if total_elapsed_secs >= THIRTY_MINS_SECS {
+						error!("Failed to send message to Telegram after 30+ minutes: {}", e);
+						// Give up - the tagless message will be cleaned up on next sync
 						break;
 					}
-					Err(e) => {
-						let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
-						if total_elapsed_secs >= THIRTY_MINS_SECS {
-							error!("Failed to send message to Telegram after 30+ minutes: {}", e);
-							// Give up - the tagless message will be cleaned up on next sync
-							break;
-						}
-						warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
-						tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-						delay_secs *= E;
-					}
+					warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
+					tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+					delay_secs *= E;
 				}
 			}
-		});
-	}
+		}
+	});
 }
 
 /// Extract image path from markdown image syntax: ![alt](path) or ![](path)

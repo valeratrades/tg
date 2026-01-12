@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, io::Write as _, path::Path};
 
 use eyre::Result;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
 };
 
 /// Who sent a message (affects which API can edit it)
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum MessageSender {
 	#[default]
 	Bot,
@@ -25,7 +26,7 @@ impl MessageSender {
 }
 
 /// A message update to push to Telegram
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum MessageUpdate {
 	Delete {
 		group_id: u64,
@@ -46,10 +47,59 @@ pub enum MessageUpdate {
 	},
 }
 
+/// Push updates via the running server (preferred) or fail with a clear error.
+/// This avoids SQLite session file locking issues when the server is running.
+pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<()> {
+	use tokio::{
+		io::{AsyncReadExt, AsyncWriteExt},
+		net::TcpStream,
+	};
+
+	if updates.is_empty() {
+		debug!("No updates to push");
+		return Ok(());
+	}
+
+	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
+
+	let mut stream = match TcpStream::connect(&addr).await {
+		Ok(s) => s,
+		Err(_) => {
+			eyre::bail!(
+				"Server not running. Start the server first with `tg server`, or the database will be locked.\n\
+				 Hint: The server holds the Telegram session file; CLI commands route through it to avoid conflicts."
+			);
+		}
+	};
+
+	// Send push request
+	let request = crate::server::ServerRequest::Push { updates };
+	let request_json = serde_json::to_string(&request)?;
+	stream.write_all(request_json.as_bytes()).await?;
+
+	// Read response
+	let mut buf = vec![0u8; 4096];
+	let n = stream.read(&mut buf).await?;
+	if n == 0 {
+		eyre::bail!("Server closed connection without response");
+	}
+
+	let response: crate::server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+
+	if response.success {
+		Ok(())
+	} else {
+		eyre::bail!("Server push failed: {}", response.error.unwrap_or_else(|| "unknown error".to_string()))
+	}
+}
+
 /// Push updates to Telegram and sync local files
 /// - Deletes/edits messages on Telegram via MTProto (user messages) or Bot API (bot messages)
 /// - Creates new messages via Bot API
 /// - Removes deleted message lines from local topic files
+///
+/// NOTE: This function opens the MTProto session directly. If the server is running,
+/// use `push_via_server` instead to avoid database locking issues.
 pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token: &str) -> Result<()> {
 	if updates.is_empty() {
 		debug!("No updates to push");

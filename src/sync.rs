@@ -63,6 +63,8 @@ pub struct PushResults {
 	pub edits: Vec<(u64, i32, OpResult)>,
 	/// Results for create operations: (group_id, topic_id, result with new message_id if successful)
 	pub creates: Vec<(u64, u64, OpResult)>,
+	/// Local file cleanup results: (file_path, lines_removed, message)
+	pub file_cleanups: Vec<(String, usize, String)>,
 }
 
 /// Check server version and fail if mismatched
@@ -359,7 +361,10 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 
 		for (topic_id, msg_ids) in by_topic {
 			let file_path = topic_filepath(*group_id, topic_id, &metadata);
+			debug!(path = %file_path.display(), "Looking for topic file to clean up");
 			if !file_path.exists() {
+				warn!(path = %file_path.display(), "Topic file does not exist, skipping cleanup");
+				results.file_cleanups.push((file_path.display().to_string(), 0, "File does not exist".to_string()));
 				continue;
 			}
 
@@ -367,11 +372,13 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 				Ok(c) => c,
 				Err(e) => {
 					warn!(path = %file_path.display(), error = %e, "Failed to read topic file");
+					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to read: {}", e)));
 					continue;
 				}
 			};
 
 			let msg_id_set: std::collections::HashSet<i32> = msg_ids.into_iter().collect();
+			debug!(?msg_id_set, "Looking for message IDs to remove");
 			let mut removed = 0;
 
 			// Filter out lines with deleted message IDs
@@ -382,6 +389,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 						&& msg_id_set.contains(&id)
 					{
+						debug!(line, id, "Removing line with deleted message ID");
 						removed += 1;
 						return false;
 					}
@@ -393,10 +401,16 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 				let new_content = new_lines.join("\n");
 				if let Err(e) = std::fs::write(&file_path, new_content) {
 					warn!(path = %file_path.display(), error = %e, "Failed to write topic file");
+					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to write: {}", e)));
 				} else {
 					info!(path = %file_path.display(), removed, "Removed lines from topic file");
-					eprintln!("Removed {} line(s) from {}", removed, file_path.display());
+					results.file_cleanups.push((file_path.display().to_string(), removed, format!("Removed {} line(s)", removed)));
 				}
+			} else {
+				warn!(path = %file_path.display(), ?msg_id_set, "No lines removed - message IDs not found in file");
+				results
+					.file_cleanups
+					.push((file_path.display().to_string(), 0, format!("Message IDs {:?} not found in file", msg_id_set)));
 			}
 		}
 	}

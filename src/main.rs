@@ -898,6 +898,12 @@ fn display_push_results(results: &PushResults) {
 		eprintln!("  {} create (group:{}/topic:{}): {}", status, group_id, topic_id, op.message);
 	}
 
+	// File cleanups
+	for (path, lines_removed, message) in &results.file_cleanups {
+		let status = if *lines_removed > 0 { "✓" } else { "✗" };
+		eprintln!("  {} cleanup {}: {}", status, path, message);
+	}
+
 	// Summary
 	let del_ok = results.deletions.iter().filter(|(_, _, r)| r.success).count();
 	let del_fail = results.deletions.len() - del_ok;

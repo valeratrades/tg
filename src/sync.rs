@@ -215,11 +215,9 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			match mtproto::delete_messages(client, *group_id, &msg_ids).await {
 				Ok(count) => {
 					info!(group_id, count, "Deleted messages from Telegram");
-					// Only track as successful if at least some messages were deleted
-					// Note: Telegram returns pts_count, not individual success per message
-					// If count matches requested, all succeeded; if count > 0 but < requested,
-					// we can't know which ones failed, so conservatively mark all as successful
-					// (Telegram usually deletes all or none)
+					// NOTE: Telegram message IDs are immutable - they do NOT get renumbered
+					// when other messages are deleted. If IDs appear shifted, it's a bug
+					// in our code, not Telegram behavior.
 					if count > 0 {
 						successful_deletions.insert(*group_id, items.clone());
 						for (_, msg_id) in items {

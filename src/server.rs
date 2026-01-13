@@ -14,6 +14,7 @@ use tg::telegram_chat_id;
 use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::{TcpListener, TcpStream},
+	sync::{mpsc, oneshot},
 	time::Interval,
 };
 use tracing::{debug, error, info, warn};
@@ -24,6 +25,30 @@ use crate::{
 	config::{LiveSettings, TopicsMetadata},
 	pull::{self, topic_filepath},
 };
+
+/// A push request sent through the channel to the MTProto worker
+struct PushRequest {
+	updates: Vec<crate::sync::MessageUpdate>,
+	response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
+}
+
+/// Handle to send push requests to the MTProto worker
+#[derive(Clone)]
+pub struct PushHandle {
+	tx: mpsc::Sender<PushRequest>,
+}
+
+impl PushHandle {
+	/// Send a push request and wait for the result
+	pub async fn push(&self, updates: Vec<crate::sync::MessageUpdate>) -> Result<crate::sync::PushResults> {
+		let (response_tx, response_rx) = oneshot::channel();
+		let request = PushRequest { updates, response_tx };
+
+		self.tx.send(request).await.map_err(|_| eyre::eyre!("Push worker channel closed"))?;
+
+		response_rx.await.map_err(|_| eyre::eyre!("Push worker dropped response channel"))?
+	}
+}
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
@@ -106,6 +131,18 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	info!("Discovering forum topics for configured groups...");
 	pull::discover_and_create_topic_files(&settings, &bot_token).await?;
 
+	// Create push channel and spawn the MTProto worker
+	// This ensures all push operations are serialized through a single MTProto client
+	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+	let push_handle = PushHandle { tx: push_tx };
+
+	// Spawn the push worker task
+	let worker_settings = Arc::clone(&settings);
+	let worker_token = bot_token.clone();
+	let push_worker = tokio::spawn(async move {
+		run_push_worker(push_rx, &worker_settings, &worker_token).await;
+	});
+
 	let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 	debug!("Binding to address: {}", addr);
 	let listener = TcpListener::bind(&addr).await?;
@@ -114,13 +151,14 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	let interval_duration = pull_interval.duration();
 	info!("Pull interval: {}", pull_interval);
 
-	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, String)> + Send>>;
+	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, String, PushHandle)> + Send>>;
 	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
 	// Initial pull task
 	let pull_interval_timer = tokio::time::interval(interval_duration);
 	let settings_clone = Arc::clone(&settings);
 	let token_clone = bot_token.clone();
+	let push_handle_clone = push_handle.clone();
 	futures.push(Box::pin(async move {
 		let mut interval = pull_interval_timer;
 		interval.tick().await;
@@ -130,13 +168,13 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 			Err(e) => warn!("Pull failed: {}", e),
 		}
 
-		(TaskResult::PullDone(interval), settings_clone, token_clone)
+		(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone)
 	}));
 
 	loop {
 		enum Event {
 			NewConnection(std::io::Result<(TcpStream, std::net::SocketAddr)>),
-			TaskCompleted(Option<(TaskResult, Arc<LiveSettings>, String)>),
+			TaskCompleted(Option<(TaskResult, Arc<LiveSettings>, String, PushHandle)>),
 		}
 
 		let event = {
@@ -156,12 +194,13 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 
 				let settings_clone = Arc::clone(&settings);
 				let token_clone = bot_token.clone();
+				let push_handle_clone = push_handle.clone();
 				futures.push(Box::pin(async move {
-					handle_connection(socket, &settings_clone, &token_clone).await;
-					(TaskResult::ConnectionDone, settings_clone, token_clone)
+					handle_connection(socket, &settings_clone, &token_clone, &push_handle_clone).await;
+					(TaskResult::ConnectionDone, settings_clone, token_clone, push_handle_clone)
 				}));
 			}
-			Event::TaskCompleted(Some((result, settings_ret, token_ret))) => match result {
+			Event::TaskCompleted(Some((result, settings_ret, token_ret, push_handle_ret))) => match result {
 				TaskResult::ConnectionDone => {
 					debug!("Connection task completed");
 				}
@@ -169,6 +208,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 					debug!("Pull task completed, re-queuing");
 					let settings_clone = settings_ret;
 					let token_clone = token_ret;
+					let push_handle_clone = push_handle_ret;
 					futures.push(Box::pin(async move {
 						interval.tick().await;
 
@@ -177,7 +217,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 							Err(e) => warn!("Pull failed: {}", e),
 						}
 
-						(TaskResult::PullDone(interval), settings_clone, token_clone)
+						(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone)
 					}));
 				}
 			},
@@ -189,11 +229,30 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 		}
 	}
 
+	// Clean up push worker
+	push_worker.abort();
+
 	info!("Server stopped");
 	Ok(())
 }
 
-async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_token: &str) {
+/// Worker task that owns the MTProto client and processes push requests sequentially
+async fn run_push_worker(mut rx: mpsc::Receiver<PushRequest>, settings: &LiveSettings, bot_token: &str) {
+	info!("Push worker started");
+
+	while let Some(request) = rx.recv().await {
+		debug!("Push worker processing request with {} updates", request.updates.len());
+
+		let result = crate::sync::push(request.updates, settings, bot_token).await;
+
+		// Send result back, ignore errors if receiver dropped
+		let _ = request.response_tx.send(result);
+	}
+
+	info!("Push worker stopped (channel closed)");
+}
+
+async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle) {
 	// Use a larger buffer for push requests which can contain many updates
 	let mut buf = vec![0; 64 * 1024];
 
@@ -225,8 +284,8 @@ async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_t
 				handle_send_message(&mut socket, message, bot_token).await;
 			}
 			ServerRequest::Push { updates } => {
-				// Handle push request via MTProto
-				handle_push_updates(&mut socket, updates, settings, bot_token).await;
+				// Handle push request via the serialized push worker
+				handle_push_updates(&mut socket, updates, push_handle).await;
 			}
 			ServerRequest::Ping => {
 				// Just respond with version info
@@ -240,11 +299,11 @@ async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_t
 	}
 }
 
-/// Handle a push request by executing sync::push() with the MTProto client
-async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, settings: &LiveSettings, bot_token: &str) {
+/// Handle a push request by sending it to the push worker
+async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, push_handle: &PushHandle) {
 	info!("Received push request with {} updates", updates.len());
 
-	let result = crate::sync::push(updates, settings, bot_token).await;
+	let result = push_handle.push(updates).await;
 
 	let response = match result {
 		Ok(push_results) => {

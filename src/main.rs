@@ -803,6 +803,10 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 
 						// Check for TODO
 						if let Some(todo_start) = trimmed.find("TODO: ") {
+							// Extract message ID from THIS line, not from the block
+							// This handles cases where multiple TODOs are on consecutive lines
+							let line_msg_id = msg_id_re.captures(trimmed).and_then(|caps| caps.get(1)).and_then(|m| m.as_str().parse::<i32>().ok());
+
 							// Extract TODO text (remove the msg ID marker if present)
 							let todo_line = msg_id_re.replace(trimmed, "");
 							let todo_text = todo_line[todo_start + 6..].trim();
@@ -815,7 +819,8 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 										text: todo_text.to_string(),
 										source: source.clone(),
 										date: current_date,
-										message_id: block_msg_id,
+										// Prefer line-specific ID, fall back to block ID
+										message_id: line_msg_id.or(block_msg_id),
 										group_id: *group_id,
 										topic_id: *topic_id,
 									});

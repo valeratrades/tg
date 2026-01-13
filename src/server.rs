@@ -43,6 +43,8 @@ pub enum ServerRequest {
 	Send(Message),
 	/// Push updates (delete/edit/create) to Telegram via MTProto
 	Push { updates: Vec<crate::sync::MessageUpdate> },
+	/// Ping to check server version
+	Ping,
 }
 
 /// Response from the server
@@ -50,6 +52,27 @@ pub enum ServerRequest {
 pub struct ServerResponse {
 	pub success: bool,
 	pub error: Option<String>,
+	/// Server version (CARGO_PKG_VERSION), included in all responses for client-side validation
+	#[serde(default)]
+	pub version: Option<String>,
+}
+
+impl ServerResponse {
+	pub fn ok() -> Self {
+		Self {
+			success: true,
+			error: None,
+			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+		}
+	}
+
+	pub fn err(msg: impl Into<String>) -> Self {
+		Self {
+			success: false,
+			error: Some(msg.into()),
+			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+		}
+	}
 }
 
 /// Result from completing a task
@@ -177,10 +200,7 @@ async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_t
 			ServerRequest::Send(msg)
 		} else {
 			error!("Failed to deserialize request. Raw: {}", received);
-			let response = ServerResponse {
-				success: false,
-				error: Some("Invalid request format".to_string()),
-			};
+			let response = ServerResponse::err("Invalid request format");
 			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
 			return;
 		};
@@ -193,6 +213,14 @@ async fn handle_connection(mut socket: TcpStream, settings: &LiveSettings, bot_t
 			ServerRequest::Push { updates } => {
 				// Handle push request via MTProto
 				handle_push_updates(&mut socket, updates, settings, bot_token).await;
+			}
+			ServerRequest::Ping => {
+				// Just respond with version info
+				let response = ServerResponse::ok();
+				let response_json = serde_json::to_string(&response).unwrap();
+				if let Err(e) = socket.write_all(response_json.as_bytes()).await {
+					error!("Failed to send ping response: {}", e);
+				}
 			}
 		}
 	}
@@ -207,14 +235,11 @@ async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::M
 	let response = match result {
 		Ok(()) => {
 			info!("Push completed successfully");
-			ServerResponse { success: true, error: None }
+			ServerResponse::ok()
 		}
 		Err(e) => {
 			error!("Push failed: {}", e);
-			ServerResponse {
-				success: false,
-				error: Some(e.to_string()),
-			}
+			ServerResponse::err(e.to_string())
 		}
 	};
 
@@ -224,10 +249,12 @@ async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::M
 	}
 }
 
-/// Handle a send message request (legacy behavior)
+/// Handle a send message request
 async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str) {
-	// Send legacy "200" ack for backwards compatibility
-	if let Err(e) = socket.write_all(b"200").await {
+	// Send proper JSON response with version info
+	let response = ServerResponse::ok();
+	let response_json = serde_json::to_string(&response).unwrap();
+	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
 		error!("Failed to send acknowledgment: {}", e);
 		return;
 	}

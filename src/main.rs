@@ -186,8 +186,15 @@ async fn main() -> Result<()> {
 					// Server handles file write + message ID tracking
 					let json = serde_json::to_string(&message)?;
 					stream.write_all(json.as_bytes()).await?;
-					let mut response = [0u8; 3];
-					stream.read_exact(&mut response).await?;
+
+					// Read JSON response and check version
+					let mut buf = vec![0u8; 4096];
+					let n = stream.read(&mut buf).await?;
+					if n == 0 {
+						bail!("Server closed connection without response");
+					}
+					let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+					sync::check_server_version(&response)?;
 				}
 				Err(_) => {
 					// Server not running, send directly and update local file

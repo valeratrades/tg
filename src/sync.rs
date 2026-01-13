@@ -47,6 +47,30 @@ pub enum MessageUpdate {
 	},
 }
 
+/// Check server version and fail if mismatched
+pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<()> {
+	let client_version = env!("CARGO_PKG_VERSION");
+	match &response.version {
+		Some(server_version) if server_version != client_version => {
+			eyre::bail!(
+				"Server version mismatch: server is v{}, client is v{}.\n\
+				 Restart the server with `tg server` to use the updated version.",
+				server_version,
+				client_version
+			);
+		}
+		None => {
+			// Old server without version field - definitely outdated
+			eyre::bail!(
+				"Server is outdated (no version info). Client is v{}.\n\
+				 Restart the server with `tg server` to use the updated version.",
+				client_version
+			);
+		}
+		Some(_) => Ok(()), // Versions match
+	}
+}
+
 /// Push updates via the running server (preferred) or fail with a clear error.
 /// This avoids SQLite session file locking issues when the server is running.
 pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<()> {
@@ -85,6 +109,9 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 	}
 
 	let response: crate::server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+
+	// Check version first
+	check_server_version(&response)?;
 
 	if response.success {
 		Ok(())
@@ -698,6 +725,40 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn test_check_server_version_match() {
+		let response = crate::server::ServerResponse {
+			success: true,
+			error: None,
+			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+		};
+		assert!(check_server_version(&response).is_ok());
+	}
+
+	#[test]
+	fn test_check_server_version_mismatch() {
+		let response = crate::server::ServerResponse {
+			success: true,
+			error: None,
+			version: Some("0.0.1".to_string()), // old version
+		};
+		let err = check_server_version(&response).unwrap_err();
+		assert!(err.to_string().contains("version mismatch"));
+		assert!(err.to_string().contains("Restart the server"));
+	}
+
+	#[test]
+	fn test_check_server_version_missing() {
+		let response = crate::server::ServerResponse {
+			success: true,
+			error: None,
+			version: None, // very old server without version field
+		};
+		let err = check_server_version(&response).unwrap_err();
+		assert!(err.to_string().contains("outdated"));
+		assert!(err.to_string().contains("Restart the server"));
+	}
 
 	#[test]
 	fn test_parse_file_messages() {

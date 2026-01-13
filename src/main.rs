@@ -14,7 +14,10 @@ use tokio::{
 };
 use v_utils::{io::file_open::open, trades::Timeframe};
 
-use crate::config::{LiveSettings, SettingsFlags, TopicsMetadata};
+use crate::{
+	config::{LiveSettings, SettingsFlags, TopicsMetadata},
+	sync::PushResults,
+};
 
 pub mod config;
 mod mtproto;
@@ -294,7 +297,8 @@ async fn main() -> Result<()> {
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
-					sync::push_via_server(updates, &settings).await?;
+					let results = sync::push_via_server(updates, &settings).await?;
+					display_push_results(&results);
 				} else {
 					eprintln!("Warning: Could not resolve topic IDs from path, changes not synced");
 				}
@@ -337,6 +341,11 @@ async fn main() -> Result<()> {
 				let deleted: Vec<_> = old_todos.difference(&new_todos).cloned().collect();
 
 				if !deleted.is_empty() {
+					eprintln!("Deleting {} TODO(s):", deleted.len());
+					for todo in &deleted {
+						eprintln!("  - {} (msg:{} in group:{}/topic:{})", todo.text, todo.message_id, todo.group_id, todo.topic_id);
+					}
+
 					let updates: Vec<_> = deleted
 						.iter()
 						.map(|todo| sync::MessageUpdate::Delete {
@@ -345,7 +354,8 @@ async fn main() -> Result<()> {
 							message_id: todo.message_id,
 						})
 						.collect();
-					sync::push_via_server(updates, &settings).await?;
+					let results = sync::push_via_server(updates, &settings).await?;
+					display_push_results(&results);
 				}
 			}
 		},
@@ -356,8 +366,9 @@ async fn main() -> Result<()> {
 			match args.action {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
 					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
-					eprintln!("Scheduling update: {:?}", update);
-					sync::push_via_server(vec![update], &settings).await?;
+					eprintln!("Scheduling delete: msg:{} (group:{}/topic:{})", message_id, group_id, topic_id);
+					let results = sync::push_via_server(vec![update], &settings).await?;
+					display_push_results(&results);
 				}
 				UpdateAction::Edit {
 					group_id,
@@ -379,8 +390,9 @@ async fn main() -> Result<()> {
 						new_content,
 						sender,
 					};
-					eprintln!("Scheduling update: {:?}", update);
-					sync::push_via_server(vec![update], &settings).await?;
+					eprintln!("Scheduling edit: msg:{} (group:{}/topic:{})", message_id, group_id, topic_id);
+					let results = sync::push_via_server(vec![update], &settings).await?;
+					display_push_results(&results);
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					// Create: write to file without tag, then send via bot API
@@ -861,4 +873,63 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	}
 
 	Ok(todos_path)
+}
+
+/// Display push operation results to the user
+fn display_push_results(results: &PushResults) {
+	if results.deletions.is_empty() && results.edits.is_empty() && results.creates.is_empty() {
+		return;
+	}
+
+	eprintln!("\nResults:");
+
+	for (group_id, msg_id, op) in &results.deletions {
+		let status = if op.success { "✓" } else { "✗" };
+		eprintln!("  {} delete msg:{} (group:{}): {}", status, msg_id, group_id, op.message);
+	}
+
+	for (group_id, msg_id, op) in &results.edits {
+		let status = if op.success { "✓" } else { "✗" };
+		eprintln!("  {} edit msg:{} (group:{}): {}", status, msg_id, group_id, op.message);
+	}
+
+	for (group_id, topic_id, op) in &results.creates {
+		let status = if op.success { "✓" } else { "✗" };
+		eprintln!("  {} create (group:{}/topic:{}): {}", status, group_id, topic_id, op.message);
+	}
+
+	// Summary
+	let del_ok = results.deletions.iter().filter(|(_, _, r)| r.success).count();
+	let del_fail = results.deletions.len() - del_ok;
+	let edit_ok = results.edits.iter().filter(|(_, _, r)| r.success).count();
+	let edit_fail = results.edits.len() - edit_ok;
+	let create_ok = results.creates.iter().filter(|(_, _, r)| r.success).count();
+	let create_fail = results.creates.len() - create_ok;
+
+	let mut summary_parts = Vec::new();
+	if !results.deletions.is_empty() {
+		if del_fail > 0 {
+			summary_parts.push(format!("{}/{} deletions", del_ok, results.deletions.len()));
+		} else {
+			summary_parts.push(format!("{} deletions", del_ok));
+		}
+	}
+	if !results.edits.is_empty() {
+		if edit_fail > 0 {
+			summary_parts.push(format!("{}/{} edits", edit_ok, results.edits.len()));
+		} else {
+			summary_parts.push(format!("{} edits", edit_ok));
+		}
+	}
+	if !results.creates.is_empty() {
+		if create_fail > 0 {
+			summary_parts.push(format!("{}/{} creates", create_ok, results.creates.len()));
+		} else {
+			summary_parts.push(format!("{} creates", create_ok));
+		}
+	}
+
+	if !summary_parts.is_empty() {
+		eprintln!("Summary: {}", summary_parts.join(", "));
+	}
 }

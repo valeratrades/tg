@@ -47,6 +47,24 @@ pub enum MessageUpdate {
 	},
 }
 
+/// Result of a single operation
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct OpResult {
+	pub success: bool,
+	pub message: String,
+}
+
+/// Detailed results from a push operation
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct PushResults {
+	/// Results for delete operations: (group_id, message_id, result)
+	pub deletions: Vec<(u64, i32, OpResult)>,
+	/// Results for edit operations: (group_id, message_id, result)
+	pub edits: Vec<(u64, i32, OpResult)>,
+	/// Results for create operations: (group_id, topic_id, result with new message_id if successful)
+	pub creates: Vec<(u64, u64, OpResult)>,
+}
+
 /// Check server version and fail if mismatched
 pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<()> {
 	let client_version = env!("CARGO_PKG_VERSION");
@@ -73,7 +91,8 @@ pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<
 
 /// Push updates via the running server (preferred) or fail with a clear error.
 /// This avoids SQLite session file locking issues when the server is running.
-pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<()> {
+/// Returns detailed results from the push operation.
+pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<PushResults> {
 	use tokio::{
 		io::{AsyncReadExt, AsyncWriteExt},
 		net::TcpStream,
@@ -81,7 +100,7 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 
 	if updates.is_empty() {
 		debug!("No updates to push");
-		return Ok(());
+		return Ok(PushResults::default());
 	}
 
 	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
@@ -101,8 +120,8 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 	let request_json = serde_json::to_string(&request)?;
 	stream.write_all(request_json.as_bytes()).await?;
 
-	// Read response
-	let mut buf = vec![0u8; 4096];
+	// Read response (may be larger than 4096 for many operations)
+	let mut buf = vec![0u8; 65536];
 	let n = stream.read(&mut buf).await?;
 	if n == 0 {
 		eyre::bail!("Server closed connection without response");
@@ -114,7 +133,7 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 	check_server_version(&response)?;
 
 	if response.success {
-		Ok(())
+		Ok(response.push_results.unwrap_or_default())
 	} else {
 		eyre::bail!("Server push failed: {}", response.error.unwrap_or_else(|| "unknown error".to_string()))
 	}
@@ -127,10 +146,12 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 ///
 /// NOTE: This function opens the MTProto session directly. If the server is running,
 /// use `push_via_server` instead to avoid database locking issues.
-pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token: &str) -> Result<()> {
+pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token: &str) -> Result<PushResults> {
+	let mut results = PushResults::default();
+
 	if updates.is_empty() {
 		debug!("No updates to push");
-		return Ok(());
+		return Ok(results);
 	}
 
 	let delete_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Delete { .. })).count();
@@ -150,7 +171,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 		if !input.trim().eq_ignore_ascii_case("y") {
 			info!("Aborted by user");
 			eprintln!("Aborted.");
-			return Ok(());
+			return Ok(results);
 		}
 	}
 
@@ -192,7 +213,6 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			match mtproto::delete_messages(client, *group_id, &msg_ids).await {
 				Ok(count) => {
 					info!(group_id, count, "Deleted messages from Telegram");
-					eprintln!("Deleted {} message(s) from group {}", count, group_id);
 					// Only track as successful if at least some messages were deleted
 					// Note: Telegram returns pts_count, not individual success per message
 					// If count matches requested, all succeeded; if count > 0 but < requested,
@@ -200,15 +220,42 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 					// (Telegram usually deletes all or none)
 					if count > 0 {
 						successful_deletions.insert(*group_id, items.clone());
+						for (_, msg_id) in items {
+							results.deletions.push((
+								*group_id,
+								*msg_id,
+								OpResult {
+									success: true,
+									message: format!("Deleted (pts_count={})", count),
+								},
+							));
+						}
 					} else {
 						warn!(group_id, "Telegram reported 0 deletions, keeping local files intact");
-						eprintln!("Warning: No messages were deleted from Telegram, local files unchanged");
+						for (_, msg_id) in items {
+							results.deletions.push((
+								*group_id,
+								*msg_id,
+								OpResult {
+									success: false,
+									message: "Telegram returned 0 deletions".to_string(),
+								},
+							));
+						}
 					}
 				}
 				Err(e) => {
 					warn!(group_id, error = %e, "Failed to delete messages");
-					eprintln!("Failed to delete from group {}: {}", group_id, e);
-					// Don't add to successful_deletions - local files stay intact
+					for (_, msg_id) in items {
+						results.deletions.push((
+							*group_id,
+							*msg_id,
+							OpResult {
+								success: false,
+								message: e.to_string(),
+							},
+						));
+					}
 				}
 			}
 		}
@@ -228,11 +275,25 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			match result {
 				Ok(()) => {
 					info!(group_id, msg_id, ?sender, "Edited message on Telegram");
-					eprintln!("Edited message {} in group {} (via {:?})", msg_id, group_id, sender);
+					results.edits.push((
+						*group_id,
+						*msg_id,
+						OpResult {
+							success: true,
+							message: format!("Edited via {:?}", sender),
+						},
+					));
 				}
 				Err(e) => {
 					warn!(group_id, msg_id, ?sender, error = %e, "Failed to edit message");
-					eprintln!("Failed to edit message {} in group {}: {}", msg_id, group_id, e);
+					results.edits.push((
+						*group_id,
+						*msg_id,
+						OpResult {
+							success: false,
+							message: e.to_string(),
+						},
+					));
 				}
 			}
 		}
@@ -255,12 +316,26 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 		match send_message(&message, bot_token).await {
 			Ok(msg_id) => {
 				info!(group_id, topic_id, msg_id, "Created message on Telegram");
-				eprintln!("Sent message to group {} topic {} (msg_id: {})", group_id, topic_id, msg_id);
 				successful_creates.push((*group_id, *topic_id, content.clone(), msg_id));
+				results.creates.push((
+					*group_id,
+					*topic_id,
+					OpResult {
+						success: true,
+						message: format!("Created with msg_id={}", msg_id),
+					},
+				));
 			}
 			Err(e) => {
 				warn!(group_id, topic_id, error = %e, "Failed to create message");
-				eprintln!("Failed to send message to group {} topic {}: {}", group_id, topic_id, e);
+				results.creates.push((
+					*group_id,
+					*topic_id,
+					OpResult {
+						success: false,
+						message: e.to_string(),
+					},
+				));
 			}
 		}
 	}
@@ -384,7 +459,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	}
 
 	info!("Push complete");
-	Ok(())
+	Ok(results)
 }
 
 /// Parsed message with content and sender info
@@ -732,6 +807,7 @@ mod tests {
 			success: true,
 			error: None,
 			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+			push_results: None,
 		};
 		assert!(check_server_version(&response).is_ok());
 	}
@@ -742,6 +818,7 @@ mod tests {
 			success: true,
 			error: None,
 			version: Some("0.0.1".to_string()), // old version
+			push_results: None,
 		};
 		let err = check_server_version(&response).unwrap_err();
 		assert!(err.to_string().contains("version mismatch"));
@@ -754,6 +831,7 @@ mod tests {
 			success: true,
 			error: None,
 			version: None, // very old server without version field
+			push_results: None,
 		};
 		let err = check_server_version(&response).unwrap_err();
 		assert!(err.to_string().contains("outdated"));

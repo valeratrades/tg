@@ -48,13 +48,16 @@ pub enum ServerRequest {
 }
 
 /// Response from the server
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServerResponse {
 	pub success: bool,
 	pub error: Option<String>,
 	/// Server version (CARGO_PKG_VERSION), included in all responses for client-side validation
 	#[serde(default)]
 	pub version: Option<String>,
+	/// Detailed results from push operations
+	#[serde(default)]
+	pub push_results: Option<crate::sync::PushResults>,
 }
 
 impl ServerResponse {
@@ -63,6 +66,16 @@ impl ServerResponse {
 			success: true,
 			error: None,
 			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+			push_results: None,
+		}
+	}
+
+	pub fn ok_with_results(results: crate::sync::PushResults) -> Self {
+		Self {
+			success: true,
+			error: None,
+			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+			push_results: Some(results),
 		}
 	}
 
@@ -71,6 +84,7 @@ impl ServerResponse {
 			success: false,
 			error: Some(msg.into()),
 			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+			push_results: None,
 		}
 	}
 }
@@ -233,9 +247,9 @@ async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::M
 	let result = crate::sync::push(updates, settings, bot_token).await;
 
 	let response = match result {
-		Ok(()) => {
+		Ok(push_results) => {
 			info!("Push completed successfully");
-			ServerResponse::ok()
+			ServerResponse::ok_with_results(push_results)
 		}
 		Err(e) => {
 			error!("Push failed: {}", e);

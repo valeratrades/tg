@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
 				if !deleted.is_empty() {
 					eprintln!("Deleting {} TODO(s):", deleted.len());
 					for todo in &deleted {
-						eprintln!("  - {} (msg:{} in group:{}/topic:{})", todo.text, todo.message_id, todo.group_id, todo.topic_id);
+						eprintln!("  - {} (msg:{} in group:{}/topic:{})", todo.content, todo.message_id, todo.group_id, todo.topic_id);
 					}
 
 					let updates: Vec<_> = deleted
@@ -650,19 +650,19 @@ struct TrackedTodo {
 	group_id: u64,
 	topic_id: u64,
 	message_id: i32,
-	/// The TODO text, used to find and remove from source file
-	text: String,
+	/// The full message content, used to find and remove from source file
+	content: String,
 }
 
 /// Parse todos.md and extract all tracked TODO items
 fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	let mut tracked = std::collections::HashSet::new();
-	// Pattern: - [ ] text (date) <!-- todo:group_id:topic_id:msg_id -->
+	// Pattern: - [ ] content (date) <!-- todo:group_id:topic_id:msg_id -->
 	let todo_re = regex::Regex::new(r"^- \[ \] (.+?) \([A-Za-z]{3} \d{1,2}\) <!-- todo:(\d+):(\d+):(\d+) -->$").unwrap();
 
 	for line in content.lines() {
 		if let Some(caps) = todo_re.captures(line.trim()) {
-			let text = caps.get(1).unwrap().as_str().to_string();
+			let content = caps.get(1).unwrap().as_str().to_string();
 			if let (Ok(group_id), Ok(topic_id), Ok(msg_id)) = (
 				caps.get(2).unwrap().as_str().parse::<u64>(),
 				caps.get(3).unwrap().as_str().parse::<u64>(),
@@ -674,7 +674,7 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 						group_id,
 						topic_id,
 						message_id: msg_id,
-						text,
+						content,
 					});
 				}
 			}
@@ -684,10 +684,71 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	tracked
 }
 
+/// Build a map from message ID to date by scanning date headers in a topic file.
+/// Date headers look like "## Jan 03" or "## Jan 03, 2025".
+fn build_message_date_map(content: &str, current_year: i16, today: Date) -> std::collections::HashMap<i32, Date> {
+	use std::collections::HashMap;
+
+	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
+	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+)").unwrap();
+
+	let mut msg_dates = HashMap::new();
+	let mut current_date: Option<Date> = None;
+
+	for line in content.lines() {
+		let trimmed = line.trim();
+
+		// Check for date header
+		if let Some(caps) = date_header_re.captures(trimmed) {
+			let month_str = caps.get(1).unwrap().as_str();
+			let day: i8 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
+			let explicit_year: Option<i16> = caps.get(3).and_then(|m| m.as_str().parse().ok());
+
+			let month: i8 = match month_str.to_lowercase().as_str() {
+				"jan" => 1,
+				"feb" => 2,
+				"mar" => 3,
+				"apr" => 4,
+				"may" => 5,
+				"jun" => 6,
+				"jul" => 7,
+				"aug" => 8,
+				"sep" => 9,
+				"oct" => 10,
+				"nov" => 11,
+				"dec" => 12,
+				_ => continue,
+			};
+
+			let year = explicit_year.unwrap_or_else(|| {
+				if let Ok(date) = Date::new(current_year, month, day) {
+					if date > today { current_year - 1 } else { current_year }
+				} else {
+					current_year
+				}
+			});
+
+			current_date = Date::new(year, month, day).ok();
+			continue;
+		}
+
+		// Check for message ID and associate with current date
+		if let Some(current) = current_date {
+			if let Some(caps) = msg_id_re.captures(line) {
+				if let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+					msg_dates.insert(id, current);
+				}
+			}
+		}
+	}
+
+	msg_dates
+}
+
 /// A TODO item extracted from a topic file
 struct TodoItem {
-	/// The TODO text (after "TODO: ")
-	text: String,
+	/// The full message content containing the TODO
+	content: String,
 	/// Source topic path (relative to data dir)
 	source: String,
 	/// Approximate date of the message containing the TODO
@@ -714,13 +775,6 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	let metadata = TopicsMetadata::load();
 	let mut todos: Vec<TodoItem> = Vec::new();
 
-	// Regex for date headers - both old format "## Jan 03" and new format "## Jan 03, 2025"
-	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
-	// Regex for message ID markers - both old format <!-- msg:123 --> and new format <!-- msg:123 sender -->
-	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+)(?: \w+)? -->").unwrap();
-	// Regex for message block start (`. ` prefix or date header)
-	let msg_block_start_re = regex::Regex::new(r"^(\. |## )").unwrap();
-
 	let current_year = today.year();
 
 	// Iterate over all known topics from metadata
@@ -734,102 +788,27 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 				continue;
 			}
 
-			let mut current_date: Option<Date> = None;
+			// Build a map of message_id -> date by scanning date headers
+			let msg_dates = build_message_date_map(&contents, current_year, today);
 
-			// Parse file into message blocks to associate TODOs with their message IDs
-			// A message block is: all lines from one message start until the next
-			// Message ID marker appears at the end of the message block
-			let lines: Vec<&str> = contents.lines().collect();
-			let mut block_start = 0;
+			// Use parse_file_messages to get clean message content (tags already stripped)
+			let messages = sync::parse_file_messages(&contents);
 
-			for i in 0..=lines.len() {
-				// Check if this is a block boundary (new block starts or end of file)
-				let is_boundary = i == lines.len() || (i > 0 && msg_block_start_re.is_match(lines[i]));
-
-				if is_boundary && block_start < i {
-					// Process the block from block_start to i-1
-					let block_lines = &lines[block_start..i];
-
-					// Find message ID in the block (usually on the last line)
-					let mut block_msg_id: Option<i32> = None;
-					for line in block_lines.iter().rev() {
-						if let Some(caps) = msg_id_re.captures(line) {
-							block_msg_id = caps.get(1).and_then(|m| m.as_str().parse().ok());
-							break;
-						}
+			// Find all messages containing "TODO:"
+			for (msg_id, parsed) in &messages {
+				if parsed.content.contains("TODO:") {
+					let date = msg_dates.get(msg_id).copied();
+					let include = date.map(|d| d >= cutoff_date).unwrap_or(true);
+					if include {
+						todos.push(TodoItem {
+							content: parsed.content.clone(),
+							source: source.clone(),
+							date,
+							message_id: Some(*msg_id),
+							group_id: *group_id,
+							topic_id: *topic_id,
+						});
 					}
-
-					// Process lines in this block
-					for line in block_lines {
-						let trimmed = line.trim();
-
-						// Check for date header
-						if let Some(caps) = date_header_re.captures(trimmed) {
-							let month_str = caps.get(1).unwrap().as_str();
-							let day: i8 = caps.get(2).unwrap().as_str().parse().unwrap_or(1);
-							// Year is optional - if missing, infer from current year
-							let explicit_year: Option<i16> = caps.get(3).and_then(|m| m.as_str().parse().ok());
-
-							let month: i8 = match month_str.to_lowercase().as_str() {
-								"jan" => 1,
-								"feb" => 2,
-								"mar" => 3,
-								"apr" => 4,
-								"may" => 5,
-								"jun" => 6,
-								"jul" => 7,
-								"aug" => 8,
-								"sep" => 9,
-								"oct" => 10,
-								"nov" => 11,
-								"dec" => 12,
-								_ => continue,
-							};
-
-							// Use explicit year if available, otherwise infer
-							let year = explicit_year.unwrap_or_else(|| {
-								// If no year in header, assume current year but handle boundary
-								if let Ok(date) = Date::new(current_year, month, day) {
-									// If this date is in the future, it's probably from last year
-									if date > today { current_year - 1 } else { current_year }
-								} else {
-									current_year
-								}
-							});
-
-							current_date = Date::new(year, month, day).ok();
-							continue;
-						}
-
-						// Check for TODO
-						if let Some(todo_start) = trimmed.find("TODO: ") {
-							// Extract message ID from THIS line, not from the block
-							// This handles cases where multiple TODOs are on consecutive lines
-							let line_msg_id = msg_id_re.captures(trimmed).and_then(|caps| caps.get(1)).and_then(|m| m.as_str().parse::<i32>().ok());
-
-							// Extract TODO text (remove the msg ID marker if present)
-							let todo_line = msg_id_re.replace(trimmed, "");
-							let todo_text = todo_line[todo_start + 6..].trim();
-
-							if !todo_text.is_empty() {
-								// Only include if within cutoff date (or no date info available)
-								let include = current_date.map(|d| d >= cutoff_date).unwrap_or(true);
-								if include {
-									todos.push(TodoItem {
-										text: todo_text.to_string(),
-										source: source.clone(),
-										date: current_date,
-										// Prefer line-specific ID, fall back to block ID
-										message_id: line_msg_id.or(block_msg_id),
-										group_id: *group_id,
-										topic_id: *topic_id,
-									});
-								}
-							}
-						}
-					}
-
-					block_start = i;
 				}
 			}
 		}
@@ -866,7 +845,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 			// Include tracking info: group_id:topic_id:msg_id (msg_id is 0 if not available)
 			let msg_id = todo.message_id.unwrap_or(0);
 			let tracking = format!(" <!-- todo:{}:{}:{} -->", todo.group_id, todo.topic_id, msg_id);
-			output.push_str(&format!("- [ ] {}{}{}\n", todo.text, date_str, tracking));
+			output.push_str(&format!("- [ ] {}{}{}\n", todo.content, date_str, tracking));
 		}
 	}
 

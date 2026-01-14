@@ -91,7 +91,7 @@ fn parse_username(s: &str) -> Result<Username> {
 		return Ok(Username::At(trimmed.to_string()));
 	}
 
-	Err(eyre!("Invalid username: {}", trimmed))
+	Err(eyre!("Invalid username: {trimmed}"))
 }
 
 /// Top-level identifier for a Telegram channel or group.
@@ -165,7 +165,7 @@ fn parse_top_level_id(s: &str) -> Result<TopLevelId> {
 
 	// Try to parse as numeric ID, stripping -100 prefix if present
 	let stripped = trimmed.trim_start_matches("-100").trim_start_matches('-');
-	stripped.parse::<u64>().map(TopLevelId::Id).map_err(|e| eyre!("Failed to parse ID: {}", e))
+	stripped.parse::<u64>().map(TopLevelId::Id).map_err(|e| eyre!("Failed to parse ID: {e}"))
 }
 
 /// Telegram destination for sending messages.
@@ -275,7 +275,7 @@ fn parse_telegram_destination_str(s: &str) -> Result<TelegramDestination> {
 	// Check for "id/topic_id" format
 	if let Some((id_str, topic_str)) = trimmed.split_once('/') {
 		let group = parse_top_level_id(id_str)?;
-		let topic_id = topic_str.parse::<u64>().map_err(|e| eyre!("Failed to parse topic ID: {}", e))?;
+		let topic_id = topic_str.parse::<u64>().map_err(|e| eyre!("Failed to parse topic ID: {e}"))?;
 		return Ok(TelegramDestination::GroupTopic { group, topic_id });
 	}
 
@@ -346,7 +346,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_deserialize_username() {
+	fn test_deserialize_username_without_at() {
 		let json = r#""WatchingTT""#;
 		let dest: TelegramDestination = from_str(json).unwrap();
 		assert_debug_snapshot!(dest, @r#"
@@ -356,7 +356,10 @@ mod tests {
 		    ),
 		)
 		"#);
+	}
 
+	#[test]
+	fn test_deserialize_username_with_at() {
 		let json_with_at = r#""@WatchingTT""#;
 		let dest_with_at: TelegramDestination = from_str(json_with_at).unwrap();
 		assert_debug_snapshot!(dest_with_at, @r#"

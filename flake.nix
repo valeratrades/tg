@@ -4,7 +4,7 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
     pre-commit-hooks.url = "github:cachix/git-hooks.nix";
-    v-utils.url = "github:valeratrades/.github";
+    v-utils.url = "github:valeratrades/.github?ref=v1.4";
   };
 
   outputs =
@@ -39,9 +39,11 @@
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
           };
           rs = v-utils.rs {
-            inherit pkgs;
+            inherit pkgs rust;
             build.enable = true;
           };
+
+          combined = v-utils.utils.combine [ github readme rs ];
         in
         {
           packages =
@@ -73,9 +75,7 @@
               inherit stdenv;
               shellHook =
                 pre-commit-check.shellHook +
-                github.shellHook +
-                readme.shellHook +
-                rs.shellHook +
+                combined.shellHook +
                 ''
                   cp -f ${(v-utils.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
                 '';
@@ -90,8 +90,7 @@
                 pkg-config
                 rust
               ]
-              ++ pre-commit-check.enabledPackages
-              ++ github.enabledPackages;
+              ++ combined.enabledPackages;
             };
         }
       )

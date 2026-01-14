@@ -4,6 +4,28 @@ env:
   RUSTUP_MAX_RETRIES: '10'
   RUST_BACKTRACE: short
 jobs:
+  code-duplication:
+    if: github.event_name != 'pull_request'
+    name: Code Duplication
+    needs: pre_ci
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+      with:
+        path: my_gh_stuff
+        repository: valeratrades/.github
+        sparse-checkout: github/workflows
+        sparse-checkout-cone-mode: false
+    - name: Setup nightly Rust
+      uses: dtolnay/rust-toolchain@nightly
+    - name: Install qlty
+      uses: qltysh/qlty-action/install@main
+    - name: Initialize qlty
+      run: qlty init --no --no-upgrade-check
+    - name: Check for code duplication
+      run: cargo +nightly -Zscript -q my_gh_stuff/github/workflows/code-duplication.rs
+    timeout-minutes: 15
   pre_ci:
     uses: valeratrades/.github/.github/workflows/pre_ci.yml@master
   rust-clippy:
@@ -80,26 +102,6 @@ jobs:
         \ $exit_code != 0 ]; then\n\t\t\t\t\techo \"Derives are not sorted. Run \\\
         `cargo sort-derives\\` to fix it.\"\n\t\t\t\t\texit $exit_code\n\t\t\t\tfi\n\
         \t\t\t"
-  rust-unused-features:
-    name: Unused Features
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    - name: Installation
-      uses: taiki-e/install-action@v2
-      with:
-        tool: cargo-unused-features
-    - name: Analyze Unused Features
-      run: 'unused-features analyze
-
-        '
-    - name: Build Report
-      run: 'unused-features build-report --output report.json
-
-        '
-    - name: Check for Unused Features
-      run: "if [ -f report.json ] && [ \"$(cat report.json)\" != \"[]\" ]; then\n\
-        \  echo \"Found unused features:\"\n  cat report.json\n  exit 1\nfi\n"
   tokei:
     name: Reasonable Amount of Comments
     runs-on: ubuntu-latest

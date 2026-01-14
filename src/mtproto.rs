@@ -1,4 +1,4 @@
-use std::{io::Write as _, path::PathBuf, sync::Arc};
+use std::{future::Future, io::Write as _, path::PathBuf, sync::Arc};
 
 use eyre::{Result, bail, eyre};
 use grammers_client::{Client, SignInError};
@@ -15,9 +15,12 @@ fn session_path(username: &str) -> PathBuf {
 	v_utils::xdg_state_file!(&format!("{}.session", username))
 }
 
-/// Create and authenticate a Telegram MTProto client.
-/// Uses credentials from the app config, with env var fallbacks.
-pub async fn create_client(config: &LiveSettings) -> Result<(Client, tokio::task::JoinHandle<()>)> {
+/// Run an operation with an authenticated MTProto client.
+/// Uses structured concurrency - the runner task lives only for the duration of the operation.
+pub async fn with_client<F, Fut, T>(config: &LiveSettings, operation: F) -> Result<T>
+where
+	F: FnOnce(Client) -> Fut,
+	Fut: Future<Output = Result<T>>, {
 	let cfg = config.config()?;
 	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
 	let api_hash = cfg
@@ -55,52 +58,66 @@ pub async fn create_client(config: &LiveSettings) -> Result<(Client, tokio::task
 		}
 	};
 
-	info!("Connecting to Telegram with api_id: {}", api_id);
+	info!("Connecting to Telegram with api_id: {api_id}");
 	let pool = SenderPool::new(Arc::clone(&session), api_id);
 	let client = Client::new(&pool);
-
 	let SenderPool { runner, .. } = pool;
-	let handle = tokio::spawn(runner.run());
 
-	if !client.is_authorized().await? {
-		info!("Not authorized, requesting login code for {}", phone);
-		let token = client.request_login_code(&phone, &api_hash).await?;
-		info!("Login code requested successfully, check your Telegram app");
+	// Run authentication and operation together with the runner using structured concurrency
+	let client_clone = client.clone();
+	let result = tokio::select! {
+		biased;
+		result = async {
+			// Authenticate if needed
+			if !client_clone.is_authorized().await? {
+				info!("Not authorized, requesting login code for {phone}");
+				let token = client_clone.request_login_code(&phone, &api_hash).await?;
+				info!("Login code requested successfully, check your Telegram app");
 
-		print!("Enter the code you received: ");
-		std::io::stdout().flush()?;
-		let mut code = String::new();
-		std::io::stdin().read_line(&mut code)?;
-		let code = code.trim();
-
-		match client.sign_in(&token, code).await {
-			Ok(_) => {
-				eprintln!("Sign in successful!");
-				info!("Sign in successful");
-			}
-			Err(SignInError::PasswordRequired(password_token)) => {
-				info!("2FA password required");
-				print!("Enter your 2FA password: ");
+				print!("Enter the code you received: ");
 				std::io::stdout().flush()?;
-				let mut password = String::new();
-				std::io::stdin().read_line(&mut password)?;
-				let password = password.trim();
+				let mut code = String::new();
+				std::io::stdin().read_line(&mut code)?;
+				let code = code.trim();
 
-				client.check_password(password_token, password).await?;
-				eprintln!("2FA authentication successful!");
-				info!("2FA authentication successful");
+				match client_clone.sign_in(&token, code).await {
+					Ok(_) => {
+						eprintln!("Sign in successful!");
+						info!("Sign in successful");
+					}
+					Err(SignInError::PasswordRequired(password_token)) => {
+						info!("2FA password required");
+						print!("Enter your 2FA password: ");
+						std::io::stdout().flush()?;
+						let mut password = String::new();
+						std::io::stdin().read_line(&mut password)?;
+						let password = password.trim();
+
+						client_clone.check_password(password_token, password).await?;
+						eprintln!("2FA authentication successful!");
+						info!("2FA authentication successful");
+					}
+					Err(e) => {
+						error!("Sign in failed: {e}");
+						bail!("Failed to sign in: {e}");
+					}
+				}
+
+				info!("Session saved to {}", session_file.display());
 			}
-			Err(e) => {
-				error!("Sign in failed: {e}");
-				bail!("Failed to sign in: {}", e);
-			}
+
+			info!("Telegram client authorized");
+			operation(client_clone).await
+		} => {
+			client.disconnect();
+			result
 		}
+		_ = runner.run() => {
+			bail!("MTProto runner exited unexpectedly");
+		}
+	};
 
-		info!("Session saved to {}", session_file.display());
-	}
-
-	info!("Telegram client authorized");
-	Ok((client, handle))
+	result
 }
 
 /// Discovered forum topic
@@ -122,6 +139,7 @@ pub async fn fetch_forum_topics(client: &Client, group_id: u64) -> Result<Vec<Di
 	let mut offset_id = 0;
 	let mut offset_topic = 0;
 
+	//LOOP: paginate through forum topics until all are fetched
 	loop {
 		let request = tl::functions::messages::GetForumTopics {
 			peer: input_peer.clone(),
@@ -177,7 +195,7 @@ pub async fn fetch_forum_topics(client: &Client, group_id: u64) -> Result<Vec<Di
 		}
 	}
 
-	info!("Discovered {} topics in group {}", topics.len(), group_id);
+	info!("Discovered {} topics in group {group_id}", topics.len());
 	Ok(topics)
 }
 
@@ -234,7 +252,7 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 		}
 	}
 
-	bail!("Could not find channel with id {} in dialogs. Make sure the user account has access to this group.", chat_id)
+	bail!("Could not find channel with id {chat_id} in dialogs. Make sure the user account has access to this group.")
 }
 
 /// Discover and update topics metadata for all configured groups
@@ -251,32 +269,31 @@ pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 		return Ok(());
 	}
 
-	let (client, handle) = create_client(config).await?;
-	let mut metadata = TopicsMetadata::load();
+	let group_ids = cfg.forum_group_ids();
 
-	for group_id in cfg.forum_group_ids() {
-		info!("Fetching topics for group {}...", group_id);
+	with_client(config, |client| async move {
+		let mut metadata = TopicsMetadata::load();
 
-		match fetch_forum_topics(&client, group_id).await {
-			Ok(topics) =>
-				for topic in topics {
-					let sanitized_name = sanitize_topic_name(&topic.title);
-					metadata.set_topic_name(group_id, topic.topic_id as u64, sanitized_name);
-				},
-			Err(e) => {
-				warn!("Failed to fetch topics for group {}: {}", group_id, e);
+		for group_id in group_ids {
+			info!("Fetching topics for group {group_id}...");
+
+			match fetch_forum_topics(&client, group_id).await {
+				Ok(topics) =>
+					for topic in topics {
+						let sanitized_name = sanitize_topic_name(&topic.title);
+						metadata.set_topic_name(group_id, topic.topic_id as u64, sanitized_name);
+					},
+				Err(e) => {
+					warn!("Failed to fetch topics for group {group_id}: {e}");
+				}
 			}
 		}
-	}
 
-	metadata.save()?;
-	info!("Topics metadata updated");
-
-	// Disconnect client
-	client.disconnect();
-	handle.abort();
-
-	Ok(())
+		metadata.save()?;
+		info!("Topics metadata updated");
+		Ok(())
+	})
+	.await
 }
 
 /// Sanitize topic name for use as filename
@@ -302,7 +319,7 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 	// Extract channel info from InputPeer
 	let (channel_id, access_hash) = match &input_peer {
 		tl::enums::InputPeer::Channel(c) => (c.channel_id, c.access_hash),
-		_ => bail!("Expected channel peer for group {}", group_id),
+		_ => bail!("Expected channel peer for group {group_id}"),
 	};
 
 	debug!(group_id, channel_id, ?message_ids, "Attempting to delete messages");
@@ -386,7 +403,7 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 	};
 
 	client.invoke(&request).await?;
-	info!("Edited message {} in group {} via MTProto", message_id, group_id);
+	info!("Edited message {message_id} in group {group_id} via MTProto");
 	Ok(())
 }
 
@@ -396,7 +413,7 @@ pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64
 	let chat_id = telegram_chat_id(group_id);
 	let http_client = reqwest::Client::new();
 
-	let url = format!("https://api.telegram.org/bot{}/editMessageText", bot_token);
+	let url = format!("https://api.telegram.org/bot{bot_token}/editMessageText");
 	let mut params = vec![("chat_id", chat_id.to_string()), ("message_id", message_id.to_string()), ("text", new_text.to_string())];
 
 	// Forum topics require message_thread_id (but not for General topic which is id=1)
@@ -409,10 +426,10 @@ pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64
 	let response_text = res.text().await?;
 
 	if status.is_success() {
-		info!("Edited message {} in group {} via Bot API", message_id, group_id);
+		info!("Edited message {message_id} in group {group_id} via Bot API");
 		Ok(())
 	} else {
-		warn!("Bot API edit failed with status {}: {}", status, response_text);
-		bail!("Bot API error: {} - {}", status, response_text)
+		warn!("Bot API edit failed with status {status}: {response_text}");
+		bail!("Bot API error: {status} - {response_text}")
 	}
 }

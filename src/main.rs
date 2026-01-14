@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
 				let data_dir = server::DATA_DIR.get().unwrap();
 				let metadata = TopicsMetadata::load();
 				for (group_id, group) in &metadata.groups {
-					let default_name = format!("group_{}", group_id);
+					let default_name = format!("group_{group_id}");
 					let group_name = group.name.as_deref().unwrap_or(&default_name);
 					let group_dir = data_dir.join(group_name);
 					if group_dir.exists() {
@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
 			if changes.has_invalid_inserts() {
 				eprintln!("Warning: Cannot send messages back in time. The following content was added before the last known message:");
 				for line in &changes.invalid_inserts {
-					eprintln!("  {}", line);
+					eprintln!("  {line}");
 				}
 				eprintln!("These changes were not sent. Please add new messages at the end of the file.");
 			}
@@ -324,10 +324,10 @@ async fn main() -> Result<()> {
 				let untrackable_count = total_todo_lines - trackable_count;
 
 				if trackable_count == 0 && total_todo_lines > 0 {
-					eprintln!("Note: {} TODOs found but none have message IDs (old messages).", total_todo_lines);
+					eprintln!("Note: {total_todo_lines} TODOs found but none have message IDs (old messages).");
 					eprintln!("Run `tg pull --reset` to add message IDs for sync.");
 				} else if untrackable_count > 0 {
-					eprintln!("Note: {}/{} TODOs trackable. {} need `tg pull --reset`.", trackable_count, total_todo_lines, untrackable_count);
+					eprintln!("Note: {trackable_count}/{total_todo_lines} TODOs trackable. {untrackable_count} need `tg pull --reset`.");
 				}
 
 				// Open with editor
@@ -366,7 +366,7 @@ async fn main() -> Result<()> {
 			match args.action {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
 					let update = sync::MessageUpdate::Delete { group_id, topic_id, message_id };
-					eprintln!("Scheduling delete: msg:{} (group:{}/topic:{})", message_id, group_id, topic_id);
+					eprintln!("Scheduling delete: msg:{message_id} (group:{group_id}/topic:{topic_id})");
 					let results = sync::push_via_server(vec![update], &settings).await?;
 					display_push_results(&results);
 				}
@@ -390,14 +390,14 @@ async fn main() -> Result<()> {
 						new_content,
 						sender,
 					};
-					eprintln!("Scheduling edit: msg:{} (group:{}/topic:{})", message_id, group_id, topic_id);
+					eprintln!("Scheduling edit: msg:{message_id} (group:{group_id}/topic:{topic_id})");
 					let results = sync::push_via_server(vec![update], &settings).await?;
 					display_push_results(&results);
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					// Create: write to file without tag, then send via bot API
 					// The tag will be added by sync when the message appears on TG
-					eprintln!("Creating message in group {} topic {}", group_id, topic_id);
+					eprintln!("Creating message in group {group_id} topic {topic_id}");
 
 					// Write to local file without tag
 					let metadata = TopicsMetadata::load();
@@ -420,11 +420,11 @@ async fn main() -> Result<()> {
 					let message = server::Message::new(group_id, topic_id, content);
 					match server::send_message(&message, &bot_token).await {
 						Ok(msg_id) => {
-							eprintln!("Message sent to Telegram with id {}", msg_id);
+							eprintln!("Message sent to Telegram with id {msg_id}");
 							// Note: The tag will be added by the next sync
 						}
 						Err(e) => {
-							eprintln!("Failed to send message: {}. It will be retried on next server run.", e);
+							eprintln!("Failed to send message: {e}. It will be retried on next server run.");
 						}
 					}
 				}
@@ -452,14 +452,14 @@ fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 	for (group_id, group) in &metadata.groups {
 		for (topic_id, topic_name) in &group.topics {
 			if topic_name.to_lowercase().contains(&pattern_lower) {
-				let display = format!("{}/{}", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)), topic_name);
+				let display = format!("{}/{topic_name}", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)));
 				matches.push((*group_id, *topic_id, display));
 			}
 		}
 	}
 
 	match matches.len() {
-		0 => Err(eyre!("No topic found matching: {}", pattern)),
+		0 => Err(eyre!("No topic found matching: {pattern}")),
 		1 => {
 			let (group_id, topic_id, _) = &matches[0];
 			Ok((*group_id, *topic_id))
@@ -484,7 +484,7 @@ fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 					.iter()
 					.find(|(_, _, d)| d == &chosen)
 					.map(|(g, t, _)| (*g, *t))
-					.ok_or_else(|| eyre!("Failed to find selection: {}", chosen))
+					.ok_or_else(|| eyre!("Failed to find selection: {chosen}"))
 			} else {
 				Err(eyre!("No topic selected"))
 			}
@@ -499,7 +499,7 @@ fn search_topics_by_pattern(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
 	let output = Command::new("find").args([data_dir.to_str().unwrap(), "-name", "*.md", "-type", "f"]).output()?;
 
 	if !output.status.success() {
-		return Err(eyre!("Failed to search for files"));
+		bail!("Failed to search for files");
 	}
 
 	let all_files = String::from_utf8(output.stdout)?;
@@ -543,7 +543,7 @@ fn get_all_topic_files() -> Result<Vec<std::path::PathBuf>> {
 	let output = Command::new("find").args([data_dir.to_str().unwrap(), "-name", "*.md", "-type", "f"]).output()?;
 
 	if !output.status.success() {
-		return Err(eyre!("Failed to search for files"));
+		bail!("Failed to search for files");
 	}
 
 	let all_files = String::from_utf8(output.stdout)?;
@@ -607,13 +607,13 @@ fn resolve_topic_path(pattern: Option<&str>) -> Result<std::path::PathBuf> {
 			let matches = search_topics_by_pattern(pattern)?;
 
 			match matches.len() {
-				0 => Err(eyre!("No topics found matching pattern: {}", pattern)),
+				0 => Err(eyre!("No topics found matching pattern: {pattern}")),
 				1 => {
 					eprintln!("Found unique match: {}", matches[0].display());
 					Ok(matches[0].clone())
 				}
 				_ => {
-					eprintln!("Found {} matches for '{}'. Opening fzf to choose:", matches.len(), pattern);
+					eprintln!("Found {} matches for '{pattern}'. Opening fzf to choose:", matches.len());
 					match choose_topic_with_fzf(&matches, pattern)? {
 						Some(chosen) => Ok(chosen),
 						None => Err(eyre!("No topic selected")),
@@ -630,14 +630,14 @@ fn list_topics() -> Result<()> {
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 
 	for (group_id, group) in &metadata.groups {
-		let default_name = format!("group_{}", group_id);
+		let default_name = format!("group_{group_id}");
 		let group_name = group.name.as_deref().unwrap_or(&default_name);
-		println!("{} ({})", group_name, group_id);
+		println!("{group_name} ({group_id})");
 
 		for (topic_id, topic_name) in &group.topics {
-			let file_path = data_dir.join(group_name).join(format!("{}.md", topic_name));
+			let file_path = data_dir.join(group_name).join(format!("{topic_name}.md"));
 			let exists = if file_path.exists() { "" } else { " [no file]" };
-			println!("  {} ({}){}", topic_name, topic_id, exists);
+			println!("  {topic_name} ({topic_id}){exists}");
 		}
 	}
 
@@ -781,7 +781,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	for (group_id, group) in &metadata.groups {
 		for (topic_id, topic_name) in &group.topics {
 			let file_path = pull::topic_filepath(*group_id, *topic_id, &metadata);
-			let source = format!("{}/{}.md", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)), topic_name);
+			let source = format!("{}/{topic_name}.md", group.name.as_deref().unwrap_or(&format!("group_{}", group_id)));
 
 			let mut contents = String::new();
 			if std::fs::File::open(&file_path).and_then(|mut f| f.read_to_string(&mut contents)).is_err() {
@@ -844,8 +844,8 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 			let date_str = todo.date.map(|d| format!(" ({})", d.strftime("%b %d"))).unwrap_or_default();
 			// Include tracking info: group_id:topic_id:msg_id (msg_id is 0 if not available)
 			let msg_id = todo.message_id.unwrap_or(0);
-			let tracking = format!(" <!-- todo:{}:{}:{} -->", todo.group_id, todo.topic_id, msg_id);
-			output.push_str(&format!("- [ ] {}{}{}\n", todo.content, date_str, tracking));
+			let tracking = format!(" <!-- todo:{}:{}:{msg_id} -->", todo.group_id, todo.topic_id);
+			output.push_str(&format!("- [ ] {}{date_str}{tracking}\n", todo.content));
 		}
 	}
 
@@ -869,23 +869,23 @@ fn display_push_results(results: &PushResults) {
 
 	for (group_id, msg_id, op) in &results.deletions {
 		let status = if op.success { "✓" } else { "✗" };
-		eprintln!("  {} delete msg:{} (group:{}): {}", status, msg_id, group_id, op.message);
+		eprintln!("  {status} delete msg:{msg_id} (group:{group_id}): {}", op.message);
 	}
 
 	for (group_id, msg_id, op) in &results.edits {
 		let status = if op.success { "✓" } else { "✗" };
-		eprintln!("  {} edit msg:{} (group:{}): {}", status, msg_id, group_id, op.message);
+		eprintln!("  {status} edit msg:{msg_id} (group:{group_id}): {}", op.message);
 	}
 
 	for (group_id, topic_id, op) in &results.creates {
 		let status = if op.success { "✓" } else { "✗" };
-		eprintln!("  {} create (group:{}/topic:{}): {}", status, group_id, topic_id, op.message);
+		eprintln!("  {status} create (group:{group_id}/topic:{topic_id}): {}", op.message);
 	}
 
 	// File cleanups
 	for (path, lines_removed, message) in &results.file_cleanups {
 		let status = if *lines_removed > 0 { "✓" } else { "✗" };
-		eprintln!("  {} cleanup {}: {}", status, path, message);
+		eprintln!("  {status} cleanup {path}: {message}");
 	}
 
 	// Summary
@@ -899,23 +899,23 @@ fn display_push_results(results: &PushResults) {
 	let mut summary_parts = Vec::new();
 	if !results.deletions.is_empty() {
 		if del_fail > 0 {
-			summary_parts.push(format!("{}/{} deletions", del_ok, results.deletions.len()));
+			summary_parts.push(format!("{del_ok}/{} deletions", results.deletions.len()));
 		} else {
-			summary_parts.push(format!("{} deletions", del_ok));
+			summary_parts.push(format!("{del_ok} deletions"));
 		}
 	}
 	if !results.edits.is_empty() {
 		if edit_fail > 0 {
-			summary_parts.push(format!("{}/{} edits", edit_ok, results.edits.len()));
+			summary_parts.push(format!("{edit_ok}/{} edits", results.edits.len()));
 		} else {
-			summary_parts.push(format!("{} edits", edit_ok));
+			summary_parts.push(format!("{edit_ok} edits"));
 		}
 	}
 	if !results.creates.is_empty() {
 		if create_fail > 0 {
-			summary_parts.push(format!("{}/{} creates", create_ok, results.creates.len()));
+			summary_parts.push(format!("{create_ok}/{} creates", results.creates.len()));
 		} else {
-			summary_parts.push(format!("{} creates", create_ok));
+			summary_parts.push(format!("{create_ok} creates"));
 		}
 	}
 

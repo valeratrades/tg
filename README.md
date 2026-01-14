@@ -8,7 +8,6 @@
 [<img alt="ci warnings" src="https://img.shields.io/github/actions/workflow/status/valeratrades/tg/warnings.yml?branch=master&style=for-the-badge&style=flat-square&label=warnings&labelColor=d16002" height="20">](https://github.com/valeratrades/tg/actions?query=branch%3Amaster) <!--NB: Won't find it if repo is private-->
 
 `tg` tool allows you to interact with a Telegram bot to send messages, get bot information, and list channels configured in your configuration file. I use it to keep my quick notes.
-If the broader architecture is of interest, see [ARCHITECTURE.md](./docs/ARCHITECTURE.md).
 <!-- markdownlint-disable -->
 <details>
 <summary>
@@ -112,7 +111,7 @@ export PHONE_NUMBER_FR="+1234567890"             # alternative to config
 <br>
 
 <sup>
-	This repository follows <a href="https://github.com/valeratrades/.github/tree/master/best_practices">my best practices</a> and <a href="https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md">Tiger Style</a> (except "proper capitalization for acronyms": (VsrState, not VSRState) and formatting).
+	This repository follows <a href="https://github.com/valeratrades/.github/tree/master/best_practices">my best practices</a> and <a href="https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md">Tiger Style</a> (except "proper capitalization for acronyms": (VsrState, not VSRState) and formatting). For project's architecture, see <a href="./docs/ARCHITECTURE.md">ARCHITECTURE.md</a>.
 </sup>
 
 #### License

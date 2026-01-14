@@ -73,18 +73,15 @@ pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<
 	match &response.version {
 		Some(server_version) if server_version != client_version => {
 			eyre::bail!(
-				"Server version mismatch: server is v{}, client is v{}.\n\
-				 Restart the server with `tg server` to use the updated version.",
-				server_version,
-				client_version
+				"Server version mismatch: server is v{server_version}, client is v{client_version}.\n\
+				 Restart the server with `tg server` to use the updated version."
 			);
 		}
 		None => {
 			// Old server without version field - definitely outdated
 			eyre::bail!(
-				"Server is outdated (no version info). Client is v{}.\n\
-				 Restart the server with `tg server` to use the updated version.",
-				client_version
+				"Server is outdated (no version info). Client is v{client_version}.\n\
+				 Restart the server with `tg server` to use the updated version."
 			);
 		}
 		Some(_) => Ok(()), // Versions match
@@ -161,12 +158,12 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	let create_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Create { .. })).count();
 	let total = updates.len();
 
-	info!("Pushing {} updates ({} deletions, {} edits, {} creates)", total, delete_count, edit_count, create_count);
-	eprintln!("Pushing {} updates ({} deletions, {} edits, {} creates)", total, delete_count, edit_count, create_count);
+	info!("Pushing {total} updates ({delete_count} deletions, {edit_count} edits, {create_count} creates)");
+	eprintln!("Pushing {total} updates ({delete_count} deletions, {edit_count} edits, {create_count} creates)");
 
 	// Sanity check for many changes
 	if total > 25 {
-		eprint!("About to modify {} messages on Telegram. Continue? [y/N] ", total);
+		eprint!("About to modify {total} messages on Telegram. Continue? [y/N] ");
 		std::io::stdout().flush()?;
 		let mut input = String::new();
 		std::io::stdin().read_line(&mut input)?;
@@ -176,10 +173,6 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			return Ok(results);
 		}
 	}
-
-	// Create MTProto client (only if we have deletions or edits)
-	let needs_mtproto = delete_count > 0 || edit_count > 0;
-	let mtproto_client = if needs_mtproto { Some(mtproto::create_client(config).await?) } else { None };
 
 	// Group deletions by group_id for batch delete
 	let mut deletions_by_group: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new(); // group_id -> [(topic_id, msg_id)]
@@ -206,48 +199,86 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 		}
 	}
 
-	// Apply deletions (batch per group), track successful deletions
-	let mut successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new();
+	// Process MTProto operations (deletions and edits) using structured concurrency
+	let needs_mtproto = delete_count > 0 || edit_count > 0;
 
-	if let Some((ref client, _)) = mtproto_client {
-		for (group_id, items) in &deletions_by_group {
-			let msg_ids: Vec<i32> = items.iter().map(|(_, id)| *id).collect();
-			match mtproto::delete_messages(client, *group_id, &msg_ids).await {
-				Ok(count) => {
-					info!(group_id, count, "Deleted messages from Telegram");
-					// NOTE: Telegram message IDs are immutable - they do NOT get renumbered
-					// when other messages are deleted. If IDs appear shifted, it's a bug
-					// in our code, not Telegram behavior.
-					if count > 0 {
-						successful_deletions.insert(*group_id, items.clone());
-						for (_, msg_id) in items {
-							results.deletions.push((
-								*group_id,
-								*msg_id,
-								OpResult {
-									success: true,
-									message: format!("Deleted (pts_count={})", count),
-								},
-							));
+	// Apply deletions (batch per group), track successful deletions
+	let successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = if needs_mtproto {
+		let bot_token = bot_token.to_string();
+		let (mtproto_results, successful) = mtproto::with_client(config, |client| async move {
+			let mut deletion_results: Vec<(u64, i32, OpResult)> = Vec::new();
+			let mut edit_results: Vec<(u64, i32, OpResult)> = Vec::new();
+			let mut successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new();
+
+			// Apply deletions (batch per group)
+			for (group_id, items) in &deletions_by_group {
+				let msg_ids: Vec<i32> = items.iter().map(|(_, id)| *id).collect();
+				match mtproto::delete_messages(&client, *group_id, &msg_ids).await {
+					Ok(count) => {
+						info!(group_id, count, "Deleted messages from Telegram");
+						if count > 0 {
+							successful_deletions.insert(*group_id, items.clone());
+							for (_, msg_id) in items {
+								deletion_results.push((
+									*group_id,
+									*msg_id,
+									OpResult {
+										success: true,
+										message: format!("Deleted (pts_count={count})"),
+									},
+								));
+							}
+						} else {
+							warn!(group_id, "Telegram reported 0 deletions, keeping local files intact");
+							for (_, msg_id) in items {
+								deletion_results.push((
+									*group_id,
+									*msg_id,
+									OpResult {
+										success: false,
+										message: "Telegram returned 0 deletions".to_string(),
+									},
+								));
+							}
 						}
-					} else {
-						warn!(group_id, "Telegram reported 0 deletions, keeping local files intact");
+					}
+					Err(e) => {
+						warn!(group_id, error = %e, "Failed to delete messages");
 						for (_, msg_id) in items {
-							results.deletions.push((
+							deletion_results.push((
 								*group_id,
 								*msg_id,
 								OpResult {
 									success: false,
-									message: "Telegram returned 0 deletions".to_string(),
+									message: e.to_string(),
 								},
 							));
 						}
 					}
 				}
-				Err(e) => {
-					warn!(group_id, error = %e, "Failed to delete messages");
-					for (_, msg_id) in items {
-						results.deletions.push((
+			}
+
+			// Apply edits - route to correct API based on sender
+			for (group_id, topic_id, msg_id, new_content, sender) in &edits {
+				let result = match sender {
+					MessageSender::Bot => mtproto::edit_message_via_bot(&client, *group_id, *topic_id, *msg_id, new_content, &bot_token).await,
+					MessageSender::User => mtproto::edit_message(&client, *group_id, *msg_id, new_content).await,
+				};
+				match result {
+					Ok(()) => {
+						info!(group_id, msg_id, ?sender, "Edited message on Telegram");
+						edit_results.push((
+							*group_id,
+							*msg_id,
+							OpResult {
+								success: true,
+								message: format!("Edited via {sender:?}"),
+							},
+						));
+					}
+					Err(e) => {
+						warn!(group_id, msg_id, ?sender, error = %e, "Failed to edit message");
+						edit_results.push((
 							*group_id,
 							*msg_id,
 							OpResult {
@@ -258,52 +289,17 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 					}
 				}
 			}
-		}
 
-		// Apply edits - route to correct API based on sender
-		for (group_id, topic_id, msg_id, new_content, sender) in &edits {
-			let result = match sender {
-				MessageSender::Bot => {
-					// Bot messages must be edited via Bot API
-					mtproto::edit_message_via_bot(client, *group_id, *topic_id, *msg_id, new_content, bot_token).await
-				}
-				MessageSender::User => {
-					// User messages can be edited via MTProto
-					mtproto::edit_message(client, *group_id, *msg_id, new_content).await
-				}
-			};
-			match result {
-				Ok(()) => {
-					info!(group_id, msg_id, ?sender, "Edited message on Telegram");
-					results.edits.push((
-						*group_id,
-						*msg_id,
-						OpResult {
-							success: true,
-							message: format!("Edited via {:?}", sender),
-						},
-					));
-				}
-				Err(e) => {
-					warn!(group_id, msg_id, ?sender, error = %e, "Failed to edit message");
-					results.edits.push((
-						*group_id,
-						*msg_id,
-						OpResult {
-							success: false,
-							message: e.to_string(),
-						},
-					));
-				}
-			}
-		}
-	}
+			Ok(((deletion_results, edit_results), successful_deletions))
+		})
+		.await?;
 
-	// Disconnect MTProto client if we created one
-	if let Some((client, handle)) = mtproto_client {
-		client.disconnect();
-		handle.abort();
-	}
+		results.deletions = mtproto_results.0;
+		results.edits = mtproto_results.1;
+		successful
+	} else {
+		BTreeMap::new()
+	};
 
 	// Apply creates - send new messages via Bot API
 	// Track successful creates so we can update local files with message IDs
@@ -322,7 +318,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 					*topic_id,
 					OpResult {
 						success: true,
-						message: format!("Created with msg_id={}", msg_id),
+						message: format!("Created with msg_id={msg_id}"),
 					},
 				));
 			}
@@ -341,7 +337,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	}
 
 	// Remove deleted messages from local topic files (only for successful deletions)
-	if successful_deletions.is_empty() && !deletions_by_group.is_empty() {
+	if successful_deletions.is_empty() && delete_count > 0 {
 		info!("No successful deletions, skipping local file cleanup");
 		eprintln!("No local files modified (Telegram deletions failed or returned 0)");
 	}
@@ -370,7 +366,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 				Ok(c) => c,
 				Err(e) => {
 					warn!(path = %file_path.display(), error = %e, "Failed to read topic file");
-					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to read: {}", e)));
+					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to read: {e}")));
 					continue;
 				}
 			};
@@ -399,16 +395,16 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 				let new_content = new_lines.join("\n");
 				if let Err(e) = std::fs::write(&file_path, new_content) {
 					warn!(path = %file_path.display(), error = %e, "Failed to write topic file");
-					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to write: {}", e)));
+					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to write: {e}")));
 				} else {
 					info!(path = %file_path.display(), removed, "Removed lines from topic file");
-					results.file_cleanups.push((file_path.display().to_string(), removed, format!("Removed {} line(s)", removed)));
+					results.file_cleanups.push((file_path.display().to_string(), removed, format!("Removed {removed} line(s)")));
 				}
 			} else {
 				warn!(path = %file_path.display(), ?msg_id_set, "No lines removed - message IDs not found in file");
 				results
 					.file_cleanups
-					.push((file_path.display().to_string(), 0, format!("Message IDs {:?} not found in file", msg_id_set)));
+					.push((file_path.display().to_string(), 0, format!("Message IDs {msg_id_set:?} not found in file")));
 			}
 		}
 	}
@@ -436,7 +432,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			for (content, _) in &messages {
 				// Try to find and remove the untagged content from the file
 				// The content might have ". " prefix stripped, so check both forms
-				let patterns_to_remove = [format!("\n. {}", content), format!("\n{}", content), content.clone()];
+				let patterns_to_remove = [format!("\n. {content}"), format!("\n{content}"), content.clone()];
 
 				for pattern in &patterns_to_remove {
 					if let Some(pos) = file_content.rfind(pattern) {
@@ -794,7 +790,7 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 
 	// Find group_id by matching group name
 	for (group_id, group) in &metadata.groups {
-		let default_name = format!("group_{}", group_id);
+		let default_name = format!("group_{group_id}");
 		let gname = group.name.as_deref().unwrap_or(&default_name);
 		if gname == group_name {
 			// Find topic_id by matching topic name

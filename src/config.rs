@@ -69,15 +69,6 @@ pub struct TopicsMetadata {
 	/// If a topic has a custom name, use it; otherwise fall back to topic_{id}
 	pub groups: std::collections::BTreeMap<u64, GroupMetadata>,
 }
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct GroupMetadata {
-	/// Custom name for the group (optional, falls back to group_id)
-	pub name: Option<String>,
-	/// Maps topic_id -> custom_name
-	pub topics: std::collections::BTreeMap<u64, String>,
-}
-
 impl TopicsMetadata {
 	pub fn file_path() -> PathBuf {
 		v_utils::xdg_state_file!("topics_metadata.json")
@@ -92,7 +83,7 @@ impl TopicsMetadata {
 		match std::fs::read_to_string(&path) {
 			Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
 			Err(e) => {
-				warn!("Failed to read topics_metadata.json: {}", e);
+				warn!("Failed to read topics_metadata.json: {e}");
 				Self::default()
 			}
 		}
@@ -132,6 +123,14 @@ impl TopicsMetadata {
 	pub fn ensure_topic(&mut self, group_id: u64, topic_id: u64) {
 		self.groups.entry(group_id).or_default().topics.entry(topic_id).or_insert_with(|| format!("topic_{topic_id}"));
 	}
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GroupMetadata {
+	/// Custom name for the group (optional, falls back to group_id)
+	pub name: Option<String>,
+	/// Maps topic_id -> custom_name
+	pub topics: std::collections::BTreeMap<u64, String>,
 }
 
 #[cfg(test)]

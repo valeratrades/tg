@@ -1,12 +1,11 @@
 use std::{
 	io::{Read, Seek, SeekFrom, Write},
 	path::PathBuf,
-	pin::{Pin, pin},
+	pin::Pin,
 	sync::{Arc, OnceLock},
 };
 
 use eyre::Result;
-use futures::future::{Either, select};
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -48,6 +47,18 @@ impl PushHandle {
 
 		response_rx.await.map_err(|_| eyre::eyre!("Push worker dropped response channel"))?
 	}
+}
+
+/// A background send task - fire-and-forget message to Telegram with retries
+struct BackgroundSendTask {
+	message: Message,
+	bot_token: String,
+}
+
+/// Handle to queue background send tasks
+#[derive(Clone)]
+struct BackgroundSendHandle {
+	tx: mpsc::Sender<BackgroundSendTask>,
 }
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -120,6 +131,8 @@ enum TaskResult {
 	ConnectionDone,
 	/// Pull tick completed, return the interval to re-queue
 	PullDone(Interval),
+	/// Background send completed (success or gave up after retries)
+	BackgroundSendDone,
 }
 
 /// # Panics
@@ -131,27 +144,24 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	info!("Discovering forum topics for configured groups...");
 	pull::discover_and_create_topic_files(&settings, &bot_token).await?;
 
-	// Create push channel and spawn the MTProto worker
+	// Create push channel for the MTProto worker
 	// This ensures all push operations are serialized through a single MTProto client
-	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+	let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
 	let push_handle = PushHandle { tx: push_tx };
 
-	// Spawn the push worker task
-	let worker_settings = Arc::clone(&settings);
-	let worker_token = bot_token.clone();
-	let push_worker = tokio::spawn(async move {
-		run_push_worker(push_rx, &worker_settings, &worker_token).await;
-	});
+	// Create channel for background send tasks (fire-and-forget with retries)
+	let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
+	let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
 
 	let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
-	debug!("Binding to address: {}", addr);
+	debug!("Binding to address: {addr}");
 	let listener = TcpListener::bind(&addr).await?;
-	info!("Listening on: {}", addr);
+	info!("Listening on: {addr}");
 
 	let interval_duration = pull_interval.duration();
-	info!("Pull interval: {}", pull_interval);
+	info!("Pull interval: {pull_interval}");
 
-	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, String, PushHandle)> + Send>>;
+	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, String, PushHandle, BackgroundSendHandle)> + Send>>;
 	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
 	// Initial pull task
@@ -159,100 +169,107 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	let settings_clone = Arc::clone(&settings);
 	let token_clone = bot_token.clone();
 	let push_handle_clone = push_handle.clone();
+	let bg_send_handle_clone = bg_send_handle.clone();
 	futures.push(Box::pin(async move {
 		let mut interval = pull_interval_timer;
 		interval.tick().await;
 
 		match pull::pull(&settings_clone, &token_clone).await {
 			Ok(()) => debug!("Pull completed successfully"),
-			Err(e) => warn!("Pull failed: {}", e),
+			Err(e) => warn!("Pull failed: {e}"),
 		}
 
-		(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone)
+		(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 	}));
 
+	//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
 	loop {
-		enum Event {
-			NewConnection(std::io::Result<(TcpStream, std::net::SocketAddr)>),
-			TaskCompleted(Option<(TaskResult, Arc<LiveSettings>, String, PushHandle)>),
-		}
-
-		let event = {
-			let accept_fut = pin!(listener.accept());
-			let task_fut = pin!(futures.next());
-
-			match select(accept_fut, task_fut).await {
-				Either::Left((accept_result, _task_fut)) => Event::NewConnection(accept_result),
-				Either::Right((task_result, _accept_fut)) => Event::TaskCompleted(task_result),
-			}
-		};
-
-		match event {
-			Event::NewConnection(accept_result) => {
+		tokio::select! {
+			accept_result = listener.accept() => {
 				let (socket, addr) = accept_result?;
-				info!("Accepted connection from: {}", addr);
+				info!("Accepted connection from: {addr}");
 
 				let settings_clone = Arc::clone(&settings);
 				let token_clone = bot_token.clone();
 				let push_handle_clone = push_handle.clone();
+				let bg_send_handle_clone = bg_send_handle.clone();
 				futures.push(Box::pin(async move {
-					handle_connection(socket, &settings_clone, &token_clone, &push_handle_clone).await;
-					(TaskResult::ConnectionDone, settings_clone, token_clone, push_handle_clone)
+					handle_connection(socket, &settings_clone, &token_clone, &push_handle_clone, &bg_send_handle_clone).await;
+					(TaskResult::ConnectionDone, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 				}));
 			}
-			Event::TaskCompleted(Some((result, settings_ret, token_ret, push_handle_ret))) => match result {
-				TaskResult::ConnectionDone => {
-					debug!("Connection task completed");
-				}
-				TaskResult::PullDone(mut interval) => {
-					debug!("Pull task completed, re-queuing");
-					let settings_clone = settings_ret;
-					let token_clone = token_ret;
-					let push_handle_clone = push_handle_ret;
-					futures.push(Box::pin(async move {
-						interval.tick().await;
-
-						match pull::pull(&settings_clone, &token_clone).await {
-							Ok(()) => debug!("Pull completed successfully"),
-							Err(e) => warn!("Pull failed: {}", e),
+			task_result = futures.next() => {
+				match task_result {
+					Some((result, settings_ret, token_ret, push_handle_ret, bg_send_handle_ret)) => match result {
+						TaskResult::ConnectionDone => {
+							debug!("Connection task completed");
 						}
+						TaskResult::PullDone(mut interval) => {
+							debug!("Pull task completed, re-queuing");
+							let settings_clone = settings_ret;
+							let token_clone = token_ret;
+							let push_handle_clone = push_handle_ret;
+							let bg_send_handle_clone = bg_send_handle_ret;
+							futures.push(Box::pin(async move {
+								interval.tick().await;
 
-						(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone)
-					}));
+								match pull::pull(&settings_clone, &token_clone).await {
+									Ok(()) => debug!("Pull completed successfully"),
+									Err(e) => warn!("Pull failed: {e}"),
+								}
+
+								(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+							}));
+						}
+						TaskResult::BackgroundSendDone => {
+							debug!("Background send task completed");
+						}
+					}
+					None => {
+						// FuturesUnordered is empty - shouldn't happen since pull is always re-queued
+						warn!("All tasks completed unexpectedly");
+						break;
+					}
 				}
-			},
-			Event::TaskCompleted(None) => {
-				// FuturesUnordered is empty - shouldn't happen since pull is always re-queued
-				warn!("All tasks completed unexpectedly");
-				break;
+			}
+			Some(push_request) = push_rx.recv() => {
+				debug!("Processing push request with {} updates", push_request.updates.len());
+				let result = crate::sync::push(push_request.updates, &settings, &bot_token).await;
+				let _ = push_request.response_tx.send(result);
+			}
+			Some(bg_send_task) = bg_send_rx.recv() => {
+				// Spawn background send into FuturesUnordered so retries continue independently
+				let settings_clone = Arc::clone(&settings);
+				let token_clone = bot_token.clone();
+				let push_handle_clone = push_handle.clone();
+				let bg_send_handle_clone = bg_send_handle.clone();
+				futures.push(Box::pin(async move {
+					let mut delay_secs = 1.0_f64;
+					const E: f64 = std::f64::consts::E;
+					const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+
+					while let Err(e) = send_message(&bg_send_task.message, &bg_send_task.bot_token).await {
+						let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
+						if total_elapsed_secs >= THIRTY_MINS_SECS {
+							error!("Failed to send message to Telegram after 30+ minutes: {e}");
+							break;
+						}
+						warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
+						tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+						delay_secs *= E;
+					}
+					info!("Background send completed");
+					(TaskResult::BackgroundSendDone, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+				}));
 			}
 		}
 	}
-
-	// Clean up push worker
-	push_worker.abort();
 
 	info!("Server stopped");
 	Ok(())
 }
 
-/// Worker task that owns the MTProto client and processes push requests sequentially
-async fn run_push_worker(mut rx: mpsc::Receiver<PushRequest>, settings: &LiveSettings, bot_token: &str) {
-	info!("Push worker started");
-
-	while let Some(request) = rx.recv().await {
-		debug!("Push worker processing request with {} updates", request.updates.len());
-
-		let result = crate::sync::push(request.updates, settings, bot_token).await;
-
-		// Send result back, ignore errors if receiver dropped
-		let _ = request.response_tx.send(result);
-	}
-
-	info!("Push worker stopped (channel closed)");
-}
-
-async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle) {
+async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle) {
 	// Use a larger buffer for push requests which can contain many updates
 	let mut buf = vec![0; 64 * 1024];
 
@@ -263,7 +280,7 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 		}
 
 		let received = String::from_utf8_lossy(&buf[0..n]);
-		debug!("Received raw message: {}", received);
+		debug!("Received raw message: {received}");
 
 		// Try parsing as ServerRequest first (has "type" field), fall back to legacy Message
 		let request: ServerRequest = if let Ok(req) = serde_json::from_str(&received) {
@@ -272,7 +289,7 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 			// Legacy format: bare Message object
 			ServerRequest::Send(msg)
 		} else {
-			error!("Failed to deserialize request. Raw: {}", received);
+			error!("Failed to deserialize request. Raw: {received}");
 			let response = ServerResponse::err("Invalid request format");
 			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
 			return;
@@ -281,7 +298,7 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 		match request {
 			ServerRequest::Send(message) => {
 				// Handle send request (legacy behavior)
-				handle_send_message(&mut socket, message, bot_token).await;
+				handle_send_message(&mut socket, message, bot_token, bg_send_handle).await;
 			}
 			ServerRequest::Push { updates } => {
 				// Handle push request via the serialized push worker
@@ -292,7 +309,7 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_
 				let response = ServerResponse::ok();
 				let response_json = serde_json::to_string(&response).unwrap();
 				if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-					error!("Failed to send ping response: {}", e);
+					error!("Failed to send ping response: {e}");
 				}
 			}
 		}
@@ -311,24 +328,24 @@ async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::M
 			ServerResponse::ok_with_results(push_results)
 		}
 		Err(e) => {
-			error!("Push failed: {}", e);
+			error!("Push failed: {e}");
 			ServerResponse::err(e.to_string())
 		}
 	};
 
 	let response_json = serde_json::to_string(&response).unwrap();
 	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send push response: {}", e);
+		error!("Failed to send push response: {e}");
 	}
 }
 
 /// Handle a send message request
-async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str) {
+async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str, bg_send_handle: &BackgroundSendHandle) {
 	// Send proper JSON response with version info
 	let response = ServerResponse::ok();
 	let response_json = serde_json::to_string(&response).unwrap();
 	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send acknowledgment: {}", e);
+		error!("Failed to send acknowledgment: {e}");
 		return;
 	}
 	debug!("Sent acknowledgment");
@@ -352,16 +369,16 @@ async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token
 		.map(|v| String::from_utf8_lossy(&v).into_owned());
 	let last_write_datetime = last_write_tag
 		.as_deref()
-		.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {}", e)).ok());
+		.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok());
 
 	let message_append_repr = format_message_append(&message.message, last_write_datetime, Timestamp::now());
-	debug!("Formatted message append: {:?}", message_append_repr);
+	debug!("Formatted message append: {message_append_repr:?}");
 
 	// Ensure the parent directory exists
 	if let Some(parent) = chat_filepath.parent()
 		&& let Err(e) = std::fs::create_dir_all(parent)
 	{
-		error!("Failed to create directory '{}': {}", parent.display(), e);
+		error!("Failed to create directory '{}': {e}", parent.display());
 		return;
 	}
 
@@ -371,7 +388,7 @@ async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token
 			f
 		}
 		Err(e) => {
-			error!("Failed to open chat file '{}': {}", chat_filepath.display(), e);
+			error!("Failed to open chat file '{}': {e}", chat_filepath.display());
 			return;
 		}
 	};
@@ -379,66 +396,45 @@ async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token
 	// Trim trailing whitespace, keeping at most one newline
 	let mut file_contents = String::new();
 	if let Err(e) = file.read_to_string(&mut file_contents) {
-		error!("Failed to read file contents: {}", e);
+		error!("Failed to read file contents: {e}");
 		return;
 	}
 	let trimmed_len = file_contents.trim_end().len();
 	// Cap at file length to avoid extending the file if it doesn't end with whitespace
 	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
 	if let Err(e) = file.set_len(truncate_to as u64) {
-		error!("Failed to truncate file: {}", e);
+		error!("Failed to truncate file: {e}");
 		return;
 	}
 	if let Err(e) = file.seek(SeekFrom::End(0)) {
-		error!("Failed to seek to end of file: {}", e);
+		error!("Failed to seek to end of file: {e}");
 		return;
 	}
 
 	if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
-		error!("Failed to write message to file: {}", e);
+		error!("Failed to write message to file: {e}");
 		return;
 	}
 	debug!("Wrote message to file");
 
 	let now_rfc3339 = Timestamp::now().to_string();
 	if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
-		error!("Failed to set xattr: {}", e);
+		error!("Failed to set xattr: {e}");
 		return;
 	}
 	debug!("Set xattr successfully");
 
-	// Spawn background task to send to Telegram (with retries)
+	// Queue background task to send to Telegram (with retries)
 	// The message is written to file immediately without a tag.
 	// When the send succeeds, the next sync will pull the message from TG (with its real ID)
 	// and the tagless local message will be cleaned up.
-	let message_clone = message.clone();
-	let bot_token = bot_token.to_string();
-	tokio::spawn(async move {
-		let mut delay_secs = 1.0_f64;
-		const E: f64 = std::f64::consts::E;
-		const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
-
-		loop {
-			match send_message(&message_clone, &bot_token).await {
-				Ok(msg_id) => {
-					info!("Message sent successfully to Telegram with id {}", msg_id);
-					// No need to update local file - sync will handle it
-					break;
-				}
-				Err(e) => {
-					let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
-					if total_elapsed_secs >= THIRTY_MINS_SECS {
-						error!("Failed to send message to Telegram after 30+ minutes: {}", e);
-						// Give up - the tagless message will be cleaned up on next sync
-						break;
-					}
-					warn!("Failed to send message to Telegram, retrying in {:.0}s: {}", delay_secs, e);
-					tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-					delay_secs *= E;
-				}
-			}
-		}
-	});
+	let task = BackgroundSendTask {
+		message: message.clone(),
+		bot_token: bot_token.to_string(),
+	};
+	if let Err(e) = bg_send_handle.tx.send(task).await {
+		error!("Failed to queue background send task: {e}");
+	}
 }
 
 /// Extract image path from markdown image syntax: ![alt](path) or ![](path)
@@ -468,7 +464,7 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 
 		if full_path.exists() {
 			debug!("Sending photo from {}", full_path.display());
-			let url = format!("https://api.telegram.org/bot{}/sendPhoto", bot_token);
+			let url = format!("https://api.telegram.org/bot{bot_token}/sendPhoto");
 
 			// Read image file
 			let image_bytes = std::fs::read(&full_path)?;
@@ -494,7 +490,7 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 			let response_text = res.text().await?;
 
 			if status.is_success() {
-				debug!("Telegram API response: {}", response_text);
+				debug!("Telegram API response: {response_text}");
 				info!("Successfully sent photo to group {} topic {}", message.group_id, message.topic_id);
 
 				// Extract message_id from response
@@ -502,8 +498,8 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 				let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
 				Ok(msg_id)
 			} else {
-				warn!("Telegram API returned non-success status {}: {}", status, response_text);
-				Err(eyre::eyre!("Telegram API error: {}", status))
+				warn!("Telegram API returned non-success status {status}: {response_text}");
+				Err(eyre::eyre!("Telegram API error: {status}"))
 			}
 		} else {
 			warn!("Image file not found: {}, sending as text", full_path.display());
@@ -516,7 +512,7 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 
 /// Returns the message ID assigned by Telegram
 async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<i32> {
-	let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
+	let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
 	let chat_id = telegram_chat_id(group_id);
 
 	// General topic (id=1) doesn't use message_thread_id
@@ -532,16 +528,16 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 	let response_text = res.text().await?;
 
 	if status.is_success() {
-		debug!("Telegram API response: {}", response_text);
-		info!("Successfully sent message to group {} topic {}", group_id, topic_id);
+		debug!("Telegram API response: {response_text}");
+		info!("Successfully sent message to group {group_id} topic {topic_id}");
 
 		// Extract message_id from response
 		let response: serde_json::Value = serde_json::from_str(&response_text)?;
 		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
 		Ok(msg_id)
 	} else {
-		warn!("Telegram API returned non-success status {}: {}", status, response_text);
-		Err(eyre::eyre!("Telegram API error: {}", status))
+		warn!("Telegram API returned non-success status {status}: {response_text}");
+		Err(eyre::eyre!("Telegram API error: {status}"))
 	}
 }
 
@@ -595,8 +591,8 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 	debug!("Formatting message append");
 
 	let id_suffix = match (msg_id, sender) {
-		(Some(id), Some(s)) => format!(" <!-- msg:{} {} -->", id, s),
-		(Some(id), None) => format!(" <!-- msg:{} -->", id),
+		(Some(id), Some(s)) => format!(" <!-- msg:{id} {s} -->"),
+		(Some(id), None) => format!(" <!-- msg:{id} -->"),
 		_ => String::new(),
 	};
 
@@ -628,16 +624,16 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 		let fence_len = max_backtick_run(message).max(4) + 1; // at least 5, or 1 more than content
 		let fence = "`".repeat(fence_len);
 		// Closing fence must be on its own line (CommonMark spec), tag goes on next line
-		format!("{}md\n{}\n{}\n{}", fence, message, fence, id_suffix.trim_start())
+		format!("{fence}md\n{message}\n{fence}\n{}", id_suffix.trim_start())
 	} else if needs_dot_prefix {
-		format!(". {}{}", message, id_suffix)
+		format!(". {message}{id_suffix}")
 	} else {
-		format!("{}{}", message, id_suffix)
+		format!("{message}{id_suffix}")
 	};
 
 	// Assemble final output
 	let prefix = if date_header.is_some() || needs_dot_prefix { "\n" } else { "" };
-	format!("{}{}{}\n", date_header.unwrap_or_default(), prefix, formatted)
+	format!("{}{prefix}{formatted}\n", date_header.unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -777,11 +773,11 @@ mod tests {
 		let fence_line = lines[fence_line_idx];
 
 		// The fence line should contain ONLY backticks (possibly with trailing newline already stripped)
-		assert!(fence_line.chars().all(|c| c == '`'), "Closing fence should contain only backticks, got: {:?}", fence_line);
+		assert!(fence_line.chars().all(|c| c == '`'), "Closing fence should contain only backticks, got: {fence_line:?}");
 
 		// The msg tag should be on the NEXT line
 		let tag_line = lines[fence_line_idx + 1];
-		assert!(tag_line.contains("<!-- msg:999 bot -->"), "Tag should be on line after closing fence, got: {:?}", tag_line);
+		assert!(tag_line.contains("<!-- msg:999 bot -->"), "Tag should be on line after closing fence, got: {tag_line:?}");
 	}
 
 	#[test]

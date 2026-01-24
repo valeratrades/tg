@@ -73,27 +73,6 @@ impl<'de> Deserialize<'de> for Username {
 	}
 }
 
-fn parse_username(s: &str) -> Result<Username> {
-	let trimmed = s.trim();
-
-	// Check if it's a username (starts with @)
-	if trimmed.starts_with('@') {
-		return Ok(Username::At(trimmed.to_string()));
-	}
-
-	// Try to parse as numeric ID first
-	if let Ok(id) = trimmed.parse::<u64>() {
-		return Ok(Username::Id(id));
-	}
-
-	// If it looks like a username (alphanumeric + underscores), treat as username
-	if trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') {
-		return Ok(Username::At(trimmed.to_string()));
-	}
-
-	Err(eyre!("Invalid username: {trimmed}"))
-}
-
 /// Top-level identifier for a Telegram channel or group.
 ///
 /// This type is specifically for channels/supergroups which use the `-100` prefix
@@ -153,19 +132,6 @@ impl<'de> Deserialize<'de> for TopLevelId {
 			Helper::String(s) => parse_top_level_id(&s).map_err(de::Error::custom),
 		}
 	}
-}
-
-fn parse_top_level_id(s: &str) -> Result<TopLevelId> {
-	let trimmed = s.trim();
-
-	// Check if it's a username (starts with @ or contains only letters/underscores)
-	if trimmed.starts_with('@') || trimmed.chars().all(|c| c.is_alphabetic() || c == '_') {
-		return Ok(TopLevelId::AtName(trimmed.to_string()));
-	}
-
-	// Try to parse as numeric ID, stripping -100 prefix if present
-	let stripped = trimmed.trim_start_matches("-100").trim_start_matches('-');
-	stripped.parse::<u64>().map(TopLevelId::Id).map_err(|e| eyre!("Failed to parse ID: {e}"))
 }
 
 /// Telegram destination for sending messages.
@@ -269,6 +235,54 @@ impl std::str::FromStr for TelegramDestination {
 	}
 }
 
+/// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
+pub fn telegram_chat_id(id: u64) -> i64 {
+	format!("-100{id}").parse().unwrap()
+}
+/// Extract the group ID from a Telegram chat_id (strips -100 prefix)
+pub fn extract_group_id(chat_id: i64) -> Option<u64> {
+	let s = chat_id.to_string();
+	if let Some(stripped) = s.strip_prefix("-100") {
+		stripped.parse().ok()
+	} else if chat_id > 0 {
+		Some(chat_id as u64)
+	} else {
+		// Negative but doesn't start with -100
+		s[1..].parse().ok()
+	}
+}
+fn parse_username(s: &str) -> Result<Username> {
+	let trimmed = s.trim();
+
+	// Check if it's a username (starts with @)
+	if trimmed.starts_with('@') {
+		return Ok(Username::At(trimmed.to_string()));
+	}
+
+	// Try to parse as numeric ID first
+	if let Ok(id) = trimmed.parse::<u64>() {
+		return Ok(Username::Id(id));
+	}
+
+	// If it looks like a username (alphanumeric + underscores), treat as username
+	if trimmed.chars().all(|c| c.is_alphanumeric() || c == '_') {
+		return Ok(Username::At(trimmed.to_string()));
+	}
+
+	Err(eyre!("Invalid username: {trimmed}"))
+}
+fn parse_top_level_id(s: &str) -> Result<TopLevelId> {
+	let trimmed = s.trim();
+
+	// Check if it's a username (starts with @ or contains only letters/underscores)
+	if trimmed.starts_with('@') || trimmed.chars().all(|c| c.is_alphabetic() || c == '_') {
+		return Ok(TopLevelId::AtName(trimmed.to_string()));
+	}
+
+	// Try to parse as numeric ID, stripping -100 prefix if present
+	let stripped = trimmed.trim_start_matches("-100").trim_start_matches('-');
+	stripped.parse::<u64>().map(TopLevelId::Id).map_err(|e| eyre!("Failed to parse ID: {e}"))
+}
 fn parse_telegram_destination_str(s: &str) -> Result<TelegramDestination> {
 	let trimmed = s.trim();
 
@@ -283,25 +297,6 @@ fn parse_telegram_destination_str(s: &str) -> Result<TelegramDestination> {
 	let id = parse_top_level_id(trimmed)?;
 	Ok(TelegramDestination::Group(id))
 }
-
-/// Calculate the full chat ID that Telegram uses (with -100 prefix for channels/supergroups)
-pub fn telegram_chat_id(id: u64) -> i64 {
-	format!("-100{id}").parse().unwrap()
-}
-
-/// Extract the group ID from a Telegram chat_id (strips -100 prefix)
-pub fn extract_group_id(chat_id: i64) -> Option<u64> {
-	let s = chat_id.to_string();
-	if let Some(stripped) = s.strip_prefix("-100") {
-		stripped.parse().ok()
-	} else if chat_id > 0 {
-		Some(chat_id as u64)
-	} else {
-		// Negative but doesn't start with -100
-		s[1..].parse().ok()
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use std::collections::BTreeMap;

@@ -25,12 +25,6 @@ use crate::{
 	pull::{self, topic_filepath},
 };
 
-/// A push request sent through the channel to the MTProto worker
-struct PushRequest {
-	updates: Vec<crate::sync::MessageUpdate>,
-	response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
-}
-
 /// Handle to send push requests to the MTProto worker
 #[derive(Clone)]
 pub struct PushHandle {
@@ -38,35 +32,14 @@ pub struct PushHandle {
 }
 
 impl PushHandle {
-	/// Send a push request and wait for the result
 	pub async fn push(&self, updates: Vec<crate::sync::MessageUpdate>) -> Result<crate::sync::PushResults> {
 		let (response_tx, response_rx) = oneshot::channel();
-		let request = PushRequest { updates, response_tx };
-
-		self.tx.send(request).await.map_err(|_| eyre::eyre!("Push worker channel closed"))?;
-
-		response_rx.await.map_err(|_| eyre::eyre!("Push worker dropped response channel"))?
+		self.tx.send(PushRequest { updates, response_tx }).await.map_err(|_| eyre::eyre!("Push channel closed"))?;
+		response_rx.await.map_err(|_| eyre::eyre!("Push response channel closed"))?
 	}
 }
 
-/// A background send task - fire-and-forget message to Telegram with retries
-struct BackgroundSendTask {
-	message: Message,
-	bot_token: String,
-	/// Filepath to write the message to after successful send
-	chat_filepath: PathBuf,
-	/// Last write datetime for formatting (from xattr)
-	last_write_datetime: Option<Timestamp>,
-}
-
-/// Handle to queue background send tasks
-#[derive(Clone)]
-struct BackgroundSendHandle {
-	tx: mpsc::Sender<BackgroundSendTask>,
-}
-
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
-
 /// Message to send to a specific topic in a forum group
 #[derive(Clone, Debug, Default, Deserialize, Serialize, derive_new::new)]
 pub struct Message {
@@ -74,7 +47,6 @@ pub struct Message {
 	pub topic_id: u64,
 	pub message: String,
 }
-
 /// Request types that the server can handle
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
@@ -86,7 +58,6 @@ pub enum ServerRequest {
 	/// Ping to check server version
 	Ping,
 }
-
 /// Response from the server
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ServerResponse {
@@ -104,45 +75,39 @@ impl ServerResponse {
 	pub fn ok() -> Self {
 		Self {
 			success: true,
-			error: None,
 			version: Some(env!("CARGO_PKG_VERSION").to_string()),
-			push_results: None,
+			..Default::default()
 		}
 	}
 
-	pub fn ok_with_results(results: crate::sync::PushResults) -> Self {
-		Self {
-			success: true,
-			error: None,
-			version: Some(env!("CARGO_PKG_VERSION").to_string()),
-			push_results: Some(results),
-		}
-	}
-
-	pub fn err(msg: impl Into<String>) -> Self {
+	pub fn err(message: impl Into<String>) -> Self {
 		Self {
 			success: false,
-			error: Some(msg.into()),
+			error: Some(message.into()),
 			version: Some(env!("CARGO_PKG_VERSION").to_string()),
-			push_results: None,
+			..Default::default()
 		}
 	}
-}
 
-/// Result from completing a task
-enum TaskResult {
-	/// Connection finished (closed or error)
-	ConnectionDone,
-	/// Pull tick completed, return the interval to re-queue
-	PullDone(Interval),
-	/// Background send completed (success or gave up after retries)
-	BackgroundSendDone,
+	pub fn ok_with_results(push_results: crate::sync::PushResults) -> Self {
+		Self {
+			success: true,
+			version: Some(env!("CARGO_PKG_VERSION").to_string()),
+			push_results: Some(push_results),
+			..Default::default()
+		}
+	}
 }
 
 /// # Panics
 /// On unsuccessful io operations
 pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: Timeframe) -> Result<()> {
 	info!("Starting telegram server");
+
+	// Clear alerts state from previous session
+	if let Err(e) = crate::alerts::AlertsState::clear() {
+		warn!("Failed to clear alerts state: {e}");
+	}
 
 	// Discover forum topics and create topic files at startup
 	info!("Discovering forum topics for configured groups...");
@@ -301,154 +266,6 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	info!("Server stopped");
 	Ok(())
 }
-
-async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle) {
-	// Use a larger buffer for push requests which can contain many updates
-	let mut buf = vec![0; 64 * 1024];
-
-	while let Ok(n) = socket.read(&mut buf).await {
-		if n == 0 {
-			debug!("Connection closed by client");
-			return;
-		}
-
-		let received = String::from_utf8_lossy(&buf[0..n]);
-		debug!("Received raw message: {received}");
-
-		// Try parsing as ServerRequest first (has "type" field), fall back to legacy Message
-		let request: ServerRequest = if let Ok(req) = serde_json::from_str(&received) {
-			req
-		} else if let Ok(msg) = serde_json::from_str::<Message>(&received) {
-			// Legacy format: bare Message object
-			ServerRequest::Send(msg)
-		} else {
-			error!("Failed to deserialize request. Raw: {received}");
-			let response = ServerResponse::err("Invalid request format");
-			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
-			return;
-		};
-
-		match request {
-			ServerRequest::Send(message) => {
-				// Handle send request (legacy behavior)
-				handle_send_message(&mut socket, message, bot_token, bg_send_handle).await;
-			}
-			ServerRequest::Push { updates } => {
-				// Handle push request via the serialized push worker
-				handle_push_updates(&mut socket, updates, push_handle).await;
-			}
-			ServerRequest::Ping => {
-				// Just respond with version info
-				let response = ServerResponse::ok();
-				let response_json = serde_json::to_string(&response).unwrap();
-				if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-					error!("Failed to send ping response: {e}");
-				}
-			}
-		}
-	}
-}
-
-/// Handle a push request by sending it to the push worker
-async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, push_handle: &PushHandle) {
-	info!("Received push request with {} updates", updates.len());
-
-	let result = push_handle.push(updates).await;
-
-	let response = match result {
-		Ok(push_results) => {
-			info!("Push completed successfully");
-			ServerResponse::ok_with_results(push_results)
-		}
-		Err(e) => {
-			error!("Push failed: {e}");
-			ServerResponse::err(e.to_string())
-		}
-	};
-
-	let response_json = serde_json::to_string(&response).unwrap();
-	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send push response: {e}");
-	}
-}
-
-/// Handle a send message request
-async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str, bg_send_handle: &BackgroundSendHandle) {
-	// Send proper JSON response with version info
-	let response = ServerResponse::ok();
-	let response_json = serde_json::to_string(&response).unwrap();
-	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send acknowledgment: {e}");
-		return;
-	}
-	debug!("Sent acknowledgment");
-
-	let metadata = TopicsMetadata::load();
-	let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
-	info!("Queuing message for group {} topic {} to file: {}", message.group_id, message.topic_id, chat_filepath.display());
-
-	// Read last write datetime for formatting (will be used after send succeeds)
-	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
-		.ok()
-		.and_then(|file| {
-			debug!("Reading xattr from existing file");
-			file.get_xattr("user.last_changed").ok()
-		})
-		.flatten()
-		.and_then(|v| {
-			let s = String::from_utf8_lossy(&v);
-			s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok()
-		});
-
-	// Queue background task to send to Telegram (with retries)
-	// File write happens after successful send, with the message tag
-	let task = BackgroundSendTask {
-		message: message.clone(),
-		bot_token: bot_token.to_string(),
-		chat_filepath,
-		last_write_datetime,
-	};
-	if let Err(e) = bg_send_handle.tx.send(task).await {
-		error!("Failed to queue background send task: {e}");
-	}
-}
-
-/// Extract image path from markdown image syntax: ![alt](path) or ![](path)
-fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
-	// Match ![...](...) pattern
-	let re = regex::Regex::new(r"^!\[([^\]]*)\]\(([^)]+)\)").ok()?;
-	let caps = re.captures(text.trim())?;
-	let path = caps.get(2)?.as_str().to_string();
-	// Get remaining text after the image tag as caption
-	let full_match = caps.get(0)?;
-	let remaining = text[full_match.end()..].trim();
-	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
-	Some((path, caption))
-}
-
-/// Write a formatted message to a file, trimming trailing whitespace and updating xattr
-fn write_message_to_file(chat_filepath: &std::path::Path, formatted_message: &str) -> Result<()> {
-	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(chat_filepath)?;
-
-	// Trim trailing whitespace, keeping at most one newline
-	let mut file_contents = String::new();
-	file.read_to_string(&mut file_contents)?;
-	let trimmed_len = file_contents.trim_end().len();
-	// Cap at file length to avoid extending the file if it doesn't end with whitespace
-	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
-	file.set_len(truncate_to as u64)?;
-	file.seek(SeekFrom::End(0))?;
-
-	file.write_all(formatted_message.as_bytes())?;
-	debug!("Wrote message to file");
-
-	let now_rfc3339 = Timestamp::now().to_string();
-	file.set_xattr("user.last_changed", now_rfc3339.as_bytes())?;
-	debug!("Set xattr successfully");
-
-	Ok(())
-}
-
 /// Returns the message ID assigned by Telegram
 pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 	debug!("Sending message to Telegram API");
@@ -508,69 +325,6 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 		send_text_message(&client, &message.message, message.group_id, message.topic_id, bot_token).await
 	}
 }
-
-/// Returns the message ID assigned by Telegram
-async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<i32> {
-	let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
-	let chat_id = telegram_chat_id(group_id);
-
-	// General topic (id=1) doesn't use message_thread_id
-	let mut params = vec![("text", text.to_string()), ("chat_id", chat_id.to_string())];
-	if topic_id != 1 {
-		params.push(("message_thread_id", topic_id.to_string()));
-	}
-
-	debug!("Posting text to Telegram API");
-	let res: reqwest::Response = client.post(&url).form(&params).send().await?;
-
-	let status = res.status();
-	let response_text = res.text().await?;
-
-	if status.is_success() {
-		debug!("Telegram API response: {response_text}");
-		info!("Successfully sent message to group {group_id} topic {topic_id}");
-
-		// Extract message_id from response
-		let response: serde_json::Value = serde_json::from_str(&response_text)?;
-		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
-		Ok(msg_id)
-	} else {
-		warn!("Telegram API returned non-success status {status}: {response_text}");
-		Err(eyre::eyre!("Telegram API error: {status}"))
-	}
-}
-
-/// Check if a message contains patterns that could break our markdown format
-fn needs_markdown_wrapping(message: &str) -> bool {
-	// Patterns that could break our format:
-	// - Double newlines (paragraph breaks)
-	// - Lines starting with # (headers)
-	// - Lines starting with ## (our date headers)
-	// - Lines starting with . followed by space (our message separator)
-	// - Backticks (``` or more) that could interfere with code blocks
-	message.contains("\n\n")
-		|| message.contains("```")
-		|| message.lines().any(|line| {
-			let trimmed = line.trim();
-			trimmed.starts_with('#') || trimmed.starts_with(". ")
-		})
-}
-
-/// Find the longest sequence of backticks in a message
-fn max_backtick_run(message: &str) -> usize {
-	let mut max = 0;
-	let mut current = 0;
-	for c in message.chars() {
-		if c == '`' {
-			current += 1;
-			max = max.max(current);
-		} else {
-			current = 0;
-		}
-	}
-	max
-}
-
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	debug!("Formatting message append");
@@ -620,7 +374,235 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 	let prefix = if date_header.is_some() || needs_dot_prefix { "\n" } else { "" };
 	format!("{}{prefix}{formatted}\n", date_header.unwrap_or_default())
 }
+/// A push request sent through the channel to the MTProto worker
+struct PushRequest {
+	updates: Vec<crate::sync::MessageUpdate>,
+	response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
+}
+/// A background send task - fire-and-forget message to Telegram with retries
+struct BackgroundSendTask {
+	message: Message,
+	bot_token: String,
+	/// Filepath to write the message to after successful send
+	chat_filepath: PathBuf,
+	/// Last write datetime for formatting (from xattr)
+	last_write_datetime: Option<Timestamp>,
+}
+/// Handle to queue background send tasks
+#[derive(Clone)]
+struct BackgroundSendHandle {
+	tx: mpsc::Sender<BackgroundSendTask>,
+}
+/// Result from completing a task
+enum TaskResult {
+	/// Connection finished (closed or error)
+	ConnectionDone,
+	/// Pull tick completed, return the interval to re-queue
+	PullDone(Interval),
+	/// Background send completed (success or gave up after retries)
+	BackgroundSendDone,
+}
+async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle) {
+	// Use a larger buffer for push requests which can contain many updates
+	let mut buf = vec![0; 64 * 1024];
 
+	while let Ok(n) = socket.read(&mut buf).await {
+		if n == 0 {
+			debug!("Connection closed by client");
+			return;
+		}
+
+		let received = String::from_utf8_lossy(&buf[0..n]);
+		debug!("Received raw message: {received}");
+
+		// Try parsing as ServerRequest first (has "type" field), fall back to legacy Message
+		let request: ServerRequest = if let Ok(req) = serde_json::from_str(&received) {
+			req
+		} else if let Ok(msg) = serde_json::from_str::<Message>(&received) {
+			// Legacy format: bare Message object
+			ServerRequest::Send(msg)
+		} else {
+			error!("Failed to deserialize request. Raw: {received}");
+			let response = ServerResponse::err("Invalid request format");
+			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
+			return;
+		};
+
+		match request {
+			ServerRequest::Send(message) => {
+				// Handle send request (legacy behavior)
+				handle_send_message(&mut socket, message, bot_token, bg_send_handle).await;
+			}
+			ServerRequest::Push { updates } => {
+				// Handle push request via the serialized push worker
+				handle_push_updates(&mut socket, updates, push_handle).await;
+			}
+			ServerRequest::Ping => {
+				// Just respond with version info
+				let response = ServerResponse::ok();
+				let response_json = serde_json::to_string(&response).unwrap();
+				if let Err(e) = socket.write_all(response_json.as_bytes()).await {
+					error!("Failed to send ping response: {e}");
+				}
+			}
+		}
+	}
+}
+/// Handle a push request by sending it to the push worker
+async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, push_handle: &PushHandle) {
+	info!("Received push request with {} updates", updates.len());
+
+	let result = push_handle.push(updates).await;
+
+	let response = match result {
+		Ok(push_results) => {
+			info!("Push completed successfully");
+			ServerResponse::ok_with_results(push_results)
+		}
+		Err(e) => {
+			error!("Push failed: {e}");
+			ServerResponse::err(e.to_string())
+		}
+	};
+
+	let response_json = serde_json::to_string(&response).unwrap();
+	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
+		error!("Failed to send push response: {e}");
+	}
+}
+/// Handle a send message request
+async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token: &str, bg_send_handle: &BackgroundSendHandle) {
+	// Send proper JSON response with version info
+	let response = ServerResponse::ok();
+	let response_json = serde_json::to_string(&response).unwrap();
+	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
+		error!("Failed to send acknowledgment: {e}");
+		return;
+	}
+	debug!("Sent acknowledgment");
+
+	let metadata = TopicsMetadata::load();
+	let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
+	info!("Queuing message for group {} topic {} to file: {}", message.group_id, message.topic_id, chat_filepath.display());
+
+	// Read last write datetime for formatting (will be used after send succeeds)
+	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
+		.ok()
+		.and_then(|file| {
+			debug!("Reading xattr from existing file");
+			file.get_xattr("user.last_changed").ok()
+		})
+		.flatten()
+		.and_then(|v| {
+			let s = String::from_utf8_lossy(&v);
+			s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok()
+		});
+
+	// Queue background task to send to Telegram (with retries)
+	// File write happens after successful send, with the message tag
+	let task = BackgroundSendTask {
+		message: message.clone(),
+		bot_token: bot_token.to_string(),
+		chat_filepath,
+		last_write_datetime,
+	};
+	if let Err(e) = bg_send_handle.tx.send(task).await {
+		error!("Failed to queue background send task: {e}");
+	}
+}
+/// Extract image path from markdown image syntax: ![alt](path) or ![](path)
+fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
+	// Match ![...](...) pattern
+	let re = regex::Regex::new(r"^!\[([^\]]*)\]\(([^)]+)\)").ok()?;
+	let caps = re.captures(text.trim())?;
+	let path = caps.get(2)?.as_str().to_string();
+	// Get remaining text after the image tag as caption
+	let full_match = caps.get(0)?;
+	let remaining = text[full_match.end()..].trim();
+	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
+	Some((path, caption))
+}
+/// Write a formatted message to a file, trimming trailing whitespace and updating xattr
+fn write_message_to_file(chat_filepath: &std::path::Path, formatted_message: &str) -> Result<()> {
+	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(chat_filepath)?;
+
+	// Trim trailing whitespace, keeping at most one newline
+	let mut file_contents = String::new();
+	file.read_to_string(&mut file_contents)?;
+	let trimmed_len = file_contents.trim_end().len();
+	// Cap at file length to avoid extending the file if it doesn't end with whitespace
+	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
+	file.set_len(truncate_to as u64)?;
+	file.seek(SeekFrom::End(0))?;
+
+	file.write_all(formatted_message.as_bytes())?;
+	debug!("Wrote message to file");
+
+	let now_rfc3339 = Timestamp::now().to_string();
+	file.set_xattr("user.last_changed", now_rfc3339.as_bytes())?;
+	debug!("Set xattr successfully");
+
+	Ok(())
+}
+/// Returns the message ID assigned by Telegram
+async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<i32> {
+	let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
+	let chat_id = telegram_chat_id(group_id);
+
+	// General topic (id=1) doesn't use message_thread_id
+	let mut params = vec![("text", text.to_string()), ("chat_id", chat_id.to_string())];
+	if topic_id != 1 {
+		params.push(("message_thread_id", topic_id.to_string()));
+	}
+
+	debug!("Posting text to Telegram API");
+	let res: reqwest::Response = client.post(&url).form(&params).send().await?;
+
+	let status = res.status();
+	let response_text = res.text().await?;
+
+	if status.is_success() {
+		debug!("Telegram API response: {response_text}");
+		info!("Successfully sent message to group {group_id} topic {topic_id}");
+
+		// Extract message_id from response
+		let response: serde_json::Value = serde_json::from_str(&response_text)?;
+		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
+		Ok(msg_id)
+	} else {
+		warn!("Telegram API returned non-success status {status}: {response_text}");
+		Err(eyre::eyre!("Telegram API error: {status}"))
+	}
+}
+/// Check if a message contains patterns that could break our markdown format
+fn needs_markdown_wrapping(message: &str) -> bool {
+	// Patterns that could break our format:
+	// - Double newlines (paragraph breaks)
+	// - Lines starting with # (headers)
+	// - Lines starting with ## (our date headers)
+	// - Lines starting with . followed by space (our message separator)
+	// - Backticks (``` or more) that could interfere with code blocks
+	message.contains("\n\n")
+		|| message.contains("```")
+		|| message.lines().any(|line| {
+			let trimmed = line.trim();
+			trimmed.starts_with('#') || trimmed.starts_with(". ")
+		})
+}
+/// Find the longest sequence of backticks in a message
+fn max_backtick_run(message: &str) -> usize {
+	let mut max = 0;
+	let mut current = 0;
+	for c in message.chars() {
+		if c == '`' {
+			current += 1;
+			max = max.max(current);
+		} else {
+			current = 0;
+		}
+	}
+	max
+}
 #[cfg(test)]
 mod tests {
 	use eyre::Result;

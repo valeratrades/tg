@@ -12,6 +12,214 @@ use crate::{
 	server::format_message_append_with_sender,
 };
 
+/// Fetch group info and discover topics for all configured groups.
+/// Creates topic files for each discovered topic in the XDG data home.
+/// Uses MTProto API (via grammers) to list all forum topics directly.
+pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &str) -> Result<()> {
+	let client = reqwest::Client::new();
+	let mut topics_metadata = TopicsMetadata::load();
+
+	// First, get group names via Bot API
+	let cfg = config.config()?;
+	for group_id in cfg.forum_group_ids() {
+		let chat_id = telegram_chat_id(group_id);
+
+		let url = format!("https://api.telegram.org/bot{bot_token}/getChat");
+		let res: reqwest::Response = client.get(&url).query(&[("chat_id", chat_id.to_string())]).send().await?;
+		let response: GetChatResponse = res.json().await?;
+
+		if !response.ok {
+			warn!("Failed to get chat {group_id}: {:?}", response.description);
+			continue;
+		}
+
+		if let Some(chat_info) = response.result {
+			let is_forum = chat_info.is_forum.unwrap_or(false);
+			if !is_forum {
+				warn!("Group {group_id} is not a forum");
+				continue;
+			}
+
+			if let Some(title) = chat_info.title {
+				let sanitized_name = sanitize_topic_name(&title);
+				topics_metadata.set_group_name(group_id, sanitized_name);
+				info!("Discovered forum group: {title} (id: {group_id})");
+			}
+		}
+	}
+
+	topics_metadata.save()?;
+
+	// Use MTProto to discover all topics (requires user auth)
+	info!("Discovering forum topics via MTProto...");
+	crate::mtproto::discover_all_topics(config).await?;
+
+	// Reload metadata after MTProto discovery
+	let topics_metadata = TopicsMetadata::load();
+
+	// Create topic files for all discovered topics
+	create_topic_files(&topics_metadata)?;
+
+	// Run pull to sync messages
+	info!("Running pull to sync messages...");
+	pull(config, bot_token).await?;
+
+	Ok(())
+}
+/// Create empty topic files for all topics in metadata
+pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+
+	for (group_id, group) in &metadata.groups {
+		let default_name = format!("group_{group_id}");
+		let group_name = group.name.as_deref().unwrap_or(&default_name);
+		let group_dir = data_dir.join(group_name);
+
+		// Create group directory
+		std::fs::create_dir_all(&group_dir)?;
+
+		for (topic_id, topic_name) in &group.topics {
+			let file_path = group_dir.join(format!("{topic_name}.md"));
+
+			// Create empty file if it doesn't exist
+			if !file_path.exists() {
+				std::fs::File::create(&file_path)?;
+				info!("Created topic file: {} (topic_id={topic_id})", file_path.display());
+			}
+		}
+
+		info!("Group {group_name} ({group_id}) has {} topics", group.topics.len());
+	}
+
+	Ok(())
+}
+/// Run a single pull operation for all configured forum groups using MTProto
+pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
+	// Check if MTProto credentials are available
+	let cfg = config.config()?;
+	let has_api_id = cfg.api_id.is_some();
+	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
+	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
+
+	if !has_api_id || !has_api_hash || !has_phone {
+		warn!("MTProto credentials not configured. Cannot pull messages.");
+		warn!("Configure api_id, api_hash, and phone in your config file.");
+		return Ok(());
+	}
+
+	let topics_metadata = TopicsMetadata::load();
+	info!("Starting pull via MTProto...");
+
+	// Use structured concurrency for MTProto client
+	let max_messages = cfg.max_messages_per_chat;
+	let group_ids = cfg.forum_group_ids();
+
+	mtproto::with_client(config, |client| async move {
+		for group_id in group_ids {
+			let group = match topics_metadata.groups.get(&group_id) {
+				Some(g) => g,
+				None => {
+					warn!("No metadata for group {group_id}, skipping");
+					continue;
+				}
+			};
+
+			info!("Pulling messages for group {group_id} ({} topics)...", group.topics.len());
+
+			// Get InputPeer for this group
+			let input_peer = match get_input_peer(&client, group_id).await {
+				Ok(p) => p,
+				Err(e) => {
+					warn!("Could not get peer for group {group_id}: {e}");
+					continue;
+				}
+			};
+
+			for (&topic_id, topic_name) in &group.topics {
+				let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
+
+				// Always backfill date header years if needed (runs even without new messages)
+				if file_path.exists() {
+					if let Err(e) = backfill_file_date_headers(&file_path) {
+						warn!("Failed to backfill date headers in {}: {e}", file_path.display());
+					}
+				}
+
+				// Extract last message ID directly from the file content
+				let last_synced_id = extract_max_message_id(&file_path);
+
+				debug!("Pulling topic {topic_name} (last_synced_id={last_synced_id} from file)");
+
+				// Fetch messages for this topic
+				let messages = match fetch_topic_messages(&client, &input_peer, topic_id as i32, last_synced_id, max_messages).await {
+					Ok(m) => m,
+					Err(e) => {
+						warn!("Failed to fetch messages for topic {topic_name}: {e}");
+						continue;
+					}
+				};
+
+				if messages.is_empty() {
+					debug!("No new messages for topic {topic_name}");
+				} else {
+					info!("Fetched {} messages for topic {topic_name}", messages.len());
+
+					// Merge messages into file
+					merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
+				}
+
+				// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
+				if file_path.exists() {
+					let before = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
+					if let Err(e) = cleanup_tagless_messages(&file_path) {
+						warn!("Failed to cleanup tagless messages in {}: {e}", file_path.display());
+					}
+					let after = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
+					if before != after {
+						debug!("Cleanup changed {} from {before} to {after} lines", file_path.display());
+					}
+				}
+			}
+		}
+
+		info!("Pull complete");
+
+		// Check alerts channel for unread messages
+		if let Err(e) = crate::alerts::check_alerts(&client, config).await {
+			warn!("Failed to check alerts: {e}");
+		}
+
+		Ok(())
+	})
+	.await
+}
+/// A message fetched from MTProto
+#[derive(Clone, Debug)]
+pub struct FetchedMessage {
+	pub id: i32,
+	pub date: i32,
+	pub text: String,
+	pub photo: Option<tl::types::Photo>,
+	/// True if the message was sent by the authenticated user (not a bot)
+	pub is_outgoing: bool,
+}
+/// Get the file path for a topic
+pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+	let group_name = metadata.group_name(group_id);
+	let topic_name = metadata.topic_name(group_id, topic_id);
+
+	let group_dir = data_dir.join(&group_name);
+	group_dir.join(format!("{topic_name}.md"))
+}
+/// Ensure the parent directory for a topic file exists
+pub fn ensure_topic_dir(group_id: u64, metadata: &TopicsMetadata) -> Result<()> {
+	let data_dir = crate::server::DATA_DIR.get().unwrap();
+	let group_name = metadata.group_name(group_id);
+	let group_dir = data_dir.join(&group_name);
+	std::fs::create_dir_all(&group_dir)?;
+	Ok(())
+}
 /// Sanitize topic name for use as filename: lowercase, replace spaces with underscores
 fn sanitize_topic_name(name: &str) -> String {
 	name.to_lowercase()
@@ -21,7 +229,6 @@ fn sanitize_topic_name(name: &str) -> String {
 		.trim_matches('_')
 		.to_string()
 }
-
 /// Extract the highest message ID from a file's content by parsing `<!-- msg:ID ... -->` tags
 fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
 	let content = match std::fs::read_to_string(file_path) {
@@ -30,7 +237,6 @@ fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
 	};
 	extract_max_message_id_from_content(&content)
 }
-
 fn extract_max_message_id_from_content(content: &str) -> i32 {
 	use regex::Regex;
 
@@ -45,7 +251,6 @@ fn extract_max_message_id_from_content(content: &str) -> i32 {
 
 	max_id
 }
-
 fn parse_month(s: &str) -> Option<i8> {
 	match s {
 		"Jan" => Some(1),
@@ -63,7 +268,6 @@ fn parse_month(s: &str) -> Option<i8> {
 		_ => None,
 	}
 }
-
 /// Backfill years for date headers that don't have them.
 /// Uses the first header WITH a year as anchor, then walks backwards inferring years.
 /// If month increases going backwards, we crossed a year boundary.
@@ -162,7 +366,6 @@ fn backfill_date_header_years(content: &str) -> String {
 
 	result_lines.join("\n")
 }
-
 fn month_name(month: i8) -> &'static str {
 	match month {
 		1 => "Jan",
@@ -180,7 +383,6 @@ fn month_name(month: i8) -> &'static str {
 		_ => "???",
 	}
 }
-
 /// Backfill date header years in a file if any headers are missing years
 fn backfill_file_date_headers(file_path: &std::path::Path) -> Result<()> {
 	let content = std::fs::read_to_string(file_path)?;
@@ -206,7 +408,6 @@ fn backfill_file_date_headers(file_path: &std::path::Path) -> Result<()> {
 
 	Ok(())
 }
-
 /// Extract the last date header from file content and parse it as a date
 /// Date headers look like `## Dec 25, 2024` or `## Jan 03`
 /// Only returns dates from headers WITH explicit years (after backfill)
@@ -235,7 +436,6 @@ fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 
 	last_date
 }
-
 #[derive(Debug, Deserialize)]
 struct GetChatResponse {
 	ok: bool,
@@ -243,7 +443,6 @@ struct GetChatResponse {
 	#[serde(default)]
 	description: Option<String>,
 }
-
 #[derive(Clone, Debug, Deserialize)]
 struct TelegramChatInfo {
 	#[serde(default)]
@@ -251,185 +450,6 @@ struct TelegramChatInfo {
 	#[serde(default)]
 	is_forum: Option<bool>,
 }
-
-/// Fetch group info and discover topics for all configured groups.
-/// Creates topic files for each discovered topic in the XDG data home.
-/// Uses MTProto API (via grammers) to list all forum topics directly.
-pub async fn discover_and_create_topic_files(config: &LiveSettings, bot_token: &str) -> Result<()> {
-	let client = reqwest::Client::new();
-	let mut topics_metadata = TopicsMetadata::load();
-
-	// First, get group names via Bot API
-	let cfg = config.config()?;
-	for group_id in cfg.forum_group_ids() {
-		let chat_id = telegram_chat_id(group_id);
-
-		let url = format!("https://api.telegram.org/bot{bot_token}/getChat");
-		let res: reqwest::Response = client.get(&url).query(&[("chat_id", chat_id.to_string())]).send().await?;
-		let response: GetChatResponse = res.json().await?;
-
-		if !response.ok {
-			warn!("Failed to get chat {group_id}: {:?}", response.description);
-			continue;
-		}
-
-		if let Some(chat_info) = response.result {
-			let is_forum = chat_info.is_forum.unwrap_or(false);
-			if !is_forum {
-				warn!("Group {group_id} is not a forum");
-				continue;
-			}
-
-			if let Some(title) = chat_info.title {
-				let sanitized_name = sanitize_topic_name(&title);
-				topics_metadata.set_group_name(group_id, sanitized_name);
-				info!("Discovered forum group: {title} (id: {group_id})");
-			}
-		}
-	}
-
-	topics_metadata.save()?;
-
-	// Use MTProto to discover all topics (requires user auth)
-	info!("Discovering forum topics via MTProto...");
-	crate::mtproto::discover_all_topics(config).await?;
-
-	// Reload metadata after MTProto discovery
-	let topics_metadata = TopicsMetadata::load();
-
-	// Create topic files for all discovered topics
-	create_topic_files(&topics_metadata)?;
-
-	// Run pull to sync messages
-	info!("Running pull to sync messages...");
-	pull(config, bot_token).await?;
-
-	Ok(())
-}
-
-/// Create empty topic files for all topics in metadata
-pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
-	let data_dir = crate::server::DATA_DIR.get().unwrap();
-
-	for (group_id, group) in &metadata.groups {
-		let default_name = format!("group_{group_id}");
-		let group_name = group.name.as_deref().unwrap_or(&default_name);
-		let group_dir = data_dir.join(group_name);
-
-		// Create group directory
-		std::fs::create_dir_all(&group_dir)?;
-
-		for (topic_id, topic_name) in &group.topics {
-			let file_path = group_dir.join(format!("{topic_name}.md"));
-
-			// Create empty file if it doesn't exist
-			if !file_path.exists() {
-				std::fs::File::create(&file_path)?;
-				info!("Created topic file: {} (topic_id={topic_id})", file_path.display());
-			}
-		}
-
-		info!("Group {group_name} ({group_id}) has {} topics", group.topics.len());
-	}
-
-	Ok(())
-}
-
-/// Run a single pull operation for all configured forum groups using MTProto
-pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
-	// Check if MTProto credentials are available
-	let cfg = config.config()?;
-	let has_api_id = cfg.api_id.is_some();
-	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
-	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
-
-	if !has_api_id || !has_api_hash || !has_phone {
-		warn!("MTProto credentials not configured. Cannot pull messages.");
-		warn!("Configure api_id, api_hash, and phone in your config file.");
-		return Ok(());
-	}
-
-	let topics_metadata = TopicsMetadata::load();
-	info!("Starting pull via MTProto...");
-
-	// Use structured concurrency for MTProto client
-	let max_messages = cfg.max_messages_per_chat;
-	let group_ids = cfg.forum_group_ids();
-
-	mtproto::with_client(config, |client| async move {
-		for group_id in group_ids {
-			let group = match topics_metadata.groups.get(&group_id) {
-				Some(g) => g,
-				None => {
-					warn!("No metadata for group {group_id}, skipping");
-					continue;
-				}
-			};
-
-			info!("Pulling messages for group {group_id} ({} topics)...", group.topics.len());
-
-			// Get InputPeer for this group
-			let input_peer = match get_input_peer(&client, group_id).await {
-				Ok(p) => p,
-				Err(e) => {
-					warn!("Could not get peer for group {group_id}: {e}");
-					continue;
-				}
-			};
-
-			for (&topic_id, topic_name) in &group.topics {
-				let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
-
-				// Always backfill date header years if needed (runs even without new messages)
-				if file_path.exists() {
-					if let Err(e) = backfill_file_date_headers(&file_path) {
-						warn!("Failed to backfill date headers in {}: {e}", file_path.display());
-					}
-				}
-
-				// Extract last message ID directly from the file content
-				let last_synced_id = extract_max_message_id(&file_path);
-
-				debug!("Pulling topic {topic_name} (last_synced_id={last_synced_id} from file)");
-
-				// Fetch messages for this topic
-				let messages = match fetch_topic_messages(&client, &input_peer, topic_id as i32, last_synced_id, max_messages).await {
-					Ok(m) => m,
-					Err(e) => {
-						warn!("Failed to fetch messages for topic {topic_name}: {e}");
-						continue;
-					}
-				};
-
-				if messages.is_empty() {
-					debug!("No new messages for topic {topic_name}");
-				} else {
-					info!("Fetched {} messages for topic {topic_name}", messages.len());
-
-					// Merge messages into file
-					merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
-				}
-
-				// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
-				if file_path.exists() {
-					let before = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
-					if let Err(e) = cleanup_tagless_messages(&file_path) {
-						warn!("Failed to cleanup tagless messages in {}: {e}", file_path.display());
-					}
-					let after = std::fs::read_to_string(&file_path).map(|s| s.lines().count()).unwrap_or(0);
-					if before != after {
-						debug!("Cleanup changed {} from {before} to {after} lines", file_path.display());
-					}
-				}
-			}
-		}
-
-		info!("Pull complete");
-		Ok(())
-	})
-	.await
-}
-
 /// Get InputPeer from group_id by iterating dialogs
 async fn get_input_peer(client: &Client, group_id: u64) -> Result<tl::enums::InputPeer> {
 	let chat_id = telegram_chat_id(group_id);
@@ -482,18 +502,6 @@ async fn get_input_peer(client: &Client, group_id: u64) -> Result<tl::enums::Inp
 
 	Err(eyre!("Could not find channel with id {group_id} in dialogs"))
 }
-
-/// A message fetched from MTProto
-#[derive(Clone, Debug)]
-pub struct FetchedMessage {
-	pub id: i32,
-	pub date: i32,
-	pub text: String,
-	pub photo: Option<tl::types::Photo>,
-	/// True if the message was sent by the authenticated user (not a bot)
-	pub is_outgoing: bool,
-}
-
 /// Fetch messages from a forum topic using MTProto
 async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer, topic_id: i32, min_id: i32, limit: usize) -> Result<Vec<FetchedMessage>> {
 	let mut messages = Vec::new();
@@ -588,7 +596,6 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 
 	Ok(messages)
 }
-
 /// Check if message IDs in file content are strictly increasing
 /// Returns true if valid, false if reordering is needed
 fn are_message_ids_increasing(content: &str) -> bool {
@@ -610,7 +617,6 @@ fn are_message_ids_increasing(content: &str) -> bool {
 
 	true
 }
-
 /// A message block extracted from file content for reordering
 #[derive(Debug)]
 struct MessageBlock {
@@ -619,7 +625,6 @@ struct MessageBlock {
 	/// The full content lines of this message (may span multiple lines for code blocks)
 	lines: Vec<String>,
 }
-
 /// Reorder messages in file content so IDs are strictly increasing.
 /// Preserves date headers and places messages under the correct date based on their original position.
 /// Returns the reordered content.
@@ -798,7 +803,6 @@ fn reorder_messages_by_id(content: &str) -> String {
 	let result = result_lines.join("\n");
 	if !result.is_empty() { format!("{result}\n") } else { result }
 }
-
 /// Merge MTProto messages into a topic file
 async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: &[FetchedMessage], metadata: &TopicsMetadata) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
@@ -859,26 +863,6 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 
 	Ok(())
 }
-
-/// Get the file path for a topic
-pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
-	let data_dir = crate::server::DATA_DIR.get().unwrap();
-	let group_name = metadata.group_name(group_id);
-	let topic_name = metadata.topic_name(group_id, topic_id);
-
-	let group_dir = data_dir.join(&group_name);
-	group_dir.join(format!("{topic_name}.md"))
-}
-
-/// Ensure the parent directory for a topic file exists
-pub fn ensure_topic_dir(group_id: u64, metadata: &TopicsMetadata) -> Result<()> {
-	let data_dir = crate::server::DATA_DIR.get().unwrap();
-	let group_name = metadata.group_name(group_id);
-	let group_dir = data_dir.join(&group_name);
-	std::fs::create_dir_all(&group_dir)?;
-	Ok(())
-}
-
 /// Clean up a topic file:
 /// 1. Remove tagless message lines (optimistic writes that should be replaced by tagged versions)
 /// 2. Remove empty date sections (date headers followed by only empty lines or another header)
@@ -1014,7 +998,6 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 
 	Ok(())
 }
-
 #[cfg(test)]
 mod tests {
 	use super::*;

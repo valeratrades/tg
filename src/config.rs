@@ -1,13 +1,31 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 use tg::TelegramDestination;
-use tracing::warn;
 use v_utils::{
 	macros::{LiveSettings, MyConfigPrimitives, Settings},
 	trades::Timeframe,
 };
 
+/// Initialize the data directory (call after config is loaded)
+pub fn init_data_dir() {
+	use crate::server::DATA_DIR;
+	// xdg_state_dir! creates the directory and returns the path
+	let data_dir = DATA_DIR.get_or_init(|| v_utils::xdg_state_dir!(""));
+	tracing::info!("Data directory ready: {}", data_dir.display());
+}
+/// Metadata for discovered topics in forum groups
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TopicsMetadata {
+	/// Maps group_id -> { topic_id -> custom_name }
+	/// If a topic has a custom name, use it; otherwise fall back to topic_{id}
+	pub groups: std::collections::BTreeMap<u64, GroupMetadata>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GroupMetadata {
+	/// Custom name for the group (optional, falls back to group_id)
+	pub name: Option<String>,
+	/// Maps topic_id -> custom_name
+	pub topics: std::collections::BTreeMap<u64, String>,
+}
 #[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
 pub(crate) struct AppConfig {
 	#[settings(default = 8123)]
@@ -57,23 +75,8 @@ impl AppConfig {
 	}
 }
 
-/// Initialize the data directory (call after config is loaded)
-pub fn init_data_dir() {
-	use crate::server::DATA_DIR;
-	// xdg_state_dir! creates the directory and returns the path
-	let data_dir = DATA_DIR.get_or_init(|| v_utils::xdg_state_dir!(""));
-	tracing::info!("Data directory ready: {}", data_dir.display());
-}
-
-/// Metadata for discovered topics in forum groups
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct TopicsMetadata {
-	/// Maps group_id -> { topic_id -> custom_name }
-	/// If a topic has a custom name, use it; otherwise fall back to topic_{id}
-	pub groups: std::collections::BTreeMap<u64, GroupMetadata>,
-}
 impl TopicsMetadata {
-	pub fn file_path() -> PathBuf {
+	pub fn file_path() -> std::path::PathBuf {
 		v_utils::xdg_state_file!("topics_metadata.json")
 	}
 
@@ -86,7 +89,7 @@ impl TopicsMetadata {
 		match std::fs::read_to_string(&path) {
 			Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
 			Err(e) => {
-				warn!("Failed to read topics_metadata.json: {e}");
+				tracing::warn!("Failed to read topics_metadata.json: {e}");
 				Self::default()
 			}
 		}
@@ -126,14 +129,6 @@ impl TopicsMetadata {
 	pub fn ensure_topic(&mut self, group_id: u64, topic_id: u64) {
 		self.groups.entry(group_id).or_default().topics.entry(topic_id).or_insert_with(|| format!("topic_{topic_id}"));
 	}
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct GroupMetadata {
-	/// Custom name for the group (optional, falls back to group_id)
-	pub name: Option<String>,
-	/// Maps topic_id -> custom_name
-	pub topics: std::collections::BTreeMap<u64, String>,
 }
 
 #[cfg(test)]

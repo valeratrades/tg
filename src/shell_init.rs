@@ -2,13 +2,16 @@ use clap::{Args, CommandFactory};
 use clap_complete::Shell as ClapShell;
 use derive_more::derive::{Display, FromStr};
 
-const EXE_NAME: &str = "tg";
-
 #[derive(Args, Clone, Debug)]
 pub struct ShellInitArgs {
 	shell: Shell,
 }
-
+pub fn output(args: ShellInitArgs) {
+	let shell = args.shell;
+	let s = format!("{}\n{}", shell.aliases(), shell.completions());
+	println!("{s}");
+}
+const EXE_NAME: &str = "tg";
 #[derive(Clone, Copy, Debug, Display, FromStr)]
 enum Shell {
 	Dash,
@@ -19,38 +22,36 @@ enum Shell {
 
 impl Shell {
 	fn aliases(&self) -> String {
-		format!(
-			r#"
-# {EXE_NAME} aliases
-function tga; {EXE_NAME} send -c alerts $argv 2>/dev/null; end
-function tgg; {EXE_NAME} send -c general $argv 2>/dev/null; end
-alias tgo="{EXE_NAME} open"
-alias tgd="{EXE_NAME} todos open"
-"#
-		)
-	}
-
-	fn to_clap_shell(self) -> ClapShell {
 		match self {
-			Shell::Dash => ClapShell::Bash,
-			Shell::Bash => ClapShell::Bash,
-			Shell::Zsh => ClapShell::Zsh,
-			Shell::Fish => ClapShell::Fish,
+			Shell::Dash | Shell::Bash | Shell::Zsh => {
+				format!(
+					r#"# tg aliases
+alias tgo='{EXE_NAME} open'
+alias tgs='{EXE_NAME} send'
+alias tgl='{EXE_NAME} list'
+alias tgt='{EXE_NAME} todos open'"#
+				)
+			}
+			Shell::Fish => {
+				format!(
+					r#"# tg aliases
+alias tgo '{EXE_NAME} open'
+alias tgs '{EXE_NAME} send'
+alias tgl '{EXE_NAME} list'
+alias tgt '{EXE_NAME} todos open'"#
+				)
+			}
 		}
 	}
 
 	fn completions(&self) -> String {
-		let mut cmd = crate::Cli::command();
-		let mut buffer = Vec::new();
-		let shell = self.to_clap_shell();
-		clap_complete::generate(shell, &mut cmd, EXE_NAME, &mut buffer);
-
-		String::from_utf8(buffer).unwrap_or_else(|_| String::from("# Failed to generate completions"))
+		let clap_shell = match self {
+			Shell::Dash | Shell::Bash => ClapShell::Bash,
+			Shell::Zsh => ClapShell::Zsh,
+			Shell::Fish => ClapShell::Fish,
+		};
+		let mut buf = Vec::new();
+		clap_complete::generate(clap_shell, &mut crate::Cli::command(), EXE_NAME, &mut buf);
+		String::from_utf8(buf).unwrap_or_default()
 	}
-}
-
-pub fn output(args: ShellInitArgs) {
-	let shell = args.shell;
-	let s = format!("{}\n{}", shell.aliases(), shell.completions());
-	println!("{s}");
 }

@@ -10,11 +10,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{LiveSettings, TopicsMetadata};
 
-/// Get the session file path (same convention as social_networks)
-fn session_path(username: &str) -> PathBuf {
-	v_utils::xdg_state_file!(&format!("{}.session", username))
-}
-
 /// Run an operation with an authenticated MTProto client.
 /// Uses structured concurrency - the runner task lives only for the duration of the operation.
 pub async fn with_client<F, Fut, T>(config: &LiveSettings, operation: F) -> Result<T>
@@ -119,14 +114,12 @@ where
 
 	result
 }
-
 /// Discovered forum topic
 #[derive(Clone, Debug)]
 pub struct DiscoveredTopic {
 	pub topic_id: i32,
 	pub title: String,
 }
-
 /// Fetch all forum topics for a group using MTProto
 pub async fn fetch_forum_topics(client: &Client, group_id: u64) -> Result<Vec<DiscoveredTopic>> {
 	let chat_id = telegram_chat_id(group_id);
@@ -198,63 +191,6 @@ pub async fn fetch_forum_topics(client: &Client, group_id: u64) -> Result<Vec<Di
 	info!("Discovered {} topics in group {group_id}", topics.len());
 	Ok(topics)
 }
-
-/// Get InputPeer from chat_id by iterating dialogs
-async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
-	let mut dialogs = client.iter_dialogs();
-
-	// chat_id is like -1002244305221, we want 2244305221
-	let expected_id = if chat_id < 0 {
-		let s = chat_id.to_string();
-		if let Some(stripped) = s.strip_prefix("-100") {
-			stripped.parse::<i64>().unwrap_or(0)
-		} else {
-			chat_id.abs()
-		}
-	} else {
-		chat_id
-	};
-
-	while let Some(dialog) = dialogs.next().await? {
-		// Check if this is the right peer by examining the raw dialog data
-		match &dialog.raw {
-			tl::enums::Dialog::Dialog(d) => {
-				let peer_id = match &d.peer {
-					tl::enums::Peer::Channel(c) => c.channel_id,
-					tl::enums::Peer::Chat(c) => c.chat_id,
-					tl::enums::Peer::User(u) => u.user_id,
-				};
-
-				if peer_id == expected_id {
-					// Use the peer from dialog to get InputPeer
-					let peer = dialog.peer();
-					match peer {
-						grammers_client::types::Peer::Group(g) => {
-							// Get access_hash from raw channel data
-							if let tl::enums::Chat::Channel(ch) = &g.raw {
-								return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-									channel_id: ch.id,
-									access_hash: ch.access_hash.unwrap_or(0),
-								}));
-							}
-						}
-						grammers_client::types::Peer::Channel(c) => {
-							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-								channel_id: c.raw.id,
-								access_hash: c.raw.access_hash.unwrap_or(0),
-							}));
-						}
-						_ => {}
-					}
-				}
-			}
-			tl::enums::Dialog::Folder(_) => continue,
-		}
-	}
-
-	bail!("Could not find channel with id {chat_id} in dialogs. Make sure the user account has access to this group.")
-}
-
 /// Discover and update topics metadata for all configured groups
 pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	// Check if credentials are configured (either in config or env vars)
@@ -295,17 +231,6 @@ pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
 	})
 	.await
 }
-
-/// Sanitize topic name for use as filename
-fn sanitize_topic_name(name: &str) -> String {
-	name.to_lowercase()
-		.chars()
-		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-		.collect::<String>()
-		.trim_matches('_')
-		.to_string()
-}
-
 /// Delete messages from a channel/supergroup via MTProto
 /// Returns the number of successfully deleted messages (including already-deleted ones)
 pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]) -> Result<usize> {
@@ -383,7 +308,6 @@ pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]
 	info!(pts_count, already_deleted_count, total_success, "Delete operation complete");
 	Ok(total_success)
 }
-
 /// Edit a message in a channel/supergroup via MTProto (for user-sent messages)
 pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_text: &str) -> Result<()> {
 	let chat_id = telegram_chat_id(group_id);
@@ -406,7 +330,6 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 	info!("Edited message {message_id} in group {group_id} via MTProto");
 	Ok(())
 }
-
 /// Edit a message via Bot API (for bot-sent messages)
 /// The MTProto client is not used here, but we keep the signature consistent for the caller
 pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64, message_id: i32, new_text: &str, bot_token: &str) -> Result<()> {
@@ -432,4 +355,72 @@ pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64
 		warn!("Bot API edit failed with status {status}: {response_text}");
 		bail!("Bot API error: {status} - {response_text}")
 	}
+}
+/// Get the session file path (same convention as social_networks)
+fn session_path(username: &str) -> PathBuf {
+	v_utils::xdg_state_file!(&format!("{}.session", username))
+}
+/// Get InputPeer from chat_id by iterating dialogs
+async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
+	let mut dialogs = client.iter_dialogs();
+
+	// chat_id is like -1002244305221, we want 2244305221
+	let expected_id = if chat_id < 0 {
+		let s = chat_id.to_string();
+		if let Some(stripped) = s.strip_prefix("-100") {
+			stripped.parse::<i64>().unwrap_or(0)
+		} else {
+			chat_id.abs()
+		}
+	} else {
+		chat_id
+	};
+
+	while let Some(dialog) = dialogs.next().await? {
+		// Check if this is the right peer by examining the raw dialog data
+		match &dialog.raw {
+			tl::enums::Dialog::Dialog(d) => {
+				let peer_id = match &d.peer {
+					tl::enums::Peer::Channel(c) => c.channel_id,
+					tl::enums::Peer::Chat(c) => c.chat_id,
+					tl::enums::Peer::User(u) => u.user_id,
+				};
+
+				if peer_id == expected_id {
+					// Use the peer from dialog to get InputPeer
+					let peer = dialog.peer();
+					match peer {
+						grammers_client::types::Peer::Group(g) => {
+							// Get access_hash from raw channel data
+							if let tl::enums::Chat::Channel(ch) = &g.raw {
+								return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+									channel_id: ch.id,
+									access_hash: ch.access_hash.unwrap_or(0),
+								}));
+							}
+						}
+						grammers_client::types::Peer::Channel(c) => {
+							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
+								channel_id: c.raw.id,
+								access_hash: c.raw.access_hash.unwrap_or(0),
+							}));
+						}
+						_ => {}
+					}
+				}
+			}
+			tl::enums::Dialog::Folder(_) => continue,
+		}
+	}
+
+	bail!("Could not find channel with id {chat_id} in dialogs. Make sure the user account has access to this group.")
+}
+/// Sanitize topic name for use as filename
+fn sanitize_topic_name(name: &str) -> String {
+	name.to_lowercase()
+		.chars()
+		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+		.collect::<String>()
+		.trim_matches('_')
+		.to_string()
 }

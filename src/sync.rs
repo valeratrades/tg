@@ -46,14 +46,12 @@ pub enum MessageUpdate {
 		content: String,
 	},
 }
-
 /// Result of a single operation
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OpResult {
 	pub success: bool,
 	pub message: String,
 }
-
 /// Detailed results from a push operation
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PushResults {
@@ -66,7 +64,6 @@ pub struct PushResults {
 	/// Local file cleanup results: (file_path, lines_removed, message)
 	pub file_cleanups: Vec<(String, usize, String)>,
 }
-
 /// Check server version and fail if mismatched
 pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<()> {
 	let client_version = env!("CARGO_PKG_VERSION");
@@ -87,7 +84,6 @@ pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<
 		Some(_) => Ok(()), // Versions match
 	}
 }
-
 /// Push updates via the running server (preferred) or fail with a clear error.
 /// This avoids SQLite session file locking issues when the server is running.
 /// Returns detailed results from the push operation.
@@ -137,7 +133,6 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 		eyre::bail!("Server push failed: {}", response.error.unwrap_or_else(|| "unknown error".to_string()))
 	}
 }
-
 /// Push updates to Telegram and sync local files
 /// - Deletes/edits messages on Telegram via MTProto (user messages) or Bot API (bot messages)
 /// - Creates new messages via Bot API
@@ -469,14 +464,12 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	info!("Push complete");
 	Ok(results)
 }
-
 /// Parsed message with content and sender info
 #[derive(Clone, Debug)]
 pub struct ParsedMessage {
 	pub content: String,
 	pub sender: MessageSender,
 }
-
 /// Parse a topic file and extract all messages with their IDs
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
@@ -551,7 +544,6 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 
 	messages
 }
-
 /// Information about file content structure for detecting new messages
 #[derive(Debug)]
 pub struct FileContentInfo {
@@ -563,7 +555,6 @@ pub struct FileContentInfo {
 	/// Includes date headers (## MMM DD or ## MMM DD, YYYY) and message prefixes (. )
 	pub untagged_lines: Vec<(usize, String)>,
 }
-
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: (\w+))? -->").unwrap();
@@ -589,7 +580,6 @@ pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 
 	info
 }
-
 /// Detect changes between old and new file content, including new messages to send
 pub fn detect_changes_with_new_messages(old_content: &str, new_content: &str) -> FileChanges {
 	let old_info = parse_file_with_positions(old_content);
@@ -649,51 +639,6 @@ pub fn detect_changes_with_new_messages(old_content: &str, new_content: &str) ->
 
 	changes
 }
-
-/// Combine lines into discrete messages
-/// Lines starting with ". " mark message boundaries
-fn coalesce_new_messages(lines: &[String]) -> Vec<String> {
-	if lines.is_empty() {
-		return Vec::new();
-	}
-
-	let mut messages = Vec::new();
-	let mut current_message = String::new();
-
-	for line in lines {
-		let trimmed = line.trim();
-
-		// Skip empty lines between messages
-		if trimmed.is_empty() {
-			continue;
-		}
-
-		// ". " prefix indicates start of a new message block
-		if let Some(stripped) = trimmed.strip_prefix(". ") {
-			// Save current message if non-empty
-			if !current_message.is_empty() {
-				messages.push(current_message.trim().to_string());
-			}
-			// Start new message without the ". " prefix
-			current_message = stripped.to_string();
-		} else if current_message.is_empty() {
-			// First line of a new message
-			current_message = trimmed.to_string();
-		} else {
-			// Continuation of current message
-			current_message.push('\n');
-			current_message.push_str(trimmed);
-		}
-	}
-
-	// Don't forget the last message
-	if !current_message.is_empty() {
-		messages.push(current_message.trim().to_string());
-	}
-
-	messages
-}
-
 /// Convert FileChanges to MessageUpdates for a given group/topic
 pub fn changes_to_updates(changes: &FileChanges, group_id: u64, topic_id: u64) -> Vec<MessageUpdate> {
 	let mut updates = Vec::new();
@@ -726,7 +671,6 @@ pub fn changes_to_updates(changes: &FileChanges, group_id: u64, topic_id: u64) -
 
 	updates
 }
-
 /// Represents changes detected between old and new file states
 #[derive(Clone, Debug, Default)]
 pub struct FileChanges {
@@ -773,7 +717,6 @@ pub fn detect_changes(old_state: &BTreeMap<i32, ParsedMessage>, new_state: &BTre
 
 	changes
 }
-
 /// Resolve a topic file path to (group_id, topic_id)
 pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 	let metadata = TopicsMetadata::load();
@@ -804,7 +747,49 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 
 	None
 }
+/// Combine lines into discrete messages
+/// Lines starting with ". " mark message boundaries
+fn coalesce_new_messages(lines: &[String]) -> Vec<String> {
+	if lines.is_empty() {
+		return Vec::new();
+	}
 
+	let mut messages = Vec::new();
+	let mut current_message = String::new();
+
+	for line in lines {
+		let trimmed = line.trim();
+
+		// Skip empty lines between messages
+		if trimmed.is_empty() {
+			continue;
+		}
+
+		// ". " prefix indicates start of a new message block
+		if let Some(stripped) = trimmed.strip_prefix(". ") {
+			// Save current message if non-empty
+			if !current_message.is_empty() {
+				messages.push(current_message.trim().to_string());
+			}
+			// Start new message without the ". " prefix
+			current_message = stripped.to_string();
+		} else if current_message.is_empty() {
+			// First line of a new message
+			current_message = trimmed.to_string();
+		} else {
+			// Continuation of current message
+			current_message.push('\n');
+			current_message.push_str(trimmed);
+		}
+	}
+
+	// Don't forget the last message
+	if !current_message.is_empty() {
+		messages.push(current_message.trim().to_string());
+	}
+
+	messages
+}
 #[cfg(test)]
 mod tests {
 	use super::*;

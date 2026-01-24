@@ -10,4 +10,5 @@
   groups = {
     general = "-1002244305221";
   };
+  alerts.env = "TELEGRAM_ALERTS_CHANNEL_ID";
 }

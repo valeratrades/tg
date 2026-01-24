@@ -53,6 +53,10 @@ impl PushHandle {
 struct BackgroundSendTask {
 	message: Message,
 	bot_token: String,
+	/// Filepath to write the message to after successful send
+	chat_filepath: PathBuf,
+	/// Last write datetime for formatting (from xattr)
+	last_write_datetime: Option<Timestamp>,
 }
 
 /// Handle to queue background send tasks
@@ -248,16 +252,45 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 					const E: f64 = std::f64::consts::E;
 					const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
 
-					while let Err(e) = send_message(&bg_send_task.message, &bg_send_task.bot_token).await {
-						let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
-						if total_elapsed_secs >= THIRTY_MINS_SECS {
-							error!("Failed to send message to Telegram after 30+ minutes: {e}");
-							break;
+					let msg_id = loop {
+						match send_message(&bg_send_task.message, &bg_send_task.bot_token).await {
+							Ok(id) => break Some(id),
+							Err(e) => {
+								let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
+								if total_elapsed_secs >= THIRTY_MINS_SECS {
+									error!("Failed to send message to Telegram after 30+ minutes: {e}");
+									break None;
+								}
+								warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
+								tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+								delay_secs *= E;
+							}
 						}
-						warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
-						tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-						delay_secs *= E;
+					};
+
+					// Write the message to file with tag after successful send
+					if let Some(msg_id) = msg_id {
+						let now = Timestamp::now();
+						let formatted = format_message_append_with_sender(
+							&bg_send_task.message.message,
+							bg_send_task.last_write_datetime,
+							now,
+							Some(msg_id),
+							Some("bot"),
+						);
+
+						if let Some(parent) = bg_send_task.chat_filepath.parent() {
+							if let Err(e) = std::fs::create_dir_all(parent) {
+								error!("Failed to create directory '{}': {e}", parent.display());
+							}
+						}
+
+						match write_message_to_file(&bg_send_task.chat_filepath, &formatted) {
+							Ok(()) => info!("Wrote message with tag to {}", bg_send_task.chat_filepath.display()),
+							Err(e) => error!("Failed to write message to file: {e}"),
+						}
 					}
+
 					info!("Background send completed");
 					(TaskResult::BackgroundSendDone, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 				}));
@@ -352,85 +385,28 @@ async fn handle_send_message(socket: &mut TcpStream, message: Message, bot_token
 
 	let metadata = TopicsMetadata::load();
 	let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
-	info!(
-		"Processing message for group {} topic {} to file: {}",
-		message.group_id,
-		message.topic_id,
-		chat_filepath.display()
-	);
+	info!("Queuing message for group {} topic {} to file: {}", message.group_id, message.topic_id, chat_filepath.display());
 
-	let last_write_tag: Option<String> = std::fs::File::open(&chat_filepath)
+	// Read last write datetime for formatting (will be used after send succeeds)
+	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
 		.ok()
 		.and_then(|file| {
 			debug!("Reading xattr from existing file");
 			file.get_xattr("user.last_changed").ok()
 		})
 		.flatten()
-		.map(|v| String::from_utf8_lossy(&v).into_owned());
-	let last_write_datetime = last_write_tag
-		.as_deref()
-		.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok());
-
-	let message_append_repr = format_message_append(&message.message, last_write_datetime, Timestamp::now());
-	debug!("Formatted message append: {message_append_repr:?}");
-
-	// Ensure the parent directory exists
-	if let Some(parent) = chat_filepath.parent()
-		&& let Err(e) = std::fs::create_dir_all(parent)
-	{
-		error!("Failed to create directory '{}': {e}", parent.display());
-		return;
-	}
-
-	let mut file = match std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&chat_filepath) {
-		Ok(f) => {
-			debug!("Opened chat file successfully");
-			f
-		}
-		Err(e) => {
-			error!("Failed to open chat file '{}': {e}", chat_filepath.display());
-			return;
-		}
-	};
-
-	// Trim trailing whitespace, keeping at most one newline
-	let mut file_contents = String::new();
-	if let Err(e) = file.read_to_string(&mut file_contents) {
-		error!("Failed to read file contents: {e}");
-		return;
-	}
-	let trimmed_len = file_contents.trim_end().len();
-	// Cap at file length to avoid extending the file if it doesn't end with whitespace
-	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
-	if let Err(e) = file.set_len(truncate_to as u64) {
-		error!("Failed to truncate file: {e}");
-		return;
-	}
-	if let Err(e) = file.seek(SeekFrom::End(0)) {
-		error!("Failed to seek to end of file: {e}");
-		return;
-	}
-
-	if let Err(e) = file.write_all(message_append_repr.as_bytes()) {
-		error!("Failed to write message to file: {e}");
-		return;
-	}
-	debug!("Wrote message to file");
-
-	let now_rfc3339 = Timestamp::now().to_string();
-	if let Err(e) = file.set_xattr("user.last_changed", now_rfc3339.as_bytes()) {
-		error!("Failed to set xattr: {e}");
-		return;
-	}
-	debug!("Set xattr successfully");
+		.and_then(|v| {
+			let s = String::from_utf8_lossy(&v);
+			s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok()
+		});
 
 	// Queue background task to send to Telegram (with retries)
-	// The message is written to file immediately without a tag.
-	// When the send succeeds, the next sync will pull the message from TG (with its real ID)
-	// and the tagless local message will be cleaned up.
+	// File write happens after successful send, with the message tag
 	let task = BackgroundSendTask {
 		message: message.clone(),
 		bot_token: bot_token.to_string(),
+		chat_filepath,
+		last_write_datetime,
 	};
 	if let Err(e) = bg_send_handle.tx.send(task).await {
 		error!("Failed to queue background send task: {e}");
@@ -448,6 +424,29 @@ fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	let remaining = text[full_match.end()..].trim();
 	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
 	Some((path, caption))
+}
+
+/// Write a formatted message to a file, trimming trailing whitespace and updating xattr
+fn write_message_to_file(chat_filepath: &std::path::Path, formatted_message: &str) -> Result<()> {
+	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(chat_filepath)?;
+
+	// Trim trailing whitespace, keeping at most one newline
+	let mut file_contents = String::new();
+	file.read_to_string(&mut file_contents)?;
+	let trimmed_len = file_contents.trim_end().len();
+	// Cap at file length to avoid extending the file if it doesn't end with whitespace
+	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
+	file.set_len(truncate_to as u64)?;
+	file.seek(SeekFrom::End(0))?;
+
+	file.write_all(formatted_message.as_bytes())?;
+	debug!("Wrote message to file");
+
+	let now_rfc3339 = Timestamp::now().to_string();
+	file.set_xattr("user.last_changed", now_rfc3339.as_bytes())?;
+	debug!("Set xattr successfully");
+
+	Ok(())
 }
 
 /// Returns the message ID assigned by Telegram
@@ -539,20 +538,6 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 		warn!("Telegram API returned non-success status {status}: {response_text}");
 		Err(eyre::eyre!("Telegram API error: {status}"))
 	}
-}
-
-/// match duration_since_last_write {
-///     < 6 minutes => append directly
-///     >= 6 minutes && same day => append with a newline before
-///     >= 6 minutes && different day => append with a newline before and after
-/// }
-pub fn format_message_append(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp) -> String {
-	format_message_append_with_id(message, last_write_datetime, now, None)
-}
-
-/// Format a message append with an optional message ID marker
-pub fn format_message_append_with_id(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>) -> String {
-	format_message_append_with_sender(message, last_write_datetime, now, msg_id, None)
 }
 
 /// Check if a message contains patterns that could break our markdown format
@@ -664,7 +649,7 @@ mod tests {
 		let mut formatted_messages = String::new();
 		for (i, (m, t)) in messages.iter().enumerate() {
 			let last_change = if i == 0 { None } else { Some(messages[i - 1].1) };
-			let m = format_message_append(m, last_change, *t);
+			let m = format_message_append_with_sender(m, last_change, *t, None, None);
 			formatted_messages.push_str(&m);
 		}
 

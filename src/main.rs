@@ -183,43 +183,21 @@ async fn main() -> Result<()> {
 			let message = Message::new(group_id, topic_id, msg_text.clone());
 			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
-			// Try server first, fall back to direct send
-			match TcpStream::connect(&addr).await {
-				Ok(mut stream) => {
-					// Server handles file write + message ID tracking
-					let json = serde_json::to_string(&message)?;
-					stream.write_all(json.as_bytes()).await?;
+			// Connect to server (required)
+			let mut stream = TcpStream::connect(&addr).await.map_err(|_| eyre::eyre!("Server not running. Start it with `tg server`"))?;
 
-					// Read JSON response and check version
-					let mut buf = vec![0u8; 4096];
-					let n = stream.read(&mut buf).await?;
-					if n == 0 {
-						bail!("Server closed connection without response");
-					}
-					let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
-					sync::check_server_version(&response)?;
-				}
-				Err(_) => {
-					// Server not running, send directly and update local file
-					let msg_id = server::send_message(&message, &bot_token).await?;
+			// Server handles send + file write with message tag
+			let json = serde_json::to_string(&message)?;
+			stream.write_all(json.as_bytes()).await?;
 
-					// Write to local file with message ID
-					let metadata = TopicsMetadata::load();
-					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
-
-					// Ensure directory exists
-					if let Some(parent) = chat_filepath.parent() {
-						std::fs::create_dir_all(parent)?;
-					}
-
-					// Append message with ID marker (sent via bot API, so sender is "bot")
-					let now = Timestamp::now();
-					let formatted = server::format_message_append_with_sender(&msg_text, None, now, Some(msg_id), Some("bot"));
-
-					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
-					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
-				}
+			// Read JSON response and check version
+			let mut buf = vec![0u8; 4096];
+			let n = stream.read(&mut buf).await?;
+			if n == 0 {
+				bail!("Server closed connection without response");
 			}
+			let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+			sync::check_server_version(&response)?;
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
@@ -395,38 +373,26 @@ async fn main() -> Result<()> {
 					display_push_results(&results);
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
-					// Create: write to file without tag, then send via bot API
-					// The tag will be added by sync when the message appears on TG
+					// Send through server (which handles file write + telegram send)
 					eprintln!("Creating message in group {group_id} topic {topic_id}");
 
-					// Write to local file without tag
-					let metadata = TopicsMetadata::load();
-					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
-
-					// Ensure directory exists
-					if let Some(parent) = chat_filepath.parent() {
-						std::fs::create_dir_all(parent)?;
-					}
-
-					// Append message without tag
-					let now = Timestamp::now();
-					let formatted = server::format_message_append(&content, None, now);
-					let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&chat_filepath)?;
-					std::io::Write::write_all(&mut file, formatted.as_bytes())?;
-
-					eprintln!("Wrote message to {}", chat_filepath.display());
-
-					// Send via bot API (synchronous for CLI)
 					let message = server::Message::new(group_id, topic_id, content);
-					match server::send_message(&message, &bot_token).await {
-						Ok(msg_id) => {
-							eprintln!("Message sent to Telegram with id {msg_id}");
-							// Note: The tag will be added by the next sync
-						}
-						Err(e) => {
-							eprintln!("Failed to send message: {e}. It will be retried on next server run.");
-						}
+					let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
+
+					let mut stream = TcpStream::connect(&addr).await.map_err(|_| eyre!("Server not running. Start it with `tg server`"))?;
+
+					let json = serde_json::to_string(&message)?;
+					stream.write_all(json.as_bytes()).await?;
+
+					let mut buf = vec![0u8; 4096];
+					let n = stream.read(&mut buf).await?;
+					if n == 0 {
+						bail!("Server closed connection without response");
 					}
+					let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+					sync::check_server_version(&response)?;
+
+					eprintln!("Message queued for sending");
 				}
 			};
 		}

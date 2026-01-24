@@ -19,6 +19,9 @@ pub(crate) struct AppConfig {
 	/// Named group destinations
 	#[primitives(skip)]
 	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
+	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
+	#[primitives(skip)]
+	pub alerts_channel: Option<TelegramDestination>,
 	/// Telegram API ID from https://my.telegram.org/
 	pub api_id: Option<i32>,
 	/// Telegram API hash (can be { env = "VAR_NAME" })

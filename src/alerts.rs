@@ -63,6 +63,60 @@ impl AlertsState {
 	}
 }
 
+/// Check alerts channel and show/dismiss notifications as needed
+pub async fn check_alerts(client: &Client, settings: &LiveSettings) -> Result<()> {
+	let cfg = settings.config()?;
+	let alerts_channel = match &cfg.alerts_channel {
+		Some(c) => c,
+		None => return Ok(()), // No alerts channel configured
+	};
+
+	let (group_id, topic_id) = match alerts_channel.as_group_topic() {
+		Some((g, t)) => (g, if t == 1 { None } else { Some(t) }),
+		None => {
+			warn!("alerts_channel must be a numeric ID, not a username");
+			return Ok(());
+		}
+	};
+
+	debug!("Checking alerts channel: group_id={group_id}, topic_id={topic_id:?}");
+
+	// Fetch unread messages
+	let unread = fetch_unread_message_ids(client, group_id, topic_id).await?;
+	let unread_ids: std::collections::HashSet<i32> = unread.iter().map(|(id, _)| *id).collect();
+
+	// Load current state
+	let mut state = AlertsState::load();
+
+	// Kill notifications for messages that are now read
+	let to_remove: Vec<i32> = state.notified_pids.keys().filter(|id| !unread_ids.contains(id)).copied().collect();
+
+	for msg_id in to_remove {
+		if let Some(pid) = state.notified_pids.remove(&msg_id) {
+			kill_notification(pid, msg_id);
+		}
+	}
+
+	// Spawn notifications for new unread messages
+	for (msg_id, text) in &unread {
+		if !state.notified_pids.contains_key(msg_id) {
+			match spawn_notification("Telegram Alert", text) {
+				Ok(pid) => {
+					info!("Spawned notification for msg:{msg_id} (pid {pid})");
+					state.notified_pids.insert(*msg_id, pid);
+				}
+				Err(e) => {
+					warn!("Failed to spawn notification for msg:{msg_id}: {e}");
+				}
+			}
+		}
+	}
+
+	// Save updated state
+	state.save()?;
+
+	Ok(())
+}
 /// Kill a notification process by PID
 fn kill_notification(pid: u32, msg_id: i32) {
 	match std::process::Command::new("kill").arg(pid.to_string()).output() {
@@ -79,7 +133,6 @@ fn kill_notification(pid: u32, msg_id: i32) {
 		}
 	}
 }
-
 /// Spawn a desktop notification that stays until dismissed
 fn spawn_notification(title: &str, body: &str) -> Result<u32> {
 	let child = std::process::Command::new("notify-send")
@@ -91,7 +144,6 @@ fn spawn_notification(title: &str, body: &str) -> Result<u32> {
 
 	Ok(child.id())
 }
-
 /// Fetch unread message IDs from the alerts channel
 async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Option<u64>) -> Result<Vec<(i32, String)>> {
 	let chat_id = telegram_chat_id(group_id);
@@ -188,7 +240,6 @@ async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Opti
 
 	Ok(unread_messages)
 }
-
 /// Extract channel ID from chat_id (strips -100 prefix)
 fn extract_channel_id(chat_id: i64) -> i64 {
 	let s = chat_id.to_string();
@@ -198,7 +249,6 @@ fn extract_channel_id(chat_id: i64) -> i64 {
 		chat_id.abs()
 	}
 }
-
 /// Get InputPeer from chat_id by iterating dialogs
 async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
 	let mut dialogs = client.iter_dialogs();
@@ -235,59 +285,4 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 	}
 
 	eyre::bail!("Could not find channel with id {chat_id} in dialogs")
-}
-
-/// Check alerts channel and show/dismiss notifications as needed
-pub async fn check_alerts(client: &Client, settings: &LiveSettings) -> Result<()> {
-	let cfg = settings.config()?;
-	let alerts_channel = match &cfg.alerts_channel {
-		Some(c) => c,
-		None => return Ok(()), // No alerts channel configured
-	};
-
-	let (group_id, topic_id) = match alerts_channel.as_group_topic() {
-		Some((g, t)) => (g, if t == 1 { None } else { Some(t) }),
-		None => {
-			warn!("alerts_channel must be a numeric ID, not a username");
-			return Ok(());
-		}
-	};
-
-	debug!("Checking alerts channel: group_id={group_id}, topic_id={topic_id:?}");
-
-	// Fetch unread messages
-	let unread = fetch_unread_message_ids(client, group_id, topic_id).await?;
-	let unread_ids: std::collections::HashSet<i32> = unread.iter().map(|(id, _)| *id).collect();
-
-	// Load current state
-	let mut state = AlertsState::load();
-
-	// Kill notifications for messages that are now read
-	let to_remove: Vec<i32> = state.notified_pids.keys().filter(|id| !unread_ids.contains(id)).copied().collect();
-
-	for msg_id in to_remove {
-		if let Some(pid) = state.notified_pids.remove(&msg_id) {
-			kill_notification(pid, msg_id);
-		}
-	}
-
-	// Spawn notifications for new unread messages
-	for (msg_id, text) in &unread {
-		if !state.notified_pids.contains_key(msg_id) {
-			match spawn_notification("Telegram Alert", text) {
-				Ok(pid) => {
-					info!("Spawned notification for msg:{msg_id} (pid {pid})");
-					state.notified_pids.insert(*msg_id, pid);
-				}
-				Err(e) => {
-					warn!("Failed to spawn notification for msg:{msg_id}: {e}");
-				}
-			}
-		}
-	}
-
-	// Save updated state
-	state.save()?;
-
-	Ok(())
 }

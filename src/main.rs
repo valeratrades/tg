@@ -19,13 +19,8 @@ use crate::{
 	sync::PushResults,
 };
 
-mod alerts;
 pub mod config;
-mod mtproto;
 pub mod pull;
-mod server;
-mod shell_init;
-mod sync;
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
 pub struct Cli {
@@ -274,7 +269,11 @@ async fn main() -> Result<()> {
 
 	Ok(())
 }
-
+mod alerts;
+mod mtproto;
+mod server;
+mod shell_init;
+mod sync;
 #[derive(Clone, Debug, Subcommand)]
 enum Commands {
 	/// Send a message to a channel/topic

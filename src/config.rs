@@ -19,62 +19,6 @@ pub struct TopicsMetadata {
 	/// If a topic has a custom name, use it; otherwise fall back to topic_{id}
 	pub groups: std::collections::BTreeMap<u64, GroupMetadata>,
 }
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct GroupMetadata {
-	/// Custom name for the group (optional, falls back to group_id)
-	pub name: Option<String>,
-	/// Maps topic_id -> custom_name
-	pub topics: std::collections::BTreeMap<u64, String>,
-}
-#[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
-pub(crate) struct AppConfig {
-	#[settings(default = 8123)]
-	pub localhost_port: u16,
-	#[settings(default = 1000)]
-	pub max_messages_per_chat: usize,
-	/// How far back to pull TODOs from channel messages (default: 1 week)
-	pub pull_todos_over: Option<Timeframe>,
-	/// Named group destinations
-	#[primitives(skip)]
-	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
-	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
-	#[primitives(skip)]
-	pub alerts_channel: Option<TelegramDestination>,
-	/// Telegram API ID from https://my.telegram.org/
-	pub api_id: Option<i32>,
-	/// Telegram API hash (can be { env = "VAR_NAME" })
-	pub api_hash: Option<String>,
-	/// Phone number for Telegram auth (can be { env = "VAR_NAME" })
-	pub phone: Option<String>,
-	/// Telegram username for session file naming
-	pub username: Option<String>,
-}
-
-impl AppConfig {
-	pub fn pull_todos_over(&self) -> Timeframe {
-		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
-	}
-
-	/// Get unique group IDs from all group destinations
-	pub fn forum_group_ids(&self) -> Vec<u64> {
-		let mut group_ids = std::collections::HashSet::new();
-		if let Some(groups) = &self.groups {
-			for dest in groups.values() {
-				if let Some(id) = dest.group_id() {
-					group_ids.insert(id);
-				}
-			}
-		}
-		group_ids.into_iter().collect()
-	}
-
-	/// Resolve a group name to TelegramDestination
-	#[cfg(test)]
-	pub fn resolve_group(&self, name: &str) -> Option<&TelegramDestination> {
-		self.groups.as_ref()?.get(name)
-	}
-}
-
 impl TopicsMetadata {
 	pub fn file_path() -> std::path::PathBuf {
 		v_utils::xdg_state_file!("topics_metadata.json")
@@ -128,6 +72,62 @@ impl TopicsMetadata {
 	/// Ensure a topic is registered (creates entry with default name if not exists)
 	pub fn ensure_topic(&mut self, group_id: u64, topic_id: u64) {
 		self.groups.entry(group_id).or_default().topics.entry(topic_id).or_insert_with(|| format!("topic_{topic_id}"));
+	}
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GroupMetadata {
+	/// Custom name for the group (optional, falls back to group_id)
+	pub name: Option<String>,
+	/// Maps topic_id -> custom_name
+	pub topics: std::collections::BTreeMap<u64, String>,
+}
+#[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
+pub(crate) struct AppConfig {
+	#[settings(default = 8123)]
+	pub localhost_port: u16,
+	#[settings(default = 1000)]
+	pub max_messages_per_chat: usize,
+	/// How far back to pull TODOs from channel messages (default: 1 week)
+	pub pull_todos_over: Option<Timeframe>,
+	/// Named group destinations
+	#[primitives(skip)]
+	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
+	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
+	#[primitives(skip)]
+	pub alerts_channel: Option<TelegramDestination>,
+	/// Telegram API ID from https://my.telegram.org/
+	pub api_id: Option<i32>,
+	/// Telegram API hash (can be { env = "VAR_NAME" })
+	pub api_hash: Option<String>,
+	/// Phone number for Telegram auth (can be { env = "VAR_NAME" })
+	pub phone: Option<String>,
+	/// Telegram username for session file naming
+	pub username: Option<String>,
+}
+
+impl AppConfig {
+	pub fn pull_todos_over(&self) -> Timeframe {
+		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
+	}
+
+	/// Get unique group IDs from all group destinations
+	pub fn forum_group_ids(&self) -> Vec<u64> {
+		let mut group_ids = std::collections::HashSet::new();
+		if let Some(groups) = &self.groups {
+			for dest in groups.values() {
+				if let Some(id) = dest.group_id() {
+					group_ids.insert(id);
+				}
+			}
+		}
+		group_ids.into_iter().collect()
+	}
+
+	/// Resolve a group name to TelegramDestination
+	#[cfg(test)]
+	pub fn resolve_group(&self, name: &str) -> Option<&TelegramDestination> {
+		self.groups.as_ref()?.get(name)
 	}
 }
 

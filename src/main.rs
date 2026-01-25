@@ -1,7 +1,6 @@
 use std::{
 	io::Write as IoWrite,
 	process::{Command, Stdio},
-	str::FromStr as _,
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -131,7 +130,7 @@ async fn main() -> Result<()> {
 			let old_content = std::fs::read_to_string(&path).unwrap_or_default();
 
 			// Open with editor
-			open(&path)?;
+			open(&path).await?;
 
 			// Read file content after closing editor
 			let new_content = std::fs::read_to_string(&path).unwrap_or_default();
@@ -185,7 +184,7 @@ async fn main() -> Result<()> {
 				}
 
 				// Open with editor
-				open(&path)?;
+				open(&path).await?;
 
 				// Read the file after editing
 				let new_content = std::fs::read_to_string(&path).unwrap_or_default();

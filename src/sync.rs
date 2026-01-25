@@ -102,10 +102,11 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 
 	let mut stream = match TcpStream::connect(&addr).await {
 		Ok(s) => s,
-		Err(_) => {
+		Err(e) => {
 			eyre::bail!(
-				"Server not running. Start the server first with `tg server`, or the database will be locked.\n\
-				 Hint: The server holds the Telegram session file; CLI commands route through it to avoid conflicts."
+				"Cannot connect to server at {addr}: {e}\n\
+				 Either the server is not running, or it's running on a different port.\n\
+				 Start/restart it with `tg server`"
 			);
 		}
 	};

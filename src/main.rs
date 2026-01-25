@@ -1,6 +1,7 @@
 use std::{
 	io::Write as IoWrite,
 	process::{Command, Stdio},
+	str::FromStr as _,
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -53,7 +54,13 @@ async fn main() -> Result<()> {
 			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
 			// Connect to server (required)
-			let mut stream = TcpStream::connect(&addr).await.map_err(|_| eyre::eyre!("Server not running. Start it with `tg server`"))?;
+			let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
+				eyre::eyre!(
+					"Cannot connect to server at {addr}: {e}\n\
+					 Either the server is not running, or it's running on a different port.\n\
+					 Start/restart it with `tg server`"
+				)
+			})?;
 
 			// Server handles send + file write with message tag
 			let json = serde_json::to_string(&message)?;
@@ -248,7 +255,13 @@ async fn main() -> Result<()> {
 					let message = server::Message::new(group_id, topic_id, content);
 					let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
-					let mut stream = TcpStream::connect(&addr).await.map_err(|_| eyre!("Server not running. Start it with `tg server`"))?;
+					let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
+						eyre!(
+							"Cannot connect to server at {addr}: {e}\n\
+							 Either the server is not running, or it's running on a different port.\n\
+							 Start/restart it with `tg server`"
+						)
+					})?;
 
 					let json = serde_json::to_string(&message)?;
 					stream.write_all(json.as_bytes()).await?;

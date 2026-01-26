@@ -16,6 +16,7 @@ use v_utils::{io::file_open::open, trades::Timeframe};
 
 use crate::{
 	config::{LiveSettings, SettingsFlags, TopicsMetadata},
+	errors::{ConnectionError, JsonParseError, TopicNotFoundError, VersionMismatchError},
 	sync::PushResults,
 };
 
@@ -32,10 +33,35 @@ pub struct Cli {
 	token: Option<String>,
 }
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+	// Set up tracing but handle errors ourselves for better miette output
+	v_utils::utils::init_subscriber(
+		v_utils::utils::LogDestination::xdg(env!("CARGO_PKG_NAME"))
+			.stderr_errors(true)
+			.compiled_directives(option_env!("LOG_DIRECTIVES")),
+	);
+
+	if let Err(e) = run().await {
+		// Check if it's a miette Diagnostic and print fancy output
+		if let Some(diagnostic) = e.downcast_ref::<ConnectionError>() {
+			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else if let Some(diagnostic) = e.downcast_ref::<JsonParseError>() {
+			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else if let Some(diagnostic) = e.downcast_ref::<VersionMismatchError>() {
+			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else if let Some(diagnostic) = e.downcast_ref::<TopicNotFoundError>() {
+			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else {
+			// Fall back to standard eyre display
+			eprintln!("Error: {e:?}");
+		}
+		std::process::exit(1);
+	}
+}
+
+async fn run() -> Result<()> {
 	use std::{sync::Arc, time::Duration};
 
-	v_utils::clientside!();
 	let cli = Cli::parse();
 	let settings = Arc::new(LiveSettings::new(cli.settings, Duration::from_secs(5)).expect("Failed to read config file"));
 	config::init_data_dir();
@@ -53,13 +79,7 @@ async fn main() -> Result<()> {
 			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
 			// Connect to server (required)
-			let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
-				eyre::eyre!(
-					"Cannot connect to server at {addr}: {e}\n\
-					 Either the server is not running, or it's running on a different port.\n\
-					 Start/restart it with `tg server`"
-				)
-			})?;
+			let mut stream = TcpStream::connect(&addr).await.map_err(|e| ConnectionError::new(addr.clone(), e))?;
 
 			// Server handles send + file write with message tag
 			let json = serde_json::to_string(&message)?;
@@ -71,8 +91,9 @@ async fn main() -> Result<()> {
 			if n == 0 {
 				bail!("Server closed connection without response");
 			}
-			let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
-			sync::check_server_version(&response)?;
+			let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+			let response: server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| JsonParseError::from_serde(response_str.clone(), e))?;
+			check_server_version(&response)?;
 		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
@@ -254,13 +275,7 @@ async fn main() -> Result<()> {
 					let message = server::Message::new(group_id, topic_id, content);
 					let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
-					let mut stream = TcpStream::connect(&addr).await.map_err(|e| {
-						eyre!(
-							"Cannot connect to server at {addr}: {e}\n\
-							 Either the server is not running, or it's running on a different port.\n\
-							 Start/restart it with `tg server`"
-						)
-					})?;
+					let mut stream = TcpStream::connect(&addr).await.map_err(|e| ConnectionError::new(addr.clone(), e))?;
 
 					let json = serde_json::to_string(&message)?;
 					stream.write_all(json.as_bytes()).await?;
@@ -270,8 +285,9 @@ async fn main() -> Result<()> {
 					if n == 0 {
 						bail!("Server closed connection without response");
 					}
-					let response: server::ServerResponse = serde_json::from_slice(&buf[..n])?;
-					sync::check_server_version(&response)?;
+					let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+					let response: server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| JsonParseError::from_serde(response_str.clone(), e))?;
+					check_server_version(&response)?;
 
 					eprintln!("Message queued for sending");
 				}
@@ -282,6 +298,7 @@ async fn main() -> Result<()> {
 	Ok(())
 }
 mod alerts;
+mod errors;
 mod mtproto;
 mod server;
 mod shell_init;
@@ -427,7 +444,7 @@ fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 	}
 
 	match matches.len() {
-		0 => Err(eyre!("No topic found matching: {pattern}")),
+		0 => Err(TopicNotFoundError { pattern: pattern.to_string() })?,
 		1 => {
 			let (group_id, topic_id, _) = &matches[0];
 			Ok((*group_id, *topic_id))
@@ -816,6 +833,25 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 
 	Ok(todos_path)
 }
+/// Check server version and fail with miette error if mismatched
+fn check_server_version(response: &server::ServerResponse) -> Result<()> {
+	let client_version = env!("CARGO_PKG_VERSION");
+	match &response.version {
+		Some(server_version) if server_version != client_version => Err(VersionMismatchError {
+			server_version: server_version.clone(),
+			client_version: client_version.to_string(),
+		})?,
+		None => {
+			// Old server without version field - definitely outdated
+			Err(VersionMismatchError {
+				server_version: "unknown (no version info)".to_string(),
+				client_version: client_version.to_string(),
+			})?
+		}
+		Some(_) => Ok(()), // Versions match
+	}
+}
+
 /// Display push operation results to the user
 fn display_push_results(results: &PushResults) {
 	if results.deletions.is_empty() && results.edits.is_empty() && results.creates.is_empty() {

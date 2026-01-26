@@ -13,15 +13,6 @@ pub struct JsonParseError {
 	/// Store the error message since serde_json::Error doesn't implement Clone
 	pub cause_msg: String,
 }
-
-impl fmt::Display for JsonParseError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "Failed to parse JSON response: {}", self.cause_msg)
-	}
-}
-
-impl std::error::Error for JsonParseError {}
-
 impl JsonParseError {
 	pub fn from_serde(src: String, err: serde_json::Error) -> Self {
 		// serde_json provides line/column info
@@ -47,6 +38,14 @@ impl JsonParseError {
 		Self { src, span, cause_msg }
 	}
 }
+
+impl fmt::Display for JsonParseError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "Failed to parse JSON response: {}", self.cause_msg)
+	}
+}
+
+impl std::error::Error for JsonParseError {}
 
 /// Error for server connection failures
 #[derive(Clone, Debug, Diagnostic)]

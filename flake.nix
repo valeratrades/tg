@@ -131,6 +131,13 @@
               description = "Path to the file containing the phone number for MTProto.";
               example = "config.sops.secrets.telegram_phone.path";
             };
+
+            alertsChannel = mkOption {
+              type = nullOr path;
+              default = null;
+              description = "Path to the file containing the Telegram alerts channel ID.";
+              example = "config.sops.secrets.telegram_alerts_channel.path";
+            };
           };
 
           config = mkIf cfg.enable {
@@ -149,12 +156,14 @@
                 LoadCredential = [
                   "tg_token:${cfg.token}"
                 ] ++ lib.optional (cfg.apiHash != null) "tg_api_hash:${cfg.apiHash}"
-                ++ lib.optional (cfg.phone != null) "tg_phone:${cfg.phone}";
+                ++ lib.optional (cfg.phone != null) "tg_phone:${cfg.phone}"
+                ++ lib.optional (cfg.alertsChannel != null) "tg_alerts_channel:${cfg.alertsChannel}";
                 ExecStart =
                   let
                     envSetup = lib.concatStringsSep " " (
                       lib.optional (cfg.apiHash != null) ''TELEGRAM_API_HASH="$(cat %d/tg_api_hash)"''
                       ++ lib.optional (cfg.phone != null) ''PHONE_NUMBER_FR="$(cat %d/tg_phone)"''
+                      ++ lib.optional (cfg.alertsChannel != null) ''TELEGRAM_ALERTS_CHANNEL_ID="$(cat %d/tg_alerts_channel)"''
                     );
                   in
                   ''

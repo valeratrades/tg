@@ -102,7 +102,7 @@ impl ServerResponse {
 /// # Panics
 /// On unsuccessful io operations
 pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: Timeframe) -> Result<()> {
-	info!("Starting telegram server");
+	info!("Starting telegram server v{}", env!("CARGO_PKG_VERSION"));
 
 	// Clear alerts state from previous session
 	if let Err(e) = crate::alerts::AlertsState::clear() {

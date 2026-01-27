@@ -36,8 +36,12 @@ serde_json = "^1.0.149"
 tokio = { version = "^1.49.0", features = ["full"] }
 toml = "^0.9.11"
 tracing = "^0.1.44"
-v_utils = { version = "^2.15.22", features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
+v_utils = { version = "^2.15.23", features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
 xattr = "1.6.1"
+
+#[patch.crates-io]
+#v_utils = { path = "/home/v/s/v_utils/v_utils" }
+#v_utils_macros = { path = "/home/v/s/v_utils/v_utils_macros" }
 
 [dev-dependencies]
 insta = "1.46.1"

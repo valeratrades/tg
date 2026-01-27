@@ -6,9 +6,9 @@ use derive_more::derive::{Display, FromStr};
 pub struct ShellInitArgs {
 	shell: Shell,
 }
-pub fn output(args: ShellInitArgs) {
+pub fn output(args: ShellInitArgs, has_alerts_channel: bool) {
 	let shell = args.shell;
-	let s = format!("{}\n{}", shell.aliases(), shell.completions());
+	let s = format!("{}\n{}", shell.aliases(has_alerts_channel), shell.completions());
 	println!("{s}");
 }
 const EXE_NAME: &str = "tg";
@@ -21,24 +21,35 @@ enum Shell {
 }
 
 impl Shell {
-	fn aliases(&self) -> String {
+	fn aliases(&self, has_alerts_channel: bool) -> String {
+		let alerts_alias = if has_alerts_channel {
+			match self {
+				Shell::Dash | Shell::Bash | Shell::Zsh => format!("\nalias tga='{EXE_NAME} send-alert'"),
+				Shell::Fish => format!("\nalias tga '{EXE_NAME} send-alert'"),
+			}
+		} else {
+			String::new()
+		};
+
 		match self {
 			Shell::Dash | Shell::Bash | Shell::Zsh => {
 				format!(
-					r#"# tg aliases
+					r#"
+# tg aliases
 alias tgo='{EXE_NAME} open'
 alias tgs='{EXE_NAME} send'
 alias tgl='{EXE_NAME} list'
-alias tgt='{EXE_NAME} todos open'"#
+alias tgt='{EXE_NAME} todos open'{alerts_alias}"#
 				)
 			}
 			Shell::Fish => {
 				format!(
-					r#"# tg aliases
+					r#"
+# tg aliases
 alias tgo '{EXE_NAME} open'
 alias tgs '{EXE_NAME} send'
 alias tgl '{EXE_NAME} list'
-alias tgt '{EXE_NAME} todos open'"#
+alias tgt '{EXE_NAME} todos open'{alerts_alias}"#
 				)
 			}
 		}

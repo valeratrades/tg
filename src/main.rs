@@ -95,6 +95,26 @@ async fn run() -> Result<()> {
 			let response: server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| JsonParseError::from_serde(response_str.clone(), e))?;
 			check_server_version(&response)?;
 		}
+		Commands::SendAlert(args) => {
+			let cfg = settings.config()?;
+			let alerts_channel = cfg.alerts_channel.as_ref().ok_or_else(|| eyre!("alerts_channel not configured"))?;
+			let (group_id, topic_id) = alerts_channel.as_group_topic().ok_or_else(|| eyre!("alerts_channel must be a numeric group/topic ID"))?;
+
+			let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
+			let chat_id = -(group_id as i64) - 1000000000000;
+			let mut params = vec![("text", args.message.to_string()), ("chat_id", chat_id.to_string())];
+			if topic_id != 1 {
+				params.push(("message_thread_id", topic_id.to_string()));
+			}
+
+			let client = reqwest::Client::new();
+			let res = client.post(&url).form(&params).send().await?;
+			if !res.status().is_success() {
+				let status = res.status();
+				let body = res.text().await?;
+				bail!("Telegram API error {status}: {body}");
+			}
+		}
 		Commands::BotInfo => {
 			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
 			let client = reqwest::Client::new();
@@ -234,7 +254,8 @@ async fn run() -> Result<()> {
 			}
 		},
 		Commands::Init(args) => {
-			shell_init::output(args);
+			let has_alerts_channel = settings.config().map(|c| c.alerts_channel.is_some()).unwrap_or(false);
+			shell_init::output(args, has_alerts_channel);
 		}
 		Commands::ScheduleUpdate(args) => {
 			match args.action {
@@ -313,6 +334,9 @@ enum Commands {
 	/// echo "piped message" | tg send -c journal -
 	/// ```
 	Send(SendArgs),
+	/// Send a message directly to the configured alerts channel (no server needed)
+	#[command(name = "send-alert")]
+	SendAlert(SendAlertArgs),
 	/// Get information about the bot
 	BotInfo,
 	/// Start a telegram server, syncing messages from configured forum groups
@@ -352,6 +376,11 @@ struct SendArgs {
 	/// Direct topic ID (requires --group-id)
 	#[arg(short, long)]
 	topic_id: Option<u64>,
+	/// Message to send. Pass '-' to read from stdin.
+	message: MaybeStdin<String>,
+}
+#[derive(Args, Clone, Debug)]
+struct SendAlertArgs {
 	/// Message to send. Pass '-' to read from stdin.
 	message: MaybeStdin<String>,
 }

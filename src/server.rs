@@ -327,11 +327,16 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 }
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
+	format_message_append(message, last_write_datetime, now, msg_id, sender, false)
+}
+
+pub(crate) fn format_message_append(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>, forwarded: bool) -> String {
 	debug!("Formatting message append");
 
+	let fwd_prefix = if forwarded { "forwarded " } else { "" };
 	let id_suffix = match (msg_id, sender) {
-		(Some(id), Some(s)) => format!(" <!-- msg:{id} {s} -->"),
-		(Some(id), None) => format!(" <!-- msg:{id} -->"),
+		(Some(id), Some(s)) => format!(" <!-- {fwd_prefix}msg:{id} {s} -->"),
+		(Some(id), None) => format!(" <!-- {fwd_prefix}msg:{id} -->"),
 		_ => String::new(),
 	};
 

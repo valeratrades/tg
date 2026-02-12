@@ -9,7 +9,6 @@ use tracing::{debug, info, warn};
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
 	mtproto,
-	server::format_message_append_with_sender,
 };
 
 /// Fetch group info and discover topics for all configured groups.
@@ -165,7 +164,7 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 					info!("Fetched {} messages for topic {topic_name}", messages.len());
 
 					// Merge messages into file
-					merge_mtproto_messages_to_file(group_id, topic_id, &messages, &topics_metadata).await?;
+					merge_mtproto_messages_to_file(&client, &input_peer, group_id, topic_id, &messages, &topics_metadata).await?;
 				}
 
 				// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)
@@ -202,6 +201,8 @@ pub struct FetchedMessage {
 	pub photo: Option<tl::types::Photo>,
 	/// True if the message was sent by the authenticated user (not a bot)
 	pub is_outgoing: bool,
+	/// True if the message was forwarded from another chat
+	pub is_forwarded: bool,
 }
 /// Get the file path for a topic
 pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
@@ -240,7 +241,7 @@ fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
 fn extract_max_message_id_from_content(content: &str) -> i32 {
 	use regex::Regex;
 
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)").unwrap();
 	let mut max_id = 0;
 
 	for cap in msg_id_re.captures_iter(content) {
@@ -562,6 +563,7 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						text: m.message.clone(),
 						photo,
 						is_outgoing: m.out,
+						is_forwarded: m.fwd_from.is_some(),
 					});
 				}
 				tl::enums::Message::Service(_) => continue,
@@ -596,16 +598,20 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 
 	Ok(messages)
 }
-/// Check if message IDs in file content are strictly increasing
-/// Returns true if valid, false if reordering is needed
+/// Check if non-forwarded message IDs in file content are strictly increasing.
+/// Forwarded messages (`<!-- forwarded msg:... -->`) are excluded from the check.
 fn are_message_ids_increasing(content: &str) -> bool {
 	use regex::Regex;
 
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (forwarded )?msg:(\d+)").unwrap();
 	let mut prev_id: Option<i32> = None;
 
 	for cap in msg_id_re.captures_iter(content) {
-		if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+		// Skip forwarded messages
+		if cap.get(1).is_some() {
+			continue;
+		}
+		if let Some(id) = cap.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
 			if let Some(prev) = prev_id {
 				if id <= prev {
 					return false;
@@ -631,7 +637,7 @@ struct MessageBlock {
 fn reorder_messages_by_id(content: &str) -> String {
 	use regex::Regex;
 
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)").unwrap();
 	let date_header_re = Regex::new(r"^## [A-Za-z]{3} \d{1,2}(, \d{4})?$").unwrap();
 
 	// Parse content into sections: date headers and message blocks
@@ -803,8 +809,105 @@ fn reorder_messages_by_id(content: &str) -> String {
 	let result = result_lines.join("\n");
 	if !result.is_empty() { format!("{result}\n") } else { result }
 }
+/// Collect message IDs that break strict increasing order (skipping forwarded).
+/// Returns the IDs that are out of order (i.e. <= the previous non-forwarded ID).
+fn collect_non_increasing_ids(content: &str) -> Vec<i32> {
+	use regex::Regex;
+
+	let msg_id_re = Regex::new(r"<!-- (forwarded )?msg:(\d+)").unwrap();
+	let mut prev_id: Option<i32> = None;
+	let mut offending = Vec::new();
+
+	for cap in msg_id_re.captures_iter(content) {
+		if cap.get(1).is_some() {
+			continue; // already tagged as forwarded
+		}
+		if let Some(id) = cap.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
+			if let Some(prev) = prev_id {
+				if id <= prev {
+					offending.push(id);
+				}
+			}
+			prev_id = Some(id);
+		}
+	}
+
+	offending
+}
+/// Check which of the given message IDs are forwarded messages via the Telegram API.
+async fn check_forwarded_messages(client: &Client, input_peer: &tl::enums::InputPeer, ids: &[i32]) -> Vec<i32> {
+	let (channel_id, access_hash) = match input_peer {
+		tl::enums::InputPeer::Channel(c) => (c.channel_id, c.access_hash),
+		_ => return Vec::new(),
+	};
+
+	let request = tl::functions::channels::GetMessages {
+		channel: tl::enums::InputChannel::Channel(tl::types::InputChannel { channel_id, access_hash }),
+		id: ids.iter().map(|&id| tl::enums::InputMessage::Id(tl::types::InputMessageId { id })).collect(),
+	};
+
+	let result = match client.invoke(&request).await {
+		Ok(r) => r,
+		Err(e) => {
+			warn!("Failed to fetch messages for forwarded check: {e}");
+			return Vec::new();
+		}
+	};
+
+	let messages = match &result {
+		tl::enums::messages::Messages::Messages(m) => &m.messages,
+		tl::enums::messages::Messages::Slice(m) => &m.messages,
+		tl::enums::messages::Messages::ChannelMessages(m) => &m.messages,
+		tl::enums::messages::Messages::NotModified(_) => return Vec::new(),
+	};
+
+	let mut forwarded = Vec::new();
+	for msg in messages {
+		if let tl::enums::Message::Message(m) = msg {
+			if m.fwd_from.is_some() {
+				forwarded.push(m.id);
+			}
+		}
+	}
+
+	forwarded
+}
+/// Rewrite `<!-- msg:ID ... -->` to `<!-- forwarded msg:ID ... -->` for the given IDs.
+fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
+	use std::collections::HashSet;
+
+	use regex::Regex;
+
+	let ids: HashSet<i32> = forwarded_ids.iter().copied().collect();
+	let msg_tag_re = Regex::new(r"<!-- msg:(\d+)").unwrap();
+
+	let mut result = String::with_capacity(content.len());
+	let mut last_end = 0;
+
+	for mat in msg_tag_re.find_iter(content) {
+		let caps = msg_tag_re.captures(&content[mat.start()..]).unwrap();
+		if let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
+			if ids.contains(&id) {
+				result.push_str(&content[last_end..mat.start()]);
+				result.push_str("<!-- forwarded msg:");
+				result.push_str(&id.to_string());
+				last_end = mat.start() + mat.len();
+			}
+		}
+	}
+	result.push_str(&content[last_end..]);
+
+	result
+}
 /// Merge MTProto messages into a topic file
-async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: &[FetchedMessage], metadata: &TopicsMetadata) -> Result<()> {
+async fn merge_mtproto_messages_to_file(
+	client: &Client,
+	input_peer: &tl::enums::InputPeer,
+	group_id: u64,
+	topic_id: u64,
+	messages: &[FetchedMessage],
+	metadata: &TopicsMetadata,
+) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
 	debug!("Merging {} messages to {}", messages.len(), chat_filepath.display());
@@ -815,13 +918,25 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 	if !are_message_ids_increasing(&file_contents) {
 		let reordered = reorder_messages_by_id(&file_contents);
 		if reordered != file_contents {
-			info!("Reordered messages in {}", chat_filepath.display());
+			warn!("Message IDs not strictly increasing in {}, reordered", chat_filepath.display());
 			file_contents = reordered;
 			std::fs::write(&chat_filepath, &file_contents)?;
 		}
-		// If still not increasing after reorder, this is expected (cross-section ID inversions from forwarded messages etc.)
+		// If still not increasing, some messages may be forwarded — check via API
 		if !are_message_ids_increasing(&file_contents) {
-			debug!("Message IDs not strictly increasing in {} (cross-section), skipping", chat_filepath.display());
+			let offending_ids = collect_non_increasing_ids(&file_contents);
+			if !offending_ids.is_empty() {
+				let forwarded_ids = check_forwarded_messages(client, input_peer, &offending_ids).await;
+				if !forwarded_ids.is_empty() {
+					file_contents = tag_forwarded_in_content(&file_contents, &forwarded_ids);
+					std::fs::write(&chat_filepath, &file_contents)?;
+					info!("Tagged {} forwarded messages in {}", forwarded_ids.len(), chat_filepath.display());
+				}
+				let still_broken: Vec<_> = offending_ids.iter().filter(|id| !forwarded_ids.contains(id)).collect();
+				if !still_broken.is_empty() {
+					warn!("Message IDs not strictly increasing in {} and not forwarded: {:?}", chat_filepath.display(), still_broken);
+				}
+			}
 		}
 	}
 
@@ -853,11 +968,11 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 		// Handle photo messages (just note them for now, TODO: implement download)
 		if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
-			let formatted = format_message_append_with_sender(&content, last_write, msg_time, Some(msg.id), Some(sender));
+			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		} else if !msg.text.is_empty() {
-			let formatted = format_message_append_with_sender(&msg.text, last_write, msg_time, Some(msg.id), Some(sender));
+			let formatted = crate::server::format_message_append(&msg.text, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		}
@@ -876,8 +991,8 @@ fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
 	use regex::Regex;
 
 	let content = std::fs::read_to_string(file_path)?;
-	// Match both old format <!-- msg:123 --> and new format <!-- msg:123 sender -->
-	let msg_id_re = Regex::new(r"<!-- msg:\d+").unwrap();
+	// Match all tag formats: <!-- msg:123 -->, <!-- msg:123 sender -->, <!-- forwarded msg:123 sender -->
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:\d+").unwrap();
 	// Match both old format (## Jan 03) and new format (## Jan 03, 2025)
 	let date_header_re = Regex::new(r"^## [A-Za-z]{3} \d{1,2}(, \d{4})?$").unwrap();
 
@@ -1299,5 +1414,70 @@ next message <!-- msg:124 bot -->
 		// Test with sender info
 		let content = "msg <!-- msg:300 user -->\nmsg <!-- msg:250 bot -->";
 		assert_eq!(extract_max_message_id_from_content(content), 300);
+
+		// Test with forwarded messages
+		let content = "msg <!-- forwarded msg:500 user -->\nmsg <!-- msg:200 bot -->";
+		assert_eq!(extract_max_message_id_from_content(content), 500);
+	}
+
+	#[test]
+	fn test_forwarded_messages_skipped_in_ordering_check() {
+		// Forwarded message with lower ID should not break ordering
+		let content = "msg <!-- msg:100 user -->\nmsg <!-- forwarded msg:50 user -->\nmsg <!-- msg:200 bot -->";
+		assert!(are_message_ids_increasing(content));
+
+		// Non-forwarded out of order should still fail
+		let content = "msg <!-- msg:200 user -->\nmsg <!-- msg:100 bot -->";
+		assert!(!are_message_ids_increasing(content));
+
+		// Only forwarded messages — always valid
+		let content = "msg <!-- forwarded msg:300 user -->\nmsg <!-- forwarded msg:100 bot -->";
+		assert!(are_message_ids_increasing(content));
+	}
+
+	#[test]
+	fn test_tag_forwarded_in_content() {
+		let content = "## Dec 25, 2024\nmsg A <!-- msg:100 user -->\nmsg B <!-- msg:200 bot -->\nmsg C <!-- msg:300 user -->\n";
+		let result = tag_forwarded_in_content(content, &[200]);
+		assert!(result.contains("<!-- forwarded msg:200 bot -->"));
+		assert!(result.contains("<!-- msg:100 user -->"));
+		assert!(result.contains("<!-- msg:300 user -->"));
+	}
+
+	#[test]
+	fn test_collect_non_increasing_ids() {
+		// Simple case: 200 then 100
+		let content = "msg <!-- msg:200 user -->\nmsg <!-- msg:100 bot -->";
+		assert_eq!(collect_non_increasing_ids(content), vec![100]);
+
+		// Forwarded messages should be skipped
+		let content = "msg <!-- msg:200 user -->\nmsg <!-- forwarded msg:50 user -->\nmsg <!-- msg:300 bot -->";
+		assert!(collect_non_increasing_ids(content).is_empty());
+
+		// Mixed: forwarded skipped, but non-forwarded out of order caught
+		let content = "msg <!-- msg:200 user -->\nmsg <!-- forwarded msg:50 user -->\nmsg <!-- msg:100 bot -->";
+		assert_eq!(collect_non_increasing_ids(content), vec![100]);
+	}
+
+	#[test]
+	fn test_cleanup_preserves_forwarded_tags() {
+		use std::io::Write as _;
+
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_cleanup_forwarded.md");
+
+		let content = "## Dec 25\nmsg A <!-- msg:100 user -->\nmsg B <!-- forwarded msg:50 bot -->\ntagless line\nmsg C <!-- msg:200 user -->\n";
+		let mut file = std::fs::File::create(&test_file).unwrap();
+		file.write_all(content.as_bytes()).unwrap();
+
+		cleanup_tagless_messages(&test_file).unwrap();
+
+		let result = std::fs::read_to_string(&test_file).unwrap();
+		assert!(result.contains("<!-- msg:100 user -->"));
+		assert!(result.contains("<!-- forwarded msg:50 bot -->"));
+		assert!(result.contains("<!-- msg:200 user -->"));
+		assert!(!result.contains("tagless line"));
+
+		std::fs::remove_file(&test_file).ok();
 	}
 }

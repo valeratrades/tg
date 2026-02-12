@@ -696,7 +696,7 @@ fn build_message_date_map(content: &str, current_year: i16, today: Date) -> std:
 	use std::collections::HashMap;
 
 	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();
-	let msg_id_re = regex::Regex::new(r"<!-- msg:(\d+)").unwrap();
+	let msg_id_re = regex::Regex::new(r"<!-- (?:forwarded )?msg:(\d+)").unwrap();
 
 	let mut msg_dates = HashMap::new();
 	let mut current_date: Option<Date> = None;

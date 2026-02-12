@@ -339,8 +339,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	}
 
 	let metadata = TopicsMetadata::load();
-	// Match both old format `<!-- msg:ID -->` and new format `<!-- msg:ID sender -->`
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: \w+)? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
 
 	for (group_id, items) in &successful_deletions {
 		// Group by topic_id
@@ -475,8 +474,7 @@ pub struct ParsedMessage {
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let mut messages = BTreeMap::new();
-	// Match both old format `<!-- msg:ID -->` and new format `<!-- msg:ID sender -->`
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: (\w+))? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: (\w+))? -->").unwrap();
 
 	let lines: Vec<&str> = content.lines().collect();
 	let mut i = 0;
@@ -558,7 +556,7 @@ pub struct FileContentInfo {
 }
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
-	let msg_id_re = Regex::new(r"<!-- msg:(\d+)(?: (\w+))? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: (\w+))? -->").unwrap();
 
 	let mut info = FileContentInfo {
 		last_tagged_line: None,

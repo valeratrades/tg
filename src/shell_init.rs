@@ -2,6 +2,7 @@ use clap::{Args, CommandFactory};
 use clap_complete::Shell as ClapShell;
 use derive_more::derive::{Display, FromStr};
 
+const EXE_NAME: &str = "tg";
 #[derive(Args, Clone, Debug)]
 pub struct ShellInitArgs {
 	shell: Shell,
@@ -11,7 +12,6 @@ pub fn output(args: ShellInitArgs, has_alerts_channel: bool) {
 	let s = format!("{}\n{}", shell.aliases(has_alerts_channel), shell.completions());
 	println!("{s}");
 }
-const EXE_NAME: &str = "tg";
 #[derive(Clone, Copy, Debug, Display, FromStr)]
 enum Shell {
 	Dash,

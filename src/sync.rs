@@ -497,25 +497,24 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 				if next_trimmed.chars().all(|c| c == '`') && next_trimmed.len() >= 5 {
 					// New format: tag on next line
 					i += 1;
-					if i < lines.len() {
-						if let Some(caps) = msg_id_re.captures(lines[i]) {
-							if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-								let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
-								let msg_content = block_content.join("\n");
-								messages.insert(id, ParsedMessage { content: msg_content, sender });
-							}
-						}
+					if i < lines.len()
+						&& let Some(caps) = msg_id_re.captures(lines[i])
+						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
+					{
+						let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
+						let msg_content = block_content.join("\n");
+						messages.insert(id, ParsedMessage { content: msg_content, sender });
 					}
 					i += 1;
 					break;
 				} else if next_trimmed.contains("`````") {
 					// Legacy format: closing fence has tag on same line
-					if let Some(caps) = msg_id_re.captures(next_line) {
-						if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-							let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
-							let msg_content = block_content.join("\n");
-							messages.insert(id, ParsedMessage { content: msg_content, sender });
-						}
+					if let Some(caps) = msg_id_re.captures(next_line)
+						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
+					{
+						let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
+						let msg_content = block_content.join("\n");
+						messages.insert(id, ParsedMessage { content: msg_content, sender });
 					}
 					i += 1;
 					break;

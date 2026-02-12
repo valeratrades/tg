@@ -199,12 +199,13 @@ async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Opti
 		};
 
 		for msg in messages {
-			if let tl::enums::Message::Message(m) = msg {
-				if m.id > read_inbox_max_id && !m.out {
-					// Unread incoming message
-					let text = if m.message.len() > 100 { format!("{}...", &m.message[..100]) } else { m.message.clone() };
-					unread_messages.push((m.id, text));
-				}
+			if let tl::enums::Message::Message(m) = msg
+				&& m.id > read_inbox_max_id
+				&& !m.out
+			{
+				// Unread incoming message
+				let text = if m.message.len() > 100 { format!("{}...", &m.message[..100]) } else { m.message.clone() };
+				unread_messages.push((m.id, text));
 			}
 		}
 	} else {
@@ -229,11 +230,12 @@ async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Opti
 		};
 
 		for msg in messages {
-			if let tl::enums::Message::Message(m) = msg {
-				if m.id > read_inbox_max_id && !m.out {
-					let text = if m.message.len() > 100 { format!("{}...", &m.message[..100]) } else { m.message.clone() };
-					unread_messages.push((m.id, text));
-				}
+			if let tl::enums::Message::Message(m) = msg
+				&& m.id > read_inbox_max_id
+				&& !m.out
+			{
+				let text = if m.message.len() > 100 { format!("{}...", &m.message[..100]) } else { m.message.clone() };
+				unread_messages.push((m.id, text));
 			}
 		}
 	}

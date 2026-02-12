@@ -148,7 +148,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 			Err(e) => warn!("Pull failed: {e}"),
 		}
 
-		(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+		(TaskResult::Pull(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 	}));
 
 	//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
@@ -164,16 +164,16 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 				let bg_send_handle_clone = bg_send_handle.clone();
 				futures.push(Box::pin(async move {
 					handle_connection(socket, &settings_clone, &token_clone, &push_handle_clone, &bg_send_handle_clone).await;
-					(TaskResult::ConnectionDone, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+					(TaskResult::Connection, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 				}));
 			}
 			task_result = futures.next() => {
 				match task_result {
 					Some((result, settings_ret, token_ret, push_handle_ret, bg_send_handle_ret)) => match result {
-						TaskResult::ConnectionDone => {
+						TaskResult::Connection => {
 							debug!("Connection task completed");
 						}
-						TaskResult::PullDone(mut interval) => {
+						TaskResult::Pull(mut interval) => {
 							debug!("Pull task completed, re-queuing");
 							let settings_clone = settings_ret;
 							let token_clone = token_ret;
@@ -187,10 +187,10 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 									Err(e) => warn!("Pull failed: {e}"),
 								}
 
-								(TaskResult::PullDone(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+								(TaskResult::Pull(interval), settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 							}));
 						}
-						TaskResult::BackgroundSendDone => {
+						TaskResult::BackgroundSend => {
 							debug!("Background send task completed");
 						}
 					}
@@ -244,10 +244,10 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 							Some("bot"),
 						);
 
-						if let Some(parent) = bg_send_task.chat_filepath.parent() {
-							if let Err(e) = std::fs::create_dir_all(parent) {
-								error!("Failed to create directory '{}': {e}", parent.display());
-							}
+						if let Some(parent) = bg_send_task.chat_filepath.parent()
+							&& let Err(e) = std::fs::create_dir_all(parent)
+						{
+							error!("Failed to create directory '{}': {e}", parent.display());
 						}
 
 						match write_message_to_file(&bg_send_task.chat_filepath, &formatted) {
@@ -257,7 +257,7 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 					}
 
 					info!("Background send completed");
-					(TaskResult::BackgroundSendDone, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
+					(TaskResult::BackgroundSend, settings_clone, token_clone, push_handle_clone, bg_send_handle_clone)
 				}));
 			}
 		}
@@ -401,11 +401,11 @@ struct BackgroundSendHandle {
 /// Result from completing a task
 enum TaskResult {
 	/// Connection finished (closed or error)
-	ConnectionDone,
+	Connection,
 	/// Pull tick completed, return the interval to re-queue
-	PullDone(Interval),
+	Pull(Interval),
 	/// Background send completed (success or gave up after retries)
-	BackgroundSendDone,
+	BackgroundSend,
 }
 async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, bot_token: &str, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle) {
 	// Use a larger buffer for push requests which can contain many updates

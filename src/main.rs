@@ -739,12 +739,11 @@ fn build_message_date_map(content: &str, current_year: i16, today: Date) -> std:
 		}
 
 		// Check for message ID and associate with current date
-		if let Some(current) = current_date {
-			if let Some(caps) = msg_id_re.captures(line) {
-				if let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-					msg_dates.insert(id, current);
-				}
-			}
+		if let Some(current) = current_date
+			&& let Some(caps) = msg_id_re.captures(line)
+			&& let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+		{
+			msg_dates.insert(id, current);
 		}
 	}
 

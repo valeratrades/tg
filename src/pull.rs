@@ -138,10 +138,10 @@ pub async fn pull(config: &LiveSettings, _bot_token: &str) -> Result<()> {
 				let file_path = topic_filepath(group_id, topic_id, &topics_metadata);
 
 				// Always backfill date header years if needed (runs even without new messages)
-				if file_path.exists() {
-					if let Err(e) = backfill_file_date_headers(&file_path) {
-						warn!("Failed to backfill date headers in {}: {e}", file_path.display());
-					}
+				if file_path.exists()
+					&& let Err(e) = backfill_file_date_headers(&file_path)
+				{
+					warn!("Failed to backfill date headers in {}: {e}", file_path.display());
 				}
 
 				// Extract last message ID directly from the file content
@@ -427,10 +427,10 @@ fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 			let day: i8 = caps.get(2).and_then(|m| m.as_str().parse().ok()).unwrap_or(1);
 			let year: i16 = caps.get(3).and_then(|m| m.as_str().parse().ok()).unwrap_or(0);
 
-			if let Some(month) = parse_month(month_str) {
-				if let Ok(date) = jiff::civil::Date::new(year, month, day) {
-					last_date = Some(date);
-				}
+			if let Some(month) = parse_month(month_str)
+				&& let Ok(date) = jiff::civil::Date::new(year, month, day)
+			{
+				last_date = Some(date);
 			}
 		}
 	}
@@ -612,10 +612,10 @@ fn are_message_ids_increasing(content: &str) -> bool {
 			continue;
 		}
 		if let Some(id) = cap.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
-			if let Some(prev) = prev_id {
-				if id <= prev {
-					return false;
-				}
+			if let Some(prev) = prev_id
+				&& id <= prev
+			{
+				return false;
 			}
 			prev_id = Some(id);
 		}
@@ -671,12 +671,12 @@ fn reorder_messages_by_id(content: &str) -> String {
 		}
 
 		// Check if this is a message with ID tag on this line
-		if let Some(cap) = msg_id_re.captures(line) {
-			if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-				sections.push(Section::Message(MessageBlock { id, lines: vec![line.to_string()] }));
-				i += 1;
-				continue;
-			}
+		if let Some(cap) = msg_id_re.captures(line)
+			&& let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+		{
+			sections.push(Section::Message(MessageBlock { id, lines: vec![line.to_string()] }));
+			i += 1;
+			continue;
 		}
 
 		// Check for code block start (5+ backticks) - multiline message
@@ -696,21 +696,21 @@ fn reorder_messages_by_id(content: &str) -> String {
 					i += 1;
 					if i < lines.len() {
 						let tag_line = lines[i];
-						if let Some(cap) = msg_id_re.captures(tag_line) {
-							if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-								block_lines.push(tag_line.to_string());
-								sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
-								i += 1;
-							}
+						if let Some(cap) = msg_id_re.captures(tag_line)
+							&& let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+						{
+							block_lines.push(tag_line.to_string());
+							sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
+							i += 1;
 						}
 					}
 					break;
 				} else if next_line.contains("`````") {
 					// Legacy format: closing fence has the tag on the same line
-					if let Some(cap) = msg_id_re.captures(next_line) {
-						if let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-							sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
-						}
+					if let Some(cap) = msg_id_re.captures(next_line)
+						&& let Some(id) = cap.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+					{
+						sections.push(Section::Message(MessageBlock { id, lines: block_lines }));
 					}
 					i += 1;
 					break;
@@ -823,10 +823,10 @@ fn collect_non_increasing_ids(content: &str) -> Vec<i32> {
 			continue; // already tagged as forwarded
 		}
 		if let Some(id) = cap.get(2).and_then(|m| m.as_str().parse::<i32>().ok()) {
-			if let Some(prev) = prev_id {
-				if id <= prev {
-					offending.push(id);
-				}
+			if let Some(prev) = prev_id
+				&& id <= prev
+			{
+				offending.push(id);
 			}
 			prev_id = Some(id);
 		}
@@ -863,10 +863,10 @@ async fn check_forwarded_messages(client: &Client, input_peer: &tl::enums::Input
 
 	let mut forwarded = Vec::new();
 	for msg in messages {
-		if let tl::enums::Message::Message(m) = msg {
-			if m.fwd_from.is_some() {
-				forwarded.push(m.id);
-			}
+		if let tl::enums::Message::Message(m) = msg
+			&& m.fwd_from.is_some()
+		{
+			forwarded.push(m.id);
 		}
 	}
 
@@ -886,13 +886,13 @@ fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
 
 	for mat in msg_tag_re.find_iter(content) {
 		let caps = msg_tag_re.captures(&content[mat.start()..]).unwrap();
-		if let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok()) {
-			if ids.contains(&id) {
-				result.push_str(&content[last_end..mat.start()]);
-				result.push_str("<!-- forwarded msg:");
-				result.push_str(&id.to_string());
-				last_end = mat.start() + mat.len();
-			}
+		if let Some(id) = caps.get(1).and_then(|m| m.as_str().parse::<i32>().ok())
+			&& ids.contains(&id)
+		{
+			result.push_str(&content[last_end..mat.start()]);
+			result.push_str("<!-- forwarded msg:");
+			result.push_str(&id.to_string());
+			last_end = mat.start() + mat.len();
 		}
 	}
 	result.push_str(&content[last_end..]);

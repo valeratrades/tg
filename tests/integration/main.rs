@@ -9,6 +9,5 @@ mod tests {
 	fn test_placeholder() {
 		// Placeholder test - actual integration tests require a running server
 		// and configured Telegram bot
-		assert!(true);
 	}
 }

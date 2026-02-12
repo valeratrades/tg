@@ -169,7 +169,8 @@
                   ''
                     /bin/sh -c '${envSetup} ${cfg.package}/bin/${pname} --token "$(cat %d/tg_token)" server'
                   '';
-                Restart = "on-failure";
+                Restart = "always";
+                RestartSec = 5;
               };
             };
 

@@ -813,11 +813,16 @@ async fn merge_mtproto_messages_to_file(group_id: u64, topic_id: u64, messages: 
 
 	// Check if message IDs are strictly increasing; if not, reorder them
 	if !are_message_ids_increasing(&file_contents) {
-		warn!("Message IDs not strictly increasing in {}, reordering...", chat_filepath.display());
-		file_contents = reorder_messages_by_id(&file_contents);
-		// Write the reordered content back
-		std::fs::write(&chat_filepath, &file_contents)?;
-		info!("Reordered messages in {}", chat_filepath.display());
+		let reordered = reorder_messages_by_id(&file_contents);
+		if reordered != file_contents {
+			info!("Reordered messages in {}", chat_filepath.display());
+			file_contents = reordered;
+			std::fs::write(&chat_filepath, &file_contents)?;
+		}
+		// If still not increasing after reorder, this is expected (cross-section ID inversions from forwarded messages etc.)
+		if !are_message_ids_increasing(&file_contents) {
+			debug!("Message IDs not strictly increasing in {} (cross-section), skipping", chat_filepath.display());
+		}
 	}
 
 	// Backfill years for old date headers that don't have them

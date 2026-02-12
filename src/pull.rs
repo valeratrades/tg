@@ -934,7 +934,7 @@ async fn merge_mtproto_messages_to_file(
 				}
 				let still_broken: Vec<_> = offending_ids.iter().filter(|id| !forwarded_ids.contains(id)).collect();
 				if !still_broken.is_empty() {
-					warn!("Message IDs not strictly increasing in {} and not forwarded: {:?}", chat_filepath.display(), still_broken);
+					warn!("Message IDs not strictly increasing in {} and not forwarded: {still_broken:?}", chat_filepath.display());
 				}
 			}
 		}

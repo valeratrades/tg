@@ -75,10 +75,6 @@ async fn run() -> Result<()> {
 	let cli = Cli::parse();
 	let settings = Arc::new(LiveSettings::new(cli.settings, Duration::from_secs(5)).expect("Failed to read config file"));
 	config::init_data_dir();
-	let bot_token = match cli.token {
-		Some(t) => t,
-		None => std::env::var("TELEGRAM_MAIN_BOT_TOKEN").expect("TELEGRAM_MAIN_BOT_TOKEN not set"),
-	};
 
 	match cli.command {
 		Commands::Send(args) => {
@@ -106,6 +102,10 @@ async fn run() -> Result<()> {
 			check_server_version(&response)?;
 		}
 		Commands::SendAlert(args) => {
+			let bot_token = cli
+				.token
+				.or_else(|| std::env::var("TELEGRAM_MAIN_BOT_TOKEN").ok())
+				.ok_or_else(|| eyre!("TELEGRAM_MAIN_BOT_TOKEN not set (required for send-alert)"))?;
 			let cfg = settings.config()?;
 			let alerts_channel = cfg.alerts_channel.as_ref().ok_or_else(|| eyre!("alerts_channel not configured"))?;
 			let (group_id, topic_id) = alerts_channel.as_group_topic().ok_or_else(|| eyre!("alerts_channel must be a numeric group/topic ID"))?;
@@ -125,17 +125,8 @@ async fn run() -> Result<()> {
 				Err(errors::TelegramApiError::from_status(status, body))?;
 			}
 		}
-		Commands::BotInfo => {
-			let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
-			let client = reqwest::Client::new();
-			let res: reqwest::Response = client.get(&url).send().await?;
-
-			let parsed_json: serde_json::Value = serde_json::from_str(&res.text().await?).expect("Failed to parse JSON");
-			let pretty_json = serde_json::to_string_pretty(&parsed_json).expect("Failed to pretty print JSON");
-			println!("{pretty_json}");
-		}
 		Commands::Server(args) => {
-			server::run(Arc::clone(&settings), bot_token, args.pull_interval).await?;
+			server::run(Arc::clone(&settings), args.pull_interval).await?;
 		}
 		Commands::Pull(args) => {
 			if args.reset {
@@ -172,7 +163,8 @@ async fn run() -> Result<()> {
 
 				eprintln!("Re-pulling all messages...");
 			}
-			pull::pull(&settings, &bot_token).await?;
+			let settings_for_pull = Arc::clone(&settings);
+			crate::mtproto::with_client(&settings, |client| async move { pull::pull(&settings_for_pull, &client).await }).await?;
 		}
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;
@@ -281,19 +273,11 @@ async fn run() -> Result<()> {
 					message_id,
 					new_content,
 				} => {
-					// Look up sender from the topic file
-					let metadata = TopicsMetadata::load();
-					let chat_filepath = pull::topic_filepath(group_id, topic_id, &metadata);
-					let file_content = std::fs::read_to_string(&chat_filepath).unwrap_or_default();
-					let messages = sync::parse_file_messages(&file_content);
-					let sender = messages.get(&message_id).map(|m| m.sender).unwrap_or(sync::MessageSender::Bot);
-
 					let update = sync::MessageUpdate::Edit {
 						group_id,
 						topic_id,
 						message_id,
 						new_content,
-						sender,
 					};
 					eprintln!("Scheduling edit: msg:{message_id} (group:{group_id}/topic:{topic_id})");
 					let results = sync::push_via_server(vec![update], &settings).await?;
@@ -347,8 +331,6 @@ enum Commands {
 	/// Send a message directly to the configured alerts channel (no server needed)
 	#[command(name = "send-alert")]
 	SendAlert(SendAlertArgs),
-	/// Get information about the bot
-	BotInfo,
 	/// Start a telegram server, syncing messages from configured forum groups
 	Server(ServerArgs),
 	/// Open a topic file with $EDITOR. Uses fzf for pattern matching.

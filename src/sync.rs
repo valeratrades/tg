@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, io::Write as _, path::Path};
 
 use eyre::Result;
+use grammers_client::Client;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -11,40 +12,12 @@ use crate::{
 	pull::topic_filepath,
 };
 
-/// Who sent a message (affects which API can edit it)
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub enum MessageSender {
-	#[default]
-	Bot,
-	User,
-}
-
-impl MessageSender {
-	pub fn from_tag(s: &str) -> Self {
-		if s == "user" { MessageSender::User } else { MessageSender::Bot }
-	}
-}
-
 /// A message update to push to Telegram
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum MessageUpdate {
-	Delete {
-		group_id: u64,
-		topic_id: u64,
-		message_id: i32,
-	},
-	Edit {
-		group_id: u64,
-		topic_id: u64,
-		message_id: i32,
-		new_content: String,
-		sender: MessageSender,
-	},
-	Create {
-		group_id: u64,
-		topic_id: u64,
-		content: String,
-	},
+	Delete { group_id: u64, topic_id: u64, message_id: i32 },
+	Edit { group_id: u64, topic_id: u64, message_id: i32, new_content: String },
+	Create { group_id: u64, topic_id: u64, content: String },
 }
 /// Result of a single operation
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,13 +108,13 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 	}
 }
 /// Push updates to Telegram and sync local files
-/// - Deletes/edits messages on Telegram via MTProto (user messages) or Bot API (bot messages)
-/// - Creates new messages via Bot API
+/// - Deletes/edits messages on Telegram via MTProto
+/// - Creates new messages via MTProto
 /// - Removes deleted message lines from local topic files
 ///
-/// NOTE: This function opens the MTProto session directly. If the server is running,
-/// use `push_via_server` instead to avoid database locking issues.
-pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token: &str) -> Result<PushResults> {
+/// NOTE: When called from the server, the client is already connected.
+/// When called directly (CLI), use `push_via_server` instead to avoid database locking issues.
+pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &Client) -> Result<PushResults> {
 	let mut results = PushResults::default();
 
 	if updates.is_empty() {
@@ -172,7 +145,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 
 	// Group deletions by group_id for batch delete
 	let mut deletions_by_group: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new(); // group_id -> [(topic_id, msg_id)]
-	let mut edits: Vec<(u64, u64, i32, String, MessageSender)> = Vec::new(); // (group_id, topic_id, msg_id, new_content, sender)
+	let mut edits: Vec<(u64, u64, i32, String)> = Vec::new(); // (group_id, topic_id, msg_id, new_content)
 	let mut creates: Vec<(u64, u64, String)> = Vec::new(); // (group_id, topic_id, content)
 
 	for update in &updates {
@@ -185,9 +158,8 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 				topic_id,
 				message_id,
 				new_content,
-				sender,
 			} => {
-				edits.push((*group_id, *topic_id, *message_id, new_content.clone(), *sender));
+				edits.push((*group_id, *topic_id, *message_id, new_content.clone()));
 			}
 			MessageUpdate::Create { group_id, topic_id, content } => {
 				creates.push((*group_id, *topic_id, content.clone()));
@@ -195,117 +167,89 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 		}
 	}
 
-	// Process MTProto operations (deletions and edits) using structured concurrency
-	let needs_mtproto = delete_count > 0 || edit_count > 0;
-
 	// Apply deletions (batch per group), track successful deletions
-	let successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = if needs_mtproto {
-		let bot_token = bot_token.to_string();
-		let (mtproto_results, successful) = mtproto::with_client(config, |client| async move {
-			let mut deletion_results: Vec<(u64, i32, OpResult)> = Vec::new();
-			let mut edit_results: Vec<(u64, i32, OpResult)> = Vec::new();
-			let mut successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new();
+	let mut successful_deletions: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new();
 
-			// Apply deletions (batch per group)
-			for (group_id, items) in &deletions_by_group {
-				let msg_ids: Vec<i32> = items.iter().map(|(_, id)| *id).collect();
-				match mtproto::delete_messages(&client, *group_id, &msg_ids).await {
-					Ok(count) => {
-						info!(group_id, count, "Deleted messages from Telegram");
-						if count > 0 {
-							successful_deletions.insert(*group_id, items.clone());
-							for (_, msg_id) in items {
-								deletion_results.push((
-									*group_id,
-									*msg_id,
-									OpResult {
-										success: true,
-										message: format!("Deleted (pts_count={count})"),
-									},
-								));
-							}
-						} else {
-							warn!(group_id, "Telegram reported 0 deletions, keeping local files intact");
-							for (_, msg_id) in items {
-								deletion_results.push((
-									*group_id,
-									*msg_id,
-									OpResult {
-										success: false,
-										message: "Telegram returned 0 deletions".to_string(),
-									},
-								));
-							}
-						}
-					}
-					Err(e) => {
-						warn!(group_id, error = %e, "Failed to delete messages");
-						for (_, msg_id) in items {
-							deletion_results.push((
-								*group_id,
-								*msg_id,
-								OpResult {
-									success: false,
-									message: e.to_string(),
-								},
-							));
-						}
-					}
-				}
-			}
-
-			// Apply edits - route to correct API based on sender
-			for (group_id, topic_id, msg_id, new_content, sender) in &edits {
-				let result = match sender {
-					MessageSender::Bot => mtproto::edit_message_via_bot(&client, *group_id, *topic_id, *msg_id, new_content, &bot_token).await,
-					MessageSender::User => mtproto::edit_message(&client, *group_id, *msg_id, new_content).await,
-				};
-				match result {
-					Ok(()) => {
-						info!(group_id, msg_id, ?sender, "Edited message on Telegram");
-						edit_results.push((
+	for (group_id, items) in &deletions_by_group {
+		let msg_ids: Vec<i32> = items.iter().map(|(_, id)| *id).collect();
+		match mtproto::delete_messages(client, *group_id, &msg_ids).await {
+			Ok(count) => {
+				info!(group_id, count, "Deleted messages from Telegram");
+				if count > 0 {
+					successful_deletions.insert(*group_id, items.clone());
+					for (_, msg_id) in items {
+						results.deletions.push((
 							*group_id,
 							*msg_id,
 							OpResult {
 								success: true,
-								message: format!("Edited via {sender:?}"),
+								message: format!("Deleted (pts_count={count})"),
 							},
 						));
 					}
-					Err(e) => {
-						warn!(group_id, msg_id, ?sender, error = %e, "Failed to edit message");
-						edit_results.push((
+				} else {
+					warn!(group_id, "Telegram reported 0 deletions, keeping local files intact");
+					for (_, msg_id) in items {
+						results.deletions.push((
 							*group_id,
 							*msg_id,
 							OpResult {
 								success: false,
-								message: e.to_string(),
+								message: "Telegram returned 0 deletions".to_string(),
 							},
 						));
 					}
 				}
 			}
+			Err(e) => {
+				warn!(group_id, error = %e, "Failed to delete messages");
+				for (_, msg_id) in items {
+					results.deletions.push((
+						*group_id,
+						*msg_id,
+						OpResult {
+							success: false,
+							message: e.to_string(),
+						},
+					));
+				}
+			}
+		}
+	}
 
-			Ok(((deletion_results, edit_results), successful_deletions))
-		})
-		.await?;
+	// Apply edits - all via MTProto
+	for (group_id, _topic_id, msg_id, new_content) in &edits {
+		match mtproto::edit_message(client, *group_id, *msg_id, new_content).await {
+			Ok(()) => {
+				info!(group_id, msg_id, "Edited message on Telegram");
+				results.edits.push((
+					*group_id,
+					*msg_id,
+					OpResult {
+						success: true,
+						message: "Edited via MTProto".to_string(),
+					},
+				));
+			}
+			Err(e) => {
+				warn!(group_id, msg_id, error = %e, "Failed to edit message");
+				results.edits.push((
+					*group_id,
+					*msg_id,
+					OpResult {
+						success: false,
+						message: e.to_string(),
+					},
+				));
+			}
+		}
+	}
 
-		results.deletions = mtproto_results.0;
-		results.edits = mtproto_results.1;
-		successful
-	} else {
-		BTreeMap::new()
-	};
-
-	// Apply creates - send new messages via Bot API
-	// Track successful creates so we can update local files with message IDs
+	// Apply creates - send new messages via MTProto
 	let mut successful_creates: Vec<(u64, u64, String, i32)> = Vec::new(); // (group_id, topic_id, content, msg_id)
 
 	for (group_id, topic_id, content) in &creates {
-		use crate::server::{Message, send_message};
-
-		let message = Message::new(*group_id, *topic_id, content.clone());
-		match send_message(&message, bot_token).await {
+		match mtproto::send_text_message(client, *group_id, *topic_id, content).await {
 			Ok(msg_id) => {
 				info!(group_id, topic_id, msg_id, "Created message on Telegram");
 				successful_creates.push((*group_id, *topic_id, content.clone(), msg_id));
@@ -448,7 +392,7 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 			// Get the last write time from existing file content to format correctly
 			let now = Timestamp::now();
 			for (content, msg_id) in messages {
-				let formatted = format_message_append_with_sender(&content, None, now, Some(msg_id), Some("bot"));
+				let formatted = format_message_append_with_sender(&content, None, now, Some(msg_id), None);
 				file_content.push_str(&formatted);
 			}
 
@@ -464,17 +408,16 @@ pub async fn push(updates: Vec<MessageUpdate>, config: &LiveSettings, bot_token:
 	info!("Push complete");
 	Ok(results)
 }
-/// Parsed message with content and sender info
+/// Parsed message with content
 #[derive(Clone, Debug)]
 pub struct ParsedMessage {
 	pub content: String,
-	pub sender: MessageSender,
 }
 /// Parse a topic file and extract all messages with their IDs
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let mut messages = BTreeMap::new();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: (\w+))? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
 
 	let lines: Vec<&str> = content.lines().collect();
 	let mut i = 0;
@@ -501,9 +444,8 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 						&& let Some(caps) = msg_id_re.captures(lines[i])
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
-						let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content, sender });
+						messages.insert(id, ParsedMessage { content: msg_content });
 					}
 					i += 1;
 					break;
@@ -512,9 +454,8 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 					if let Some(caps) = msg_id_re.captures(next_line)
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
-						let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content, sender });
+						messages.insert(id, ParsedMessage { content: msg_content });
 					}
 					i += 1;
 					break;
@@ -530,11 +471,9 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 		if let Some(caps) = msg_id_re.captures(line)
 			&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 		{
-			// Extract sender (default to Bot for backwards compatibility)
-			let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
 			// Extract content by removing the message ID marker
 			let msg_content = msg_id_re.replace(line, "").trim().to_string();
-			messages.insert(id, ParsedMessage { content: msg_content, sender });
+			messages.insert(id, ParsedMessage { content: msg_content });
 		}
 
 		i += 1;
@@ -555,7 +494,7 @@ pub struct FileContentInfo {
 }
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: (\w+))? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
 
 	let mut info = FileContentInfo {
 		last_tagged_line: None,
@@ -566,9 +505,8 @@ pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 	for (line_num, line) in content.lines().enumerate() {
 		if let Some(caps) = msg_id_re.captures(line) {
 			if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-				let sender = caps.get(2).map(|m| MessageSender::from_tag(m.as_str())).unwrap_or(MessageSender::Bot);
 				let msg_content = msg_id_re.replace(line, "").trim().to_string();
-				info.tagged_messages.insert(id, ParsedMessage { content: msg_content, sender });
+				info.tagged_messages.insert(id, ParsedMessage { content: msg_content });
 				info.last_tagged_line = Some(line_num);
 			}
 		} else {
@@ -649,13 +587,12 @@ pub fn changes_to_updates(changes: &FileChanges, group_id: u64, topic_id: u64) -
 		});
 	}
 
-	for (msg_id, new_content, sender) in &changes.edited {
+	for (msg_id, new_content) in &changes.edited {
 		updates.push(MessageUpdate::Edit {
 			group_id,
 			topic_id,
 			message_id: *msg_id,
 			new_content: new_content.clone(),
-			sender: *sender,
 		});
 	}
 
@@ -674,9 +611,9 @@ pub fn changes_to_updates(changes: &FileChanges, group_id: u64, topic_id: u64) -
 pub struct FileChanges {
 	/// Messages that were deleted (message_id)
 	pub deleted: Vec<i32>,
-	/// Messages that were edited (message_id, new_content, sender)
-	pub edited: Vec<(i32, String, MessageSender)>,
-	/// New messages to be created (content only, will be sent via bot API)
+	/// Messages that were edited (message_id, new_content)
+	pub edited: Vec<(i32, String)>,
+	/// New messages to be created (content only)
 	pub created: Vec<String>,
 	/// Content that was added before the last known message (cannot be sent back in time)
 	pub invalid_inserts: Vec<String>,
@@ -708,8 +645,7 @@ pub fn detect_changes(old_state: &BTreeMap<i32, ParsedMessage>, new_state: &BTre
 		if let Some(old_msg) = old_state.get(id)
 			&& old_msg.content != new_msg.content
 		{
-			// Use the sender from the old state (that's who sent it originally)
-			changes.edited.push((*id, new_msg.content.clone(), old_msg.sender));
+			changes.edited.push((*id, new_msg.content.clone()));
 		}
 	}
 
@@ -842,11 +778,8 @@ This is a test <!-- msg:456 bot -->
 		let messages = parse_file_messages(content);
 		assert_eq!(messages.len(), 3);
 		assert_eq!(messages.get(&123).map(|m| &m.content), Some(&"Hello world".to_string()));
-		assert_eq!(messages.get(&123).map(|m| m.sender), Some(MessageSender::Bot)); // default
 		assert_eq!(messages.get(&456).map(|m| &m.content), Some(&"This is a test".to_string()));
-		assert_eq!(messages.get(&456).map(|m| m.sender), Some(MessageSender::Bot));
 		assert_eq!(messages.get(&789).map(|m| &m.content), Some(&". Another message".to_string()));
-		assert_eq!(messages.get(&789).map(|m| m.sender), Some(MessageSender::User));
 	}
 
 	#[test]
@@ -865,9 +798,7 @@ simple message <!-- msg:456 user -->
 		let messages = parse_file_messages(content);
 		assert_eq!(messages.len(), 2);
 		assert_eq!(messages.get(&123).map(|m| &m.content), Some(&"This is a multi-line message\n\nWith paragraph breaks".to_string()));
-		assert_eq!(messages.get(&123).map(|m| m.sender), Some(MessageSender::Bot));
 		assert_eq!(messages.get(&456).map(|m| &m.content), Some(&"simple message".to_string()));
-		assert_eq!(messages.get(&456).map(|m| m.sender), Some(MessageSender::User));
 	}
 
 	#[test]
@@ -881,35 +812,16 @@ Legacy multi-line message
 		let messages = parse_file_messages(content);
 		assert_eq!(messages.len(), 1);
 		assert_eq!(messages.get(&789).map(|m| &m.content), Some(&"Legacy multi-line message".to_string()));
-		assert_eq!(messages.get(&789).map(|m| m.sender), Some(MessageSender::Bot));
 	}
 
 	#[test]
 	fn test_detect_changes_deleted() {
 		let mut old = BTreeMap::new();
-		old.insert(
-			1,
-			ParsedMessage {
-				content: "message 1".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
-		old.insert(
-			2,
-			ParsedMessage {
-				content: "message 2".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
+		old.insert(1, ParsedMessage { content: "message 1".to_string() });
+		old.insert(2, ParsedMessage { content: "message 2".to_string() });
 
 		let mut new = BTreeMap::new();
-		new.insert(
-			1,
-			ParsedMessage {
-				content: "message 1".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
+		new.insert(1, ParsedMessage { content: "message 1".to_string() });
 		// message 2 is deleted
 
 		let changes = detect_changes(&old, &new);
@@ -920,87 +832,43 @@ Legacy multi-line message
 	#[test]
 	fn test_detect_changes_edited() {
 		let mut old = BTreeMap::new();
-		old.insert(
-			1,
-			ParsedMessage {
-				content: "message 1".to_string(),
-				sender: MessageSender::User,
-			},
-		);
-		old.insert(
-			2,
-			ParsedMessage {
-				content: "message 2".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
+		old.insert(1, ParsedMessage { content: "message 1".to_string() });
+		old.insert(2, ParsedMessage { content: "message 2".to_string() });
 
 		let mut new = BTreeMap::new();
-		new.insert(
-			1,
-			ParsedMessage {
-				content: "message 1".to_string(),
-				sender: MessageSender::User,
-			},
-		);
+		new.insert(1, ParsedMessage { content: "message 1".to_string() });
 		new.insert(
 			2,
 			ParsedMessage {
 				content: "message 2 edited".to_string(),
-				sender: MessageSender::Bot,
 			},
 		);
 
 		let changes = detect_changes(&old, &new);
 		assert!(changes.deleted.is_empty());
-		assert_eq!(changes.edited, vec![(2, "message 2 edited".to_string(), MessageSender::Bot)]);
+		assert_eq!(changes.edited, vec![(2, "message 2 edited".to_string())]);
 	}
 
 	#[test]
 	fn test_detect_changes_mixed() {
 		let mut old = BTreeMap::new();
-		old.insert(
-			1,
-			ParsedMessage {
-				content: "message 1".to_string(),
-				sender: MessageSender::User,
-			},
-		);
-		old.insert(
-			2,
-			ParsedMessage {
-				content: "message 2".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
-		old.insert(
-			3,
-			ParsedMessage {
-				content: "message 3".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
+		old.insert(1, ParsedMessage { content: "message 1".to_string() });
+		old.insert(2, ParsedMessage { content: "message 2".to_string() });
+		old.insert(3, ParsedMessage { content: "message 3".to_string() });
 
 		let mut new = BTreeMap::new();
 		new.insert(
 			1,
 			ParsedMessage {
 				content: "message 1 edited".to_string(),
-				sender: MessageSender::User,
 			},
 		);
 		// message 2 deleted
-		new.insert(
-			3,
-			ParsedMessage {
-				content: "message 3".to_string(),
-				sender: MessageSender::Bot,
-			},
-		);
+		new.insert(3, ParsedMessage { content: "message 3".to_string() });
 
 		let changes = detect_changes(&old, &new);
 		assert_eq!(changes.deleted, vec![2]);
-		assert_eq!(changes.edited, vec![(1, "message 1 edited".to_string(), MessageSender::User)]);
+		assert_eq!(changes.edited, vec![(1, "message 1 edited".to_string())]);
 	}
 
 	#[test]

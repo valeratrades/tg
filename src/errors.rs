@@ -3,8 +3,8 @@ use std::fmt;
 use miette::{Diagnostic, SourceSpan};
 use reqwest::StatusCode;
 
-/// Telegram Bot API error
-#[derive(Debug, thiserror::Error, Diagnostic)]
+/// Telegram Bot API error (used only for send-alert)
+#[derive(Debug, Diagnostic, thiserror::Error)]
 pub enum TelegramApiError {
 	#[error("Telegram API authentication failed (HTTP {status})")]
 	#[diagnostic(
@@ -18,16 +18,8 @@ pub enum TelegramApiError {
 	ClientError { status: u16, body: String },
 
 	#[error("Telegram API server error (HTTP {status}): {body}")]
-	#[diagnostic(code(tg::telegram::server_error), help("Telegram servers may be temporarily unavailable. This is retryable."))]
+	#[diagnostic(code(tg::telegram::server_error), help("Telegram servers may be temporarily unavailable."))]
 	ServerError { status: u16, body: String },
-
-	#[error("failed to reach Telegram API")]
-	#[diagnostic(code(tg::telegram::network), help("Check your network connection."))]
-	Network(#[source] reqwest::Error),
-
-	#[error("Telegram API returned unparseable response")]
-	#[diagnostic(code(tg::telegram::bad_response))]
-	BadResponse(#[source] serde_json::Error),
 }
 
 impl TelegramApiError {
@@ -38,16 +30,6 @@ impl TelegramApiError {
 			400..=499 => Self::ClientError { status: code, body },
 			_ => Self::ServerError { status: code, body },
 		}
-	}
-
-	/// Whether this error is fatal and the service should stop.
-	pub fn is_fatal(&self) -> bool {
-		matches!(self, Self::Unauthorized { .. })
-	}
-
-	/// Whether this error is transient and the operation should be retried.
-	pub fn is_retryable(&self) -> bool {
-		matches!(self, Self::ServerError { .. } | Self::Network(_))
 	}
 }
 

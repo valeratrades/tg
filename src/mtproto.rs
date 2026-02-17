@@ -8,7 +8,7 @@ use grammers_tl_types as tl;
 use tg::telegram_chat_id;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{LiveSettings, TopicsMetadata};
+use crate::config::LiveSettings;
 
 /// Run an operation with an authenticated MTProto client.
 /// Uses structured concurrency - the runner task lives only for the duration of the operation.
@@ -191,46 +191,6 @@ pub async fn fetch_forum_topics(client: &Client, group_id: u64) -> Result<Vec<Di
 	info!("Discovered {} topics in group {group_id}", topics.len());
 	Ok(topics)
 }
-/// Discover and update topics metadata for all configured groups
-pub async fn discover_all_topics(config: &LiveSettings) -> Result<()> {
-	// Check if credentials are configured (either in config or env vars)
-	let cfg = config.config()?;
-	let has_api_id = cfg.api_id.is_some();
-	let has_api_hash = cfg.api_hash.is_some() || std::env::var("TELEGRAM_API_HASH").is_ok();
-	let has_phone = cfg.phone.is_some() || std::env::var("PHONE_NUMBER_FR").is_ok();
-
-	if !has_api_id || !has_api_hash || !has_phone {
-		warn!("Telegram MTProto credentials not configured (api_id/api_hash/phone).");
-		warn!("Topic discovery will be skipped.");
-		return Ok(());
-	}
-
-	let group_ids = cfg.forum_group_ids();
-
-	with_client(config, |client| async move {
-		let mut metadata = TopicsMetadata::load();
-
-		for group_id in group_ids {
-			info!("Fetching topics for group {group_id}...");
-
-			match fetch_forum_topics(&client, group_id).await {
-				Ok(topics) =>
-					for topic in topics {
-						let sanitized_name = sanitize_topic_name(&topic.title);
-						metadata.set_topic_name(group_id, topic.topic_id as u64, sanitized_name);
-					},
-				Err(e) => {
-					warn!("Failed to fetch topics for group {group_id}: {e}");
-				}
-			}
-		}
-
-		metadata.save()?;
-		info!("Topics metadata updated");
-		Ok(())
-	})
-	.await
-}
 /// Delete messages from a channel/supergroup via MTProto
 /// Returns the number of successfully deleted messages (including already-deleted ones)
 pub async fn delete_messages(client: &Client, group_id: u64, message_ids: &[i32]) -> Result<usize> {
@@ -330,32 +290,147 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 	info!("Edited message {message_id} in group {group_id} via MTProto");
 	Ok(())
 }
-/// Edit a message via Bot API (for bot-sent messages)
-/// The MTProto client is not used here, but we keep the signature consistent for the caller
-pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64, message_id: i32, new_text: &str, bot_token: &str) -> Result<()> {
-	use crate::errors::TelegramApiError;
-
+/// Send a text message to a forum topic via MTProto
+/// Returns the message ID assigned by Telegram
+pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
 	let chat_id = telegram_chat_id(group_id);
-	let http_client = reqwest::Client::new();
+	let input_peer = get_input_peer(client, chat_id).await?;
 
-	let url = format!("https://api.telegram.org/bot{bot_token}/editMessageText");
-	let mut params = vec![("chat_id", chat_id.to_string()), ("message_id", message_id.to_string()), ("text", new_text.to_string())];
-
-	// Forum topics require message_thread_id (but not for General topic which is id=1)
-	if topic_id != 1 {
-		params.push(("message_thread_id", topic_id.to_string()));
-	}
-
-	let res = http_client.post(&url).form(&params).send().await.map_err(TelegramApiError::Network)?;
-	let status = res.status();
-	let body = res.text().await.map_err(TelegramApiError::Network)?;
-
-	if status.is_success() {
-		info!("Edited message {message_id} in group {group_id} via Bot API");
-		Ok(())
+	let reply_to = if topic_id != 1 {
+		Some(tl::enums::InputReplyTo::Message(tl::types::InputReplyToMessage {
+			reply_to_msg_id: topic_id as i32,
+			top_msg_id: None,
+			reply_to_peer_id: None,
+			quote_text: None,
+			quote_entities: None,
+			quote_offset: None,
+			monoforum_peer_id: None,
+			todo_item_id: None,
+		}))
 	} else {
-		Err(TelegramApiError::from_status(status, body))?
+		None
+	};
+
+	let random_id = rand_i64();
+
+	let request = tl::functions::messages::SendMessage {
+		no_webpage: false,
+		silent: false,
+		background: false,
+		clear_draft: false,
+		noforwards: false,
+		update_stickersets_order: false,
+		invert_media: false,
+		allow_paid_floodskip: false,
+		peer: input_peer,
+		reply_to,
+		message: text.to_string(),
+		random_id,
+		reply_markup: None,
+		entities: None,
+		schedule_date: None,
+		send_as: None,
+		quick_reply_shortcut: None,
+		effect: None,
+		allow_paid_stars: None,
+		suggested_post: None,
+	};
+
+	let updates = client.invoke(&request).await?;
+	let msg_id = extract_message_id_from_updates(&updates)?;
+	info!("Sent text message {msg_id} to group {group_id} topic {topic_id} via MTProto");
+	Ok(msg_id)
+}
+/// Send a photo with optional caption to a forum topic via MTProto
+/// Returns the message ID assigned by Telegram
+pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &std::path::Path, caption: Option<&str>) -> Result<i32> {
+	let chat_id = telegram_chat_id(group_id);
+	let input_peer = get_input_peer(client, chat_id).await?;
+
+	let reply_to = if topic_id != 1 {
+		Some(tl::enums::InputReplyTo::Message(tl::types::InputReplyToMessage {
+			reply_to_msg_id: topic_id as i32,
+			top_msg_id: None,
+			reply_to_peer_id: None,
+			quote_text: None,
+			quote_entities: None,
+			quote_offset: None,
+			monoforum_peer_id: None,
+			todo_item_id: None,
+		}))
+	} else {
+		None
+	};
+
+	let uploaded = client.upload_file(path).await?;
+
+	let media = tl::enums::InputMedia::UploadedPhoto(tl::types::InputMediaUploadedPhoto {
+		spoiler: false,
+		file: uploaded.raw,
+		stickers: None,
+		ttl_seconds: None,
+	});
+
+	let random_id = rand_i64();
+
+	let request = tl::functions::messages::SendMedia {
+		silent: false,
+		background: false,
+		clear_draft: false,
+		noforwards: false,
+		update_stickersets_order: false,
+		invert_media: false,
+		allow_paid_floodskip: false,
+		peer: input_peer,
+		reply_to,
+		media,
+		message: caption.unwrap_or("").to_string(),
+		random_id,
+		reply_markup: None,
+		entities: None,
+		schedule_date: None,
+		send_as: None,
+		quick_reply_shortcut: None,
+		effect: None,
+		allow_paid_stars: None,
+		suggested_post: None,
+	};
+
+	let updates = client.invoke(&request).await?;
+	let msg_id = extract_message_id_from_updates(&updates)?;
+	info!("Sent photo message {msg_id} to group {group_id} topic {topic_id} via MTProto");
+	Ok(msg_id)
+}
+/// Get chat info (title, is_forum) for a group via MTProto dialogs
+pub async fn get_chat_info(client: &Client, group_id: u64) -> Result<(String, bool)> {
+	let chat_id = telegram_chat_id(group_id);
+	let expected_id = extract_channel_id(chat_id);
+
+	let mut dialogs = client.iter_dialogs();
+	while let Some(dialog) = dialogs.next().await? {
+		if let tl::enums::Dialog::Dialog(d) = &dialog.raw {
+			let peer_id = match &d.peer {
+				tl::enums::Peer::Channel(c) => c.channel_id,
+				tl::enums::Peer::Chat(c) => c.chat_id,
+				tl::enums::Peer::User(u) => u.user_id,
+			};
+			if peer_id == expected_id {
+				let peer = dialog.peer();
+				match peer {
+					grammers_client::types::Peer::Group(g) =>
+						if let tl::enums::Chat::Channel(ch) = &g.raw {
+							return Ok((ch.title.clone(), ch.forum));
+						},
+					grammers_client::types::Peer::Channel(c) => {
+						return Ok((c.raw.title.clone(), c.raw.forum));
+					}
+					_ => {}
+				}
+			}
+		}
 	}
+
+	bail!("Could not find channel with id {group_id} in dialogs")
 }
 /// Get the session file path (same convention as social_networks)
 fn session_path(username: &str) -> PathBuf {
@@ -416,8 +491,47 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 
 	bail!("Could not find channel with id {chat_id} in dialogs. Make sure the user account has access to this group.")
 }
+/// Extract the message ID from an Updates response
+fn extract_message_id_from_updates(updates: &tl::enums::Updates) -> Result<i32> {
+	match updates {
+		tl::enums::Updates::Updates(u) =>
+			for update in &u.updates {
+				match update {
+					tl::enums::Update::NewChannelMessage(m) =>
+						if let tl::enums::Message::Message(msg) = &m.message {
+							return Ok(msg.id);
+						},
+					tl::enums::Update::NewMessage(m) =>
+						if let tl::enums::Message::Message(msg) = &m.message {
+							return Ok(msg.id);
+						},
+					_ => {}
+				}
+			},
+		tl::enums::Updates::UpdateShortSentMessage(u) => return Ok(u.id),
+		_ => {}
+	}
+	bail!("Could not extract message ID from Updates response")
+}
+/// Extract channel ID from chat_id (strips -100 prefix)
+fn extract_channel_id(chat_id: i64) -> i64 {
+	let s = chat_id.to_string();
+	if let Some(stripped) = s.strip_prefix("-100") {
+		stripped.parse().unwrap_or(0)
+	} else {
+		chat_id.abs()
+	}
+}
+/// Generate a random i64 for use as random_id in Telegram requests
+fn rand_i64() -> i64 {
+	use std::{
+		collections::hash_map::RandomState,
+		hash::{BuildHasher, Hasher},
+	};
+	RandomState::new().build_hasher().finish() as i64
+}
 /// Sanitize topic name for use as filename
-fn sanitize_topic_name(name: &str) -> String {
+pub fn sanitize_topic_name(name: &str) -> String {
 	name.to_lowercase()
 		.chars()
 		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })

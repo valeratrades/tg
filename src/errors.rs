@@ -1,6 +1,55 @@
 use std::fmt;
 
 use miette::{Diagnostic, SourceSpan};
+use reqwest::StatusCode;
+
+/// Telegram Bot API error
+#[derive(Debug, thiserror::Error, Diagnostic)]
+pub enum TelegramApiError {
+	#[error("Telegram API authentication failed (HTTP {status})")]
+	#[diagnostic(
+		code(tg::telegram::unauthorized),
+		help("The bot token is invalid or revoked.\nUpdate the token and restart: `systemctl --user restart tg-server`")
+	)]
+	Unauthorized { status: u16, body: String },
+
+	#[error("Telegram API rejected the request (HTTP {status}): {body}")]
+	#[diagnostic(code(tg::telegram::client_error))]
+	ClientError { status: u16, body: String },
+
+	#[error("Telegram API server error (HTTP {status}): {body}")]
+	#[diagnostic(code(tg::telegram::server_error), help("Telegram servers may be temporarily unavailable. This is retryable."))]
+	ServerError { status: u16, body: String },
+
+	#[error("failed to reach Telegram API")]
+	#[diagnostic(code(tg::telegram::network), help("Check your network connection."))]
+	Network(#[source] reqwest::Error),
+
+	#[error("Telegram API returned unparseable response")]
+	#[diagnostic(code(tg::telegram::bad_response))]
+	BadResponse(#[source] serde_json::Error),
+}
+
+impl TelegramApiError {
+	pub fn from_status(status: StatusCode, body: String) -> Self {
+		let code = status.as_u16();
+		match code {
+			401 | 403 => Self::Unauthorized { status: code, body },
+			400..=499 => Self::ClientError { status: code, body },
+			_ => Self::ServerError { status: code, body },
+		}
+	}
+
+	/// Whether this error is fatal and the service should stop.
+	pub fn is_fatal(&self) -> bool {
+		matches!(self, Self::Unauthorized { .. })
+	}
+
+	/// Whether this error is transient and the operation should be retried.
+	pub fn is_retryable(&self) -> bool {
+		matches!(self, Self::ServerError { .. } | Self::Network(_))
+	}
+}
 
 /// Error for JSON parsing failures with source highlighting
 #[derive(Clone, Debug, Diagnostic)]

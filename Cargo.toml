@@ -33,6 +33,7 @@ regex = "1"
 reqwest = { version = "0.13.1", features = ["rustls", "json", "multipart", "query", "form"], default-features = false }
 serde = "^1.0.228"
 serde_json = "^1.0.149"
+thiserror = "2.0.18"
 tokio = { version = "^1.49.0", features = ["full"] }
 toml = "^0.9.11"
 tracing = "^0.1.44"

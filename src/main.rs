@@ -51,6 +51,16 @@ async fn main() {
 			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
 		} else if let Some(diagnostic) = e.downcast_ref::<TopicNotFoundError>() {
 			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else if let Some(diagnostic) = e.downcast_ref::<errors::TelegramApiError>() {
+			// TelegramApiError doesn't impl Clone (reqwest::Error, serde_json::Error),
+			// so render it manually via Diagnostic trait
+			eprintln!("  x {diagnostic}");
+			if let Some(code) = miette::Diagnostic::code(diagnostic) {
+				eprintln!("  code: {code}");
+			}
+			if let Some(help) = miette::Diagnostic::help(diagnostic) {
+				eprintln!("  help: {help}");
+			}
 		} else {
 			// Fall back to standard eyre display
 			eprintln!("Error: {e:?}");
@@ -112,7 +122,7 @@ async fn run() -> Result<()> {
 			if !res.status().is_success() {
 				let status = res.status();
 				let body = res.text().await?;
-				bail!("Telegram API error {status}: {body}");
+				Err(errors::TelegramApiError::from_status(status, body))?;
 			}
 		}
 		Commands::BotInfo => {

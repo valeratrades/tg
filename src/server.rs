@@ -220,6 +220,13 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 					let msg_id = loop {
 						match send_message(&bg_send_task.message, &bg_send_task.bot_token).await {
 							Ok(id) => break Some(id),
+							Err(e) if e.is_fatal() => {
+								panic!("Fatal Telegram API error: {e}");
+							}
+							Err(e) if !e.is_retryable() => {
+								error!("Non-retryable Telegram API error: {e}");
+								break None;
+							}
 							Err(e) => {
 								let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
 								if total_elapsed_secs >= THIRTY_MINS_SECS {
@@ -267,7 +274,9 @@ pub async fn run(settings: Arc<LiveSettings>, bot_token: String, pull_interval: 
 	Ok(())
 }
 /// Returns the message ID assigned by Telegram
-pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
+pub async fn send_message(message: &Message, bot_token: &str) -> std::result::Result<i32, crate::errors::TelegramApiError> {
+	use crate::errors::TelegramApiError;
+
 	debug!("Sending message to Telegram API");
 	let client = reqwest::Client::new();
 
@@ -282,8 +291,11 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 			debug!("Sending photo from {}", full_path.display());
 			let url = format!("https://api.telegram.org/bot{bot_token}/sendPhoto");
 
-			// Read image file
-			let image_bytes = std::fs::read(&full_path)?;
+			// Read image file — propagate IO errors as ClientError (local issue, not retryable)
+			let image_bytes = std::fs::read(&full_path).map_err(|e| TelegramApiError::ClientError {
+				status: 0,
+				body: format!("failed to read image {}: {e}", full_path.display()),
+			})?;
 			let filename = full_path.file_name().and_then(|n| n.to_str()).unwrap_or("image.jpg").to_string();
 
 			// Build multipart form
@@ -301,21 +313,22 @@ pub async fn send_message(message: &Message, bot_token: &str) -> Result<i32> {
 				form = form.text("caption", cap);
 			}
 
-			let res: reqwest::Response = client.post(&url).multipart(form).send().await?;
+			let res = client.post(&url).multipart(form).send().await.map_err(TelegramApiError::Network)?;
 			let status = res.status();
-			let response_text = res.text().await?;
+			let body = res.text().await.map_err(TelegramApiError::Network)?;
 
 			if status.is_success() {
-				debug!("Telegram API response: {response_text}");
+				debug!("Telegram API response: {body}");
 				info!("Successfully sent photo to group {} topic {}", message.group_id, message.topic_id);
 
-				// Extract message_id from response
-				let response: serde_json::Value = serde_json::from_str(&response_text)?;
-				let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
+				let response: serde_json::Value = serde_json::from_str(&body).map_err(TelegramApiError::BadResponse)?;
+				let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| TelegramApiError::ClientError {
+					status: 200,
+					body: "response missing result.message_id".to_string(),
+				})? as i32;
 				Ok(msg_id)
 			} else {
-				warn!("Telegram API returned non-success status {status}: {response_text}");
-				Err(eyre::eyre!("Telegram API error: {status}"))
+				Err(TelegramApiError::from_status(status, body))
 			}
 		} else {
 			warn!("Image file not found: {}, sending as text", full_path.display());
@@ -550,7 +563,9 @@ fn write_message_to_file(chat_filepath: &std::path::Path, formatted_message: &st
 	Ok(())
 }
 /// Returns the message ID assigned by Telegram
-async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> Result<i32> {
+async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, topic_id: u64, bot_token: &str) -> std::result::Result<i32, crate::errors::TelegramApiError> {
+	use crate::errors::TelegramApiError;
+
 	let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
 	let chat_id = telegram_chat_id(group_id);
 
@@ -561,22 +576,23 @@ async fn send_text_message(client: &reqwest::Client, text: &str, group_id: u64, 
 	}
 
 	debug!("Posting text to Telegram API");
-	let res: reqwest::Response = client.post(&url).form(&params).send().await?;
+	let res = client.post(&url).form(&params).send().await.map_err(TelegramApiError::Network)?;
 
 	let status = res.status();
-	let response_text = res.text().await?;
+	let body = res.text().await.map_err(TelegramApiError::Network)?;
 
 	if status.is_success() {
-		debug!("Telegram API response: {response_text}");
+		debug!("Telegram API response: {body}");
 		info!("Successfully sent message to group {group_id} topic {topic_id}");
 
-		// Extract message_id from response
-		let response: serde_json::Value = serde_json::from_str(&response_text)?;
-		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| eyre::eyre!("No message_id in response"))? as i32;
+		let response: serde_json::Value = serde_json::from_str(&body).map_err(TelegramApiError::BadResponse)?;
+		let msg_id = response["result"]["message_id"].as_i64().ok_or_else(|| TelegramApiError::ClientError {
+			status: 200,
+			body: "response missing result.message_id".to_string(),
+		})? as i32;
 		Ok(msg_id)
 	} else {
-		warn!("Telegram API returned non-success status {status}: {response_text}");
-		Err(eyre::eyre!("Telegram API error: {status}"))
+		Err(TelegramApiError::from_status(status, body))
 	}
 }
 /// Check if a message contains patterns that could break our markdown format

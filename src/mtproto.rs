@@ -333,6 +333,8 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 /// Edit a message via Bot API (for bot-sent messages)
 /// The MTProto client is not used here, but we keep the signature consistent for the caller
 pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64, message_id: i32, new_text: &str, bot_token: &str) -> Result<()> {
+	use crate::errors::TelegramApiError;
+
 	let chat_id = telegram_chat_id(group_id);
 	let http_client = reqwest::Client::new();
 
@@ -344,16 +346,15 @@ pub async fn edit_message_via_bot(_client: &Client, group_id: u64, topic_id: u64
 		params.push(("message_thread_id", topic_id.to_string()));
 	}
 
-	let res: reqwest::Response = http_client.post(&url).form(&params).send().await?;
+	let res = http_client.post(&url).form(&params).send().await.map_err(TelegramApiError::Network)?;
 	let status = res.status();
-	let response_text = res.text().await?;
+	let body = res.text().await.map_err(TelegramApiError::Network)?;
 
 	if status.is_success() {
 		info!("Edited message {message_id} in group {group_id} via Bot API");
 		Ok(())
 	} else {
-		warn!("Bot API edit failed with status {status}: {response_text}");
-		bail!("Bot API error: {status} - {response_text}")
+		Err(TelegramApiError::from_status(status, body))?
 	}
 }
 /// Get the session file path (same convention as social_networks)

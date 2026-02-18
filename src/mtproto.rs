@@ -432,6 +432,15 @@ pub async fn get_chat_info(client: &Client, group_id: u64) -> Result<(String, bo
 
 	bail!("Could not find channel with id {group_id} in dialogs")
 }
+/// Sanitize topic name for use as filename
+pub fn sanitize_topic_name(name: &str) -> String {
+	name.to_lowercase()
+		.chars()
+		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+		.collect::<String>()
+		.trim_matches('_')
+		.to_string()
+}
 /// Get the session file path (same convention as social_networks)
 fn session_path(username: &str) -> PathBuf {
 	v_utils::xdg_state_file!(&format!("{}.session", username))
@@ -529,13 +538,4 @@ fn rand_i64() -> i64 {
 		hash::{BuildHasher, Hasher},
 	};
 	RandomState::new().build_hasher().finish() as i64
-}
-/// Sanitize topic name for use as filename
-pub fn sanitize_topic_name(name: &str) -> String {
-	name.to_lowercase()
-		.chars()
-		.map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-		.collect::<String>()
-		.trim_matches('_')
-		.to_string()
 }

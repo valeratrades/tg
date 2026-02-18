@@ -272,6 +272,10 @@ pub async fn run(settings: Arc<LiveSettings>, pull_interval: Timeframe) -> Resul
 	})
 	.await
 }
+/// Format a message append with message ID and sender info
+pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
+	format_message_append(message, last_write_datetime, now, msg_id, sender, false)
+}
 /// Send a message via MTProto, handling image extraction
 /// Returns the message ID assigned by Telegram
 async fn send_message_mtproto(client: &Client, message: &Message) -> Result<i32> {
@@ -288,10 +292,6 @@ async fn send_message_mtproto(client: &Client, message: &Message) -> Result<i32>
 	}
 
 	crate::mtproto::send_text_message(client, message.group_id, message.topic_id, &message.message).await
-}
-/// Format a message append with message ID and sender info
-pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
-	format_message_append(message, last_write_datetime, now, msg_id, sender, false)
 }
 
 pub(crate) fn format_message_append(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>, forwarded: bool) -> String {

@@ -17,7 +17,6 @@ use tokio::{
 	time::Interval,
 };
 use tracing::{debug, error, info, warn};
-use v_utils::trades::Timeframe;
 use xattr::FileExt as _;
 
 use crate::{
@@ -101,7 +100,7 @@ impl ServerResponse {
 
 /// # Panics
 /// On unsuccessful io operations
-pub async fn run(settings: Arc<LiveSettings>, pull_interval: Timeframe) -> Result<()> {
+pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 	info!("Starting telegram server v{}", env!("CARGO_PKG_VERSION"));
 
 	// Clear alerts state from previous session
@@ -131,6 +130,9 @@ pub async fn run(settings: Arc<LiveSettings>, pull_interval: Timeframe) -> Resul
 		let listener = TcpListener::bind(&addr).await?;
 		info!("Listening on: {addr}");
 
+		let cfg = settings.config()?;
+		let pull_interval = cfg.pull_interval();
+		let alerts_interval = cfg.alerts_interval();
 		let interval_duration = pull_interval.duration();
 		info!("Pull interval: {pull_interval}");
 
@@ -153,6 +155,24 @@ pub async fn run(settings: Arc<LiveSettings>, pull_interval: Timeframe) -> Resul
 			}
 
 			(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+		}));
+
+		// Initial alerts check task
+		let alerts_interval_timer = tokio::time::interval(alerts_interval.duration());
+		let settings_clone = Arc::clone(&settings);
+		let client_clone = client.clone();
+		let push_handle_clone = push_handle.clone();
+		let bg_send_handle_clone = bg_send_handle.clone();
+		futures.push(Box::pin(async move {
+			let mut interval = alerts_interval_timer;
+			interval.tick().await;
+
+			match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
+				Ok(()) => debug!("Alerts check completed successfully"),
+				Err(e) => warn!("Alerts check failed: {e}"),
+			}
+
+			(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
 		}));
 
 		//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
@@ -196,6 +216,23 @@ pub async fn run(settings: Arc<LiveSettings>, pull_interval: Timeframe) -> Resul
 							}
 							TaskResult::BackgroundSend => {
 								debug!("Background send task completed");
+							}
+							TaskResult::AlertsCheck(mut interval) => {
+								debug!("Alerts check task completed, re-queuing");
+								let settings_clone = settings_ret;
+								let client_clone = client_ret;
+								let push_handle_clone = push_handle_ret;
+								let bg_send_handle_clone = bg_send_handle_ret;
+								futures.push(Box::pin(async move {
+									interval.tick().await;
+
+									match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
+										Ok(()) => debug!("Alerts check completed successfully"),
+										Err(e) => warn!("Alerts check failed: {e}"),
+									}
+
+									(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+								}));
 							}
 						}
 						None => {
@@ -369,6 +406,8 @@ enum TaskResult {
 	Pull(Interval),
 	/// Background send completed (success or gave up after retries)
 	BackgroundSend,
+	/// Alerts check tick completed, return the interval to re-queue
+	AlertsCheck(Interval),
 }
 async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle, _client: &Client) {
 	// Use a larger buffer for push requests which can contain many updates

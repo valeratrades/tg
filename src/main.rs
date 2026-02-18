@@ -12,7 +12,7 @@ use tokio::{
 	io::{AsyncReadExt, AsyncWriteExt},
 	net::TcpStream,
 };
-use v_utils::{io::file_open::open, trades::Timeframe};
+use v_utils::io::file_open::open;
 
 use crate::{
 	config::{LiveSettings, SettingsFlags, TopicsMetadata},
@@ -125,8 +125,8 @@ async fn run() -> Result<()> {
 				Err(errors::TelegramApiError::from_status(status, body))?;
 			}
 		}
-		Commands::Server(args) => {
-			server::run(Arc::clone(&settings), args.pull_interval).await?;
+		Commands::Server(_) => {
+			server::run(Arc::clone(&settings)).await?;
 		}
 		Commands::Pull(args) => {
 			if args.reset {
@@ -389,11 +389,7 @@ struct PullArgs {
 	reset: bool,
 }
 #[derive(Args, Clone, Debug)]
-struct ServerArgs {
-	/// Interval for periodic pull from Telegram (e.g., "1m", "5m", "1h")
-	#[arg(long, default_value = "1m")]
-	pull_interval: Timeframe,
-}
+struct ServerArgs {}
 #[derive(Clone, Debug, Subcommand)]
 enum TodosCommands {
 	/// Compile TODOs from all topics into todos.md

@@ -174,12 +174,6 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 	}
 
 	info!("Pull complete");
-
-	// Check alerts channel for unread messages
-	if let Err(e) = crate::alerts::check_alerts(client, config).await {
-		warn!("Failed to check alerts: {e}");
-	}
-
 	Ok(())
 }
 /// A message fetched from MTProto

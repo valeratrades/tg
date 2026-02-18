@@ -93,6 +93,10 @@ pub(crate) struct AppConfig {
 	/// Named group destinations
 	#[primitives(skip)]
 	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
+	/// Interval for periodic pull from Telegram (default: 1m)
+	pub pull_interval: Option<Timeframe>,
+	/// Interval for alerts channel polling (default: 1m)
+	pub alerts_interval: Option<Timeframe>,
 	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
 	#[private_value]
 	pub alerts_channel: Option<TelegramDestination>,
@@ -109,6 +113,14 @@ pub(crate) struct AppConfig {
 impl AppConfig {
 	pub fn pull_todos_over(&self) -> Timeframe {
 		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
+	}
+
+	pub fn pull_interval(&self) -> Timeframe {
+		self.pull_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
+	}
+
+	pub fn alerts_interval(&self) -> Timeframe {
+		self.alerts_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
 	}
 
 	/// Get unique group IDs from all group destinations

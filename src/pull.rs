@@ -183,6 +183,7 @@ pub struct FetchedMessage {
 	pub date: i32,
 	pub text: String,
 	pub photo: Option<tl::types::Photo>,
+	pub voice: Option<tl::types::Document>,
 	/// True if the message was sent by the authenticated user (not a bot)
 	pub is_outgoing: bool,
 	/// True if the message was forwarded from another chat
@@ -521,11 +522,29 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						_ => None,
 					});
 
+					// Extract voice document if present
+					let voice = m.media.as_ref().and_then(|media| match media {
+						tl::enums::MessageMedia::Document(d) => d.document.as_ref().and_then(|doc| match doc {
+							tl::enums::Document::Document(d) => {
+								let is_voice = d.attributes.iter().any(|a| {
+									matches!(
+										a,
+										tl::enums::DocumentAttribute::Audio(audio) if audio.voice
+									)
+								});
+								if is_voice { Some(d.clone()) } else { None }
+							}
+							_ => None,
+						}),
+						_ => None,
+					});
+
 					messages.push(FetchedMessage {
 						id: m.id,
 						date: m.date,
 						text: m.message.clone(),
 						photo,
+						voice,
 						is_outgoing: m.out,
 						is_forwarded: m.fwd_from.is_some(),
 					});
@@ -863,6 +882,54 @@ fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
 
 	result
 }
+/// Download a voice document and transcribe via OpenAI Whisper.
+async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> eyre::Result<String> {
+	// Wrapper to implement Downloadable for raw tl::types::Document
+	struct RawDoc<'a>(&'a tl::types::Document);
+	impl grammers_client::types::Downloadable for RawDoc<'_> {
+		fn to_raw_input_location(&self) -> Option<grammers_tl_types::enums::InputFileLocation> {
+			Some(
+				grammers_tl_types::types::InputDocumentFileLocation {
+					id: self.0.id,
+					access_hash: self.0.access_hash,
+					file_reference: self.0.file_reference.clone(),
+					thumb_size: String::new(),
+				}
+				.into(),
+			)
+		}
+	}
+
+	// Download bytes
+	let mut download = client.iter_download(&RawDoc(doc));
+	let mut bytes = Vec::new();
+	while let Some(chunk) = download.next().await? {
+		bytes.extend_from_slice(&chunk);
+	}
+
+	// POST to OpenAI Whisper
+	let api_key = std::env::var("OPENAI_API_KEY")
+		.or_else(|_| std::env::var("OPENAI_KEY"))
+		.map_err(|_| eyre::eyre!("OPENAI_API_KEY not set"))?;
+
+	let part = reqwest::multipart::Part::bytes(bytes).file_name("voice.ogg").mime_str("audio/ogg")?;
+
+	let form = reqwest::multipart::Form::new().text("model", "whisper-1").part("file", part);
+
+	let client_http = reqwest::Client::new();
+	let resp = client_http
+		.post("https://api.openai.com/v1/audio/transcriptions")
+		.bearer_auth(api_key)
+		.multipart(form)
+		.send()
+		.await?
+		.error_for_status()?;
+
+	let json: serde_json::Value = resp.json().await?;
+	let text = json["text"].as_str().ok_or_else(|| eyre::eyre!("No text in Whisper response: {json}"))?.to_string();
+
+	Ok(text)
+}
 /// Merge MTProto messages into a topic file
 async fn merge_mtproto_messages_to_file(
 	client: &Client,
@@ -929,8 +996,22 @@ async fn merge_mtproto_messages_to_file(
 		// is_outgoing=true means sent by the authenticated user, false means bot or other users
 		let sender = if msg.is_outgoing { "user" } else { "bot" };
 
-		// Handle photo messages (just note them for now, TODO: implement download)
-		if msg.photo.is_some() {
+		if msg.voice.is_some() {
+			let doc = msg.voice.as_ref().unwrap();
+			let transcript = match download_and_transcribe(client, doc).await {
+				Ok(t) => t,
+				Err(e) => {
+					warn!(msg_id = msg.id, error = %e, "Voice transcription failed");
+					format!("[transcription failed: {e}]")
+				}
+			};
+			let content = format!("[voice] {transcript}");
+			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
+			// Inject `voice` qualifier into the tag so sync knows it's immutable
+			let formatted = formatted.replace(&format!("<!-- msg:{} {sender} -->", msg.id), &format!("<!-- msg:{} {sender} voice -->", msg.id));
+			new_content.push_str(&formatted);
+			last_write = Some(msg_time);
+		} else if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
 			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
 			new_content.push_str(&formatted);

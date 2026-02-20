@@ -996,8 +996,7 @@ async fn merge_mtproto_messages_to_file(
 		// is_outgoing=true means sent by the authenticated user, false means bot or other users
 		let sender = if msg.is_outgoing { "user" } else { "bot" };
 
-		if msg.voice.is_some() {
-			let doc = msg.voice.as_ref().unwrap();
+		if let Some(doc) = msg.voice.as_ref() {
 			let transcript = match download_and_transcribe(client, doc).await {
 				Ok(t) => t,
 				Err(e) => {

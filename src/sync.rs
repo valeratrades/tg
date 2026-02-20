@@ -283,7 +283,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 	}
 
 	let metadata = TopicsMetadata::load();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)((?:\s+\w+)*) -->").unwrap();
 
 	for (group_id, items) in &successful_deletions {
 		// Group by topic_id
@@ -412,12 +412,13 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 #[derive(Clone, Debug)]
 pub struct ParsedMessage {
 	pub content: String,
+	pub is_voice: bool,
 }
 /// Parse a topic file and extract all messages with their IDs
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let mut messages = BTreeMap::new();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)((?:\s+\w+)*) -->").unwrap();
 
 	let lines: Vec<&str> = content.lines().collect();
 	let mut i = 0;
@@ -444,8 +445,9 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 						&& let Some(caps) = msg_id_re.captures(lines[i])
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
+						let is_voice = has_voice_qualifier(&caps);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content });
+						messages.insert(id, ParsedMessage { content: msg_content, is_voice });
 					}
 					i += 1;
 					break;
@@ -454,8 +456,9 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 					if let Some(caps) = msg_id_re.captures(next_line)
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
+						let is_voice = has_voice_qualifier(&caps);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content });
+						messages.insert(id, ParsedMessage { content: msg_content, is_voice });
 					}
 					i += 1;
 					break;
@@ -471,9 +474,10 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 		if let Some(caps) = msg_id_re.captures(line)
 			&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 		{
+			let is_voice = has_voice_qualifier(&caps);
 			// Extract content by removing the message ID marker
 			let msg_content = msg_id_re.replace(line, "").trim().to_string();
-			messages.insert(id, ParsedMessage { content: msg_content });
+			messages.insert(id, ParsedMessage { content: msg_content, is_voice });
 		}
 
 		i += 1;
@@ -494,7 +498,7 @@ pub struct FileContentInfo {
 }
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: \w+)? -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)((?:\s+\w+)*) -->").unwrap();
 
 	let mut info = FileContentInfo {
 		last_tagged_line: None,
@@ -505,8 +509,9 @@ pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 	for (line_num, line) in content.lines().enumerate() {
 		if let Some(caps) = msg_id_re.captures(line) {
 			if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
+				let is_voice = has_voice_qualifier(&caps);
 				let msg_content = msg_id_re.replace(line, "").trim().to_string();
-				info.tagged_messages.insert(id, ParsedMessage { content: msg_content });
+				info.tagged_messages.insert(id, ParsedMessage { content: msg_content, is_voice });
 				info.last_tagged_line = Some(line_num);
 			}
 		} else {
@@ -618,7 +623,6 @@ pub struct FileChanges {
 	/// Content that was added before the last known message (cannot be sent back in time)
 	pub invalid_inserts: Vec<String>,
 }
-
 impl FileChanges {
 	pub fn is_empty(&self) -> bool {
 		self.deleted.is_empty() && self.edited.is_empty() && self.created.is_empty()
@@ -644,6 +648,8 @@ pub fn detect_changes(old_state: &BTreeMap<i32, ParsedMessage>, new_state: &BTre
 	for (id, new_msg) in new_state {
 		if let Some(old_msg) = old_state.get(id)
 			&& old_msg.content != new_msg.content
+			&& !old_msg.is_voice
+			&& !new_msg.is_voice
 		{
 			changes.edited.push((*id, new_msg.content.clone()));
 		}
@@ -681,6 +687,10 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 
 	None
 }
+fn has_voice_qualifier(caps: &regex::Captures<'_>) -> bool {
+	caps.get(2).map(|m| m.as_str().split_whitespace().any(|w| w == "voice")).unwrap_or(false)
+}
+
 /// Combine lines into discrete messages
 /// Lines starting with ". " mark message boundaries
 fn coalesce_new_messages(lines: &[String]) -> Vec<String> {
@@ -817,11 +827,29 @@ Legacy multi-line message
 	#[test]
 	fn test_detect_changes_deleted() {
 		let mut old = BTreeMap::new();
-		old.insert(1, ParsedMessage { content: "message 1".to_string() });
-		old.insert(2, ParsedMessage { content: "message 2".to_string() });
+		old.insert(
+			1,
+			ParsedMessage {
+				content: "message 1".to_string(),
+				is_voice: false,
+			},
+		);
+		old.insert(
+			2,
+			ParsedMessage {
+				content: "message 2".to_string(),
+				is_voice: false,
+			},
+		);
 
 		let mut new = BTreeMap::new();
-		new.insert(1, ParsedMessage { content: "message 1".to_string() });
+		new.insert(
+			1,
+			ParsedMessage {
+				content: "message 1".to_string(),
+				is_voice: false,
+			},
+		);
 		// message 2 is deleted
 
 		let changes = detect_changes(&old, &new);
@@ -832,15 +860,34 @@ Legacy multi-line message
 	#[test]
 	fn test_detect_changes_edited() {
 		let mut old = BTreeMap::new();
-		old.insert(1, ParsedMessage { content: "message 1".to_string() });
-		old.insert(2, ParsedMessage { content: "message 2".to_string() });
+		old.insert(
+			1,
+			ParsedMessage {
+				content: "message 1".to_string(),
+				is_voice: false,
+			},
+		);
+		old.insert(
+			2,
+			ParsedMessage {
+				content: "message 2".to_string(),
+				is_voice: false,
+			},
+		);
 
 		let mut new = BTreeMap::new();
-		new.insert(1, ParsedMessage { content: "message 1".to_string() });
+		new.insert(
+			1,
+			ParsedMessage {
+				content: "message 1".to_string(),
+				is_voice: false,
+			},
+		);
 		new.insert(
 			2,
 			ParsedMessage {
 				content: "message 2 edited".to_string(),
+				is_voice: false,
 			},
 		);
 
@@ -852,19 +899,44 @@ Legacy multi-line message
 	#[test]
 	fn test_detect_changes_mixed() {
 		let mut old = BTreeMap::new();
-		old.insert(1, ParsedMessage { content: "message 1".to_string() });
-		old.insert(2, ParsedMessage { content: "message 2".to_string() });
-		old.insert(3, ParsedMessage { content: "message 3".to_string() });
+		old.insert(
+			1,
+			ParsedMessage {
+				content: "message 1".to_string(),
+				is_voice: false,
+			},
+		);
+		old.insert(
+			2,
+			ParsedMessage {
+				content: "message 2".to_string(),
+				is_voice: false,
+			},
+		);
+		old.insert(
+			3,
+			ParsedMessage {
+				content: "message 3".to_string(),
+				is_voice: false,
+			},
+		);
 
 		let mut new = BTreeMap::new();
 		new.insert(
 			1,
 			ParsedMessage {
 				content: "message 1 edited".to_string(),
+				is_voice: false,
 			},
 		);
 		// message 2 deleted
-		new.insert(3, ParsedMessage { content: "message 3".to_string() });
+		new.insert(
+			3,
+			ParsedMessage {
+				content: "message 3".to_string(),
+				is_voice: false,
+			},
+		);
 
 		let changes = detect_changes(&old, &new);
 		assert_eq!(changes.deleted, vec![2]);

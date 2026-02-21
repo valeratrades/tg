@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub mod config;
+mod last;
 pub mod pull;
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
@@ -259,6 +260,9 @@ async fn run() -> Result<()> {
 			let has_alerts_channel = settings.config().map(|c| c.alerts_channel.is_some()).unwrap_or(false);
 			shell_init::output(args, has_alerts_channel);
 		}
+		Commands::Last(args) => {
+			last::run(args.count, &settings).await?;
+		}
 		Commands::ScheduleUpdate(args) => {
 			match args.action {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
@@ -356,6 +360,13 @@ enum Commands {
 	/// tg schedule-update edit 2244305221 1 2645 "new message text"
 	/// ```
 	ScheduleUpdate(ScheduleUpdateArgs),
+	/// Show the N most recent messages across all topics
+	/// Ex:
+	/// ```sh
+	/// tg last 10
+	/// tg last 3
+	/// ```
+	Last(LastArgs),
 }
 #[derive(Args, Clone, Debug)]
 struct SendArgs {
@@ -402,6 +413,11 @@ struct ScheduleUpdateArgs {
 	/// Action to perform
 	#[command(subcommand)]
 	action: UpdateAction,
+}
+#[derive(Args, Clone, Debug)]
+struct LastArgs {
+	/// Number of most recent messages to show
+	count: usize,
 }
 #[derive(Clone, Debug, Subcommand)]
 enum UpdateAction {
@@ -680,7 +696,7 @@ fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 }
 /// Build a map from message ID to date by scanning date headers in a topic file.
 /// Date headers look like "## Jan 03" or "## Jan 03, 2025".
-fn build_message_date_map(content: &str, current_year: i16, today: Date) -> std::collections::HashMap<i32, Date> {
+pub(crate) fn build_message_date_map(content: &str, current_year: i16, today: Date) -> std::collections::HashMap<i32, Date> {
 	use std::collections::HashMap;
 
 	let date_header_re = regex::Regex::new(r"^## ([A-Za-z]{3}) (\d{1,2})(?:, (\d{4}))?$").unwrap();

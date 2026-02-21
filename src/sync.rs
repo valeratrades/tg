@@ -1067,6 +1067,28 @@ that should be combined
 	}
 
 	#[test]
+	fn parse_file_messages_reply_to() {
+		let content = "check this out <!-- msg:100 reply_to:99 user -->\noriginal message <!-- msg:99 user -->\n";
+		let messages = parse_file_messages(content);
+		insta::assert_debug_snapshot!(messages, @r#"
+		{
+		    99: ParsedMessage {
+		        content: "original message",
+		        is_voice: false,
+		        reply_to_msg_id: None,
+		    },
+		    100: ParsedMessage {
+		        content: "check this out",
+		        is_voice: false,
+		        reply_to_msg_id: Some(
+		            99,
+		        ),
+		    },
+		}
+		"#);
+	}
+
+	#[test]
 	fn test_coalesce_new_messages() {
 		let lines = vec![
 			"First message".to_string(),

@@ -767,6 +767,8 @@ struct TodoItem {
 	group_id: u64,
 	/// Topic ID for this TODO's source
 	topic_id: u64,
+	/// Blockquote context from the replied-to message
+	reply_context: Option<String>,
 }
 /// Aggregate TODOs from all topic files into todos.md, returning the path
 fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
@@ -807,6 +809,22 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 					let date = msg_dates.get(msg_id).copied();
 					let include = date.map(|d| d >= cutoff_date).unwrap_or(true);
 					if include {
+						let reply_context = parsed.reply_to_msg_id.map(|reply_id| {
+							match messages.get(&reply_id) {
+								Some(replied) if replied.is_voice => "  > [voice]".to_string(),
+								Some(replied) if !replied.content.is_empty() => {
+									let text = replied.content.replace('\n', " ");
+									let truncated = if text.chars().count() > 120 {
+										let s: String = text.chars().take(117).collect();
+										format!("{s}...")
+									} else {
+										text
+									};
+									format!("  > {truncated}")
+								}
+								_ => format!("  > <{reply_id}>"),
+							}
+						});
 						todos.push(TodoItem {
 							content: parsed.content.clone(),
 							source: source.clone(),
@@ -814,6 +832,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 							message_id: Some(*msg_id),
 							group_id: *group_id,
 							topic_id: *topic_id,
+							reply_context,
 						});
 					}
 				}
@@ -853,6 +872,9 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 			let msg_id = todo.message_id.unwrap_or(0);
 			let tracking = format!(" <!-- todo:{}:{}:{msg_id} -->", todo.group_id, todo.topic_id);
 			output.push_str(&format!("- [ ] {}{date_str}{tracking}\n", todo.content));
+			if let Some(ctx) = &todo.reply_context {
+				output.push_str(&format!("{ctx}\n"));
+			}
 		}
 	}
 

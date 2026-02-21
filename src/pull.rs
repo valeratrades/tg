@@ -188,6 +188,8 @@ pub struct FetchedMessage {
 	pub is_outgoing: bool,
 	/// True if the message was forwarded from another chat
 	pub is_forwarded: bool,
+	/// ID of the message this is a reply to, if any
+	pub reply_to_msg_id: Option<i32>,
 }
 /// Get the file path for a topic
 pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
@@ -539,6 +541,11 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						_ => None,
 					});
 
+					let reply_to_msg_id = m.reply_to.as_ref().and_then(|r| match r {
+						tl::enums::MessageReplyHeader::Header(h) => h.reply_to_msg_id,
+						_ => None,
+					});
+
 					messages.push(FetchedMessage {
 						id: m.id,
 						date: m.date,
@@ -547,6 +554,7 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						voice,
 						is_outgoing: m.out,
 						is_forwarded: m.fwd_from.is_some(),
+						reply_to_msg_id,
 					});
 				}
 				tl::enums::Message::Service(_) => continue,
@@ -1005,18 +1013,19 @@ async fn merge_mtproto_messages_to_file(
 				}
 			};
 			let content = format!("[voice] {transcript}");
-			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
+			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			// Inject `voice` qualifier into the tag so sync knows it's immutable
-			let formatted = formatted.replace(&format!("<!-- msg:{} {sender} -->", msg.id), &format!("<!-- msg:{} {sender} voice -->", msg.id));
+			let reply_part = msg.reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
+			let formatted = formatted.replace(&format!("<!-- msg:{}{reply_part} {sender} -->", msg.id), &format!("<!-- msg:{}{reply_part} {sender} voice -->", msg.id));
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		} else if msg.photo.is_some() {
 			let content = if msg.text.is_empty() { "[photo]".to_string() } else { format!("[photo]\n{}", msg.text) };
-			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
+			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		} else if !msg.text.is_empty() {
-			let formatted = crate::server::format_message_append(&msg.text, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded);
+			let formatted = crate::server::format_message_append(&msg.text, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		}

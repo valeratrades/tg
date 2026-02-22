@@ -441,10 +441,6 @@ pub fn sanitize_topic_name(name: &str) -> String {
 		.trim_matches('_')
 		.to_string()
 }
-/// Get the session file path (same convention as social_networks)
-fn session_path(username: &str) -> PathBuf {
-	v_utils::xdg_state_file!(&format!("{}.session", username))
-}
 /// Get InputPeer from chat_id by iterating dialogs
 pub async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
 	let mut dialogs = client.iter_dialogs();
@@ -485,6 +481,19 @@ pub async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::
 
 	bail!("Could not find channel with id {chat_id} in dialogs. Make sure the user account has access to this group.")
 }
+/// Extract channel ID from chat_id (strips -100 prefix)
+pub fn extract_channel_id(chat_id: i64) -> i64 {
+	let s = chat_id.to_string();
+	if let Some(stripped) = s.strip_prefix("-100") {
+		stripped.parse().unwrap_or(0)
+	} else {
+		chat_id.abs()
+	}
+}
+/// Get the session file path (same convention as social_networks)
+fn session_path(username: &str) -> PathBuf {
+	v_utils::xdg_state_file!(&format!("{}.session", username))
+}
 /// Extract the message ID from an Updates response
 fn extract_message_id_from_updates(updates: &tl::enums::Updates) -> Result<i32> {
 	match updates {
@@ -506,15 +515,6 @@ fn extract_message_id_from_updates(updates: &tl::enums::Updates) -> Result<i32> 
 		_ => {}
 	}
 	bail!("Could not extract message ID from Updates response")
-}
-/// Extract channel ID from chat_id (strips -100 prefix)
-pub fn extract_channel_id(chat_id: i64) -> i64 {
-	let s = chat_id.to_string();
-	if let Some(stripped) = s.strip_prefix("-100") {
-		stripped.parse().unwrap_or(0)
-	} else {
-		chat_id.abs()
-	}
 }
 /// Generate a random i64 for use as random_id in Telegram requests
 fn rand_i64() -> i64 {

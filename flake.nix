@@ -25,12 +25,19 @@
           pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
-          github = v-utils.github {
-            inherit pkgs pname;
-            langs = [ "rs" ];
-            lastSupportedVersion = "nightly-2025-10-10";
-            jobs.default = true;
-          };
+          github =
+            let
+              jobDeps = { packages = [ "mold" ]; debug = true; };
+            in
+            v-utils.github {
+              inherit pkgs pname;
+              langs = [ "rs" ];
+              lastSupportedVersion = "nightly-2025-10-10";
+              jobs = {
+                default = true;
+                warnings.install = jobDeps;
+              };
+            };
           readme = v-utils.readme-fw {
             inherit pkgs pname;
             lastSupportedVersion = "nightly-1.92";

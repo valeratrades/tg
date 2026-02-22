@@ -1,4 +1,4 @@
-use eyre::{Result, eyre};
+use eyre::Result;
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use jiff::Timestamp;
@@ -118,7 +118,7 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 		info!("Pulling messages for group {group_id} ({} topics)...", group.topics.len());
 
 		// Get InputPeer for this group
-		let input_peer = match get_input_peer(client, group_id).await {
+		let input_peer = match mtproto::get_input_peer(client, telegram_chat_id(group_id)).await {
 			Ok(p) => p,
 			Err(e) => {
 				warn!("Could not get peer for group {group_id}: {e}");
@@ -417,58 +417,6 @@ fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 	}
 
 	last_date
-}
-/// Get InputPeer from group_id by iterating dialogs
-async fn get_input_peer(client: &Client, group_id: u64) -> Result<tl::enums::InputPeer> {
-	let chat_id = telegram_chat_id(group_id);
-	let mut dialogs = client.iter_dialogs();
-
-	// chat_id is like -1002244305221, we want 2244305221
-	let expected_id = if chat_id < 0 {
-		let s = chat_id.to_string();
-		if let Some(stripped) = s.strip_prefix("-100") {
-			stripped.parse::<i64>().unwrap_or(0)
-		} else {
-			chat_id.abs()
-		}
-	} else {
-		chat_id
-	};
-
-	while let Some(dialog) = dialogs.next().await? {
-		match &dialog.raw {
-			tl::enums::Dialog::Dialog(d) => {
-				let peer_id = match &d.peer {
-					tl::enums::Peer::Channel(c) => c.channel_id,
-					tl::enums::Peer::Chat(c) => c.chat_id,
-					tl::enums::Peer::User(u) => u.user_id,
-				};
-
-				if peer_id == expected_id {
-					let peer = dialog.peer();
-					match peer {
-						grammers_client::types::Peer::Group(g) =>
-							if let tl::enums::Chat::Channel(ch) = &g.raw {
-								return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-									channel_id: ch.id,
-									access_hash: ch.access_hash.unwrap_or(0),
-								}));
-							},
-						grammers_client::types::Peer::Channel(c) => {
-							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-								channel_id: c.raw.id,
-								access_hash: c.raw.access_hash.unwrap_or(0),
-							}));
-						}
-						_ => {}
-					}
-				}
-			}
-			tl::enums::Dialog::Folder(_) => continue,
-		}
-	}
-
-	Err(eyre!("Could not find channel with id {group_id} in dialogs"))
 }
 /// Fetch messages from a forum topic using MTProto
 async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer, topic_id: i32, min_id: i32, limit: usize) -> Result<Vec<FetchedMessage>> {
@@ -1016,7 +964,10 @@ async fn merge_mtproto_messages_to_file(
 			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			// Inject `voice` qualifier into the tag so sync knows it's immutable
 			let reply_part = msg.reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
-			let formatted = formatted.replace(&format!("<!-- msg:{}{reply_part} {sender} -->", msg.id), &format!("<!-- msg:{}{reply_part} {sender} voice -->", msg.id));
+			let formatted = formatted.replace(
+				&format!("<!-- msg:{}{reply_part} {sender} -->", msg.id),
+				&format!("<!-- msg:{}{reply_part} {sender} voice -->", msg.id),
+			);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
 		} else if msg.photo.is_some() {

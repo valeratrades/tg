@@ -446,23 +446,11 @@ fn session_path(username: &str) -> PathBuf {
 	v_utils::xdg_state_file!(&format!("{}.session", username))
 }
 /// Get InputPeer from chat_id by iterating dialogs
-async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
+pub async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
 	let mut dialogs = client.iter_dialogs();
-
-	// chat_id is like -1002244305221, we want 2244305221
-	let expected_id = if chat_id < 0 {
-		let s = chat_id.to_string();
-		if let Some(stripped) = s.strip_prefix("-100") {
-			stripped.parse::<i64>().unwrap_or(0)
-		} else {
-			chat_id.abs()
-		}
-	} else {
-		chat_id
-	};
+	let expected_id = extract_channel_id(chat_id);
 
 	while let Some(dialog) = dialogs.next().await? {
-		// Check if this is the right peer by examining the raw dialog data
 		match &dialog.raw {
 			tl::enums::Dialog::Dialog(d) => {
 				let peer_id = match &d.peer {
@@ -472,18 +460,15 @@ async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::Inpu
 				};
 
 				if peer_id == expected_id {
-					// Use the peer from dialog to get InputPeer
 					let peer = dialog.peer();
 					match peer {
-						grammers_client::types::Peer::Group(g) => {
-							// Get access_hash from raw channel data
+						grammers_client::types::Peer::Group(g) =>
 							if let tl::enums::Chat::Channel(ch) = &g.raw {
 								return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
 									channel_id: ch.id,
 									access_hash: ch.access_hash.unwrap_or(0),
 								}));
-							}
-						}
+							},
 						grammers_client::types::Peer::Channel(c) => {
 							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
 								channel_id: c.raw.id,
@@ -523,7 +508,7 @@ fn extract_message_id_from_updates(updates: &tl::enums::Updates) -> Result<i32> 
 	bail!("Could not extract message ID from Updates response")
 }
 /// Extract channel ID from chat_id (strips -100 prefix)
-fn extract_channel_id(chat_id: i64) -> i64 {
+pub fn extract_channel_id(chat_id: i64) -> i64 {
 	let s = chat_id.to_string();
 	if let Some(stripped) = s.strip_prefix("-100") {
 		stripped.parse().unwrap_or(0)

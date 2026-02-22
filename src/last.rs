@@ -1,17 +1,10 @@
 use eyre::Result;
 use jiff::civil::Date;
 
-use crate::config::{LiveSettings, TopicsMetadata};
-use crate::pull::topic_filepath;
-
-struct RawMessage {
-	message_id: i32,
-	date: Date,
-	content: String,
-	is_voice: bool,
-	group_name: String,
-	topic_name: String,
-}
+use crate::{
+	config::{LiveSettings, TopicsMetadata},
+	pull::topic_filepath,
+};
 
 pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
 	let metadata = TopicsMetadata::load();
@@ -75,6 +68,14 @@ pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
 	}
 
 	Ok(())
+}
+struct RawMessage {
+	message_id: i32,
+	date: Date,
+	content: String,
+	is_voice: bool,
+	group_name: String,
+	topic_name: String,
 }
 
 fn format_display_content(content: &str, is_voice: bool) -> String {

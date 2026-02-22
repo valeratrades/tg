@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
 
-use crate::config::LiveSettings;
+use crate::{config::LiveSettings, mtproto};
 
 /// Persisted state for alerts channel notifications
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -149,11 +149,11 @@ async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Opti
 	let chat_id = telegram_chat_id(group_id);
 
 	// Get InputPeer by iterating dialogs
-	let input_peer = get_input_peer(client, chat_id).await?;
+	let input_peer = mtproto::get_input_peer(client, chat_id).await?;
 
 	// Get unread count and read inbox max ID from the dialog
 	let mut dialogs = client.iter_dialogs();
-	let expected_id = extract_channel_id(chat_id);
+	let expected_id = mtproto::extract_channel_id(chat_id);
 
 	let mut read_inbox_max_id = 0;
 
@@ -241,50 +241,4 @@ async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Opti
 	}
 
 	Ok(unread_messages)
-}
-/// Extract channel ID from chat_id (strips -100 prefix)
-fn extract_channel_id(chat_id: i64) -> i64 {
-	let s = chat_id.to_string();
-	if let Some(stripped) = s.strip_prefix("-100") {
-		stripped.parse().unwrap_or(0)
-	} else {
-		chat_id.abs()
-	}
-}
-/// Get InputPeer from chat_id by iterating dialogs
-async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::InputPeer> {
-	let mut dialogs = client.iter_dialogs();
-	let expected_id = extract_channel_id(chat_id);
-
-	while let Some(dialog) = dialogs.next().await? {
-		if let tl::enums::Dialog::Dialog(d) = &dialog.raw {
-			let peer_id = match &d.peer {
-				tl::enums::Peer::Channel(c) => c.channel_id,
-				tl::enums::Peer::Chat(c) => c.chat_id,
-				tl::enums::Peer::User(u) => u.user_id,
-			};
-
-			if peer_id == expected_id {
-				let peer = dialog.peer();
-				match peer {
-					grammers_client::types::Peer::Group(g) =>
-						if let tl::enums::Chat::Channel(ch) = &g.raw {
-							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-								channel_id: ch.id,
-								access_hash: ch.access_hash.unwrap_or(0),
-							}));
-						},
-					grammers_client::types::Peer::Channel(c) => {
-						return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
-							channel_id: c.raw.id,
-							access_hash: c.raw.access_hash.unwrap_or(0),
-						}));
-					}
-					_ => {}
-				}
-			}
-		}
-	}
-
-	eyre::bail!("Could not find channel with id {chat_id} in dialogs")
 }

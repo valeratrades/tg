@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "tg"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "clap",
  "clap-stdin",

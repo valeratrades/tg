@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use eyre::Result;
 use jiff::civil::Date;
 
@@ -6,12 +8,55 @@ use crate::{
 	pull::topic_filepath,
 };
 
-pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
+pub async fn run(count: usize, config: &LiveSettings) -> Result<()> {
+	let mut all_messages = load_all_messages();
+
+	all_messages.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.message_id.cmp(&b.message_id)));
+
+	let start = all_messages.len().saturating_sub(count);
+	let last_n = &all_messages[start..];
+
+	if !confirm_large_output(last_n.len(), config)? {
+		return Ok(());
+	}
+
+	print_message_groups(&group_consecutive(last_n));
+
+	Ok(())
+}
+
+/// Prompt for confirmation if message count exceeds the configured threshold.
+/// Returns true to proceed, false to abort.
+pub(crate) fn confirm_large_output(count: usize, config: &LiveSettings) -> Result<bool> {
+	let threshold = config.config()?.print_confirm_threshold();
+	if count <= threshold {
+		return Ok(true);
+	}
+	eprint!("{count} messages matched. Continue? [y/N] ");
+	std::io::stderr().flush()?;
+	let mut input = String::new();
+	std::io::stdin().read_line(&mut input)?;
+	Ok(input.trim().eq_ignore_ascii_case("y"))
+}
+
+pub(crate) struct RawMessage {
+	pub message_id: i32,
+	pub date: Date,
+	/// UTC unix timestamp from the message tag, if available.
+	pub ts: Option<i64>,
+	pub content: String,
+	pub is_voice: bool,
+	pub group_name: String,
+	pub topic_name: String,
+}
+
+/// Load all messages from all topic files.
+pub(crate) fn load_all_messages() -> Vec<RawMessage> {
 	let metadata = TopicsMetadata::load();
 	let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
 	let current_year = today.year();
 
-	let mut all_messages: Vec<RawMessage> = Vec::new();
+	let mut all_messages = Vec::new();
 
 	for (group_id, group) in &metadata.groups {
 		let group_name = group.name.as_deref().unwrap_or(&format!("group_{group_id}")).to_string();
@@ -31,6 +76,7 @@ pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
 				all_messages.push(RawMessage {
 					message_id: msg_id,
 					date,
+					ts: parsed_msg.ts,
 					content: parsed_msg.content,
 					is_voice: parsed_msg.is_voice,
 					group_name: group_name.clone(),
@@ -40,22 +86,24 @@ pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
 		}
 	}
 
-	all_messages.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.message_id.cmp(&b.message_id)));
+	all_messages
+}
 
-	let start = all_messages.len().saturating_sub(count);
-	let last_n = &all_messages[start..];
-
-	// Group consecutive same-topic messages
-	let mut groups: Vec<(String, String, Vec<&RawMessage>)> = Vec::new();
-	for msg in last_n {
-		let matches_prev = groups.last().is_some_and(|(g, t, _)| g == &msg.group_name && t == &msg.topic_name);
+/// Group consecutive same-topic messages together.
+pub(crate) fn group_consecutive(messages: &[RawMessage]) -> Vec<(&str, &str, Vec<&RawMessage>)> {
+	let mut groups: Vec<(&str, &str, Vec<&RawMessage>)> = Vec::new();
+	for msg in messages {
+		let matches_prev = groups.last().is_some_and(|(g, t, _)| *g == msg.group_name && *t == msg.topic_name);
 		if matches_prev {
 			groups.last_mut().unwrap().2.push(msg);
 		} else {
-			groups.push((msg.group_name.clone(), msg.topic_name.clone(), vec![msg]));
+			groups.push((&msg.group_name, &msg.topic_name, vec![msg]));
 		}
 	}
+	groups
+}
 
+pub(crate) fn print_message_groups(groups: &[(&str, &str, Vec<&RawMessage>)]) {
 	for (i, (group_name, topic_name, messages)) in groups.iter().enumerate() {
 		if i > 0 {
 			println!();
@@ -63,24 +111,33 @@ pub async fn run(count: usize, _config: &LiveSettings) -> Result<()> {
 		println!("## {group_name}/{topic_name}");
 		for msg in messages {
 			let display_content = format_display_content(&msg.content, msg.is_voice);
-			println!("[{} UTC] {display_content}", msg.date.strftime("%Y-%m-%d 00:00"));
+			let time_str = format_message_time(msg);
+			println!("[{time_str}] {display_content}");
 		}
 	}
-
-	Ok(())
 }
-struct RawMessage {
-	message_id: i32,
-	date: Date,
-	content: String,
-	is_voice: bool,
-	group_name: String,
-	topic_name: String,
+
+fn format_message_time(msg: &RawMessage) -> String {
+	match msg.ts {
+		Some(ts) => {
+			let timestamp = jiff::Timestamp::from_second(ts).expect("valid unix timestamp");
+			let zoned = timestamp.to_zoned(jiff::tz::TimeZone::UTC);
+			format!("{} UTC", zoned.strftime("%Y-%m-%d %H:%M"))
+		}
+		#[allow(deprecated)]
+		None => format_message_time_legacy(msg.date),
+	}
+}
+
+/// Format timestamp for messages without embedded `ts:` in their tag.
+/// These predate ts: support and only have date-level granularity from file headers.
+#[deprecated(since = "1.0.0", note = "all messages should have ts: in their tag by now")]
+fn format_message_time_legacy(date: Date) -> String {
+	format!("{} UNKNOWN UTC", date.strftime("%Y-%m-%d"))
 }
 
 fn format_display_content(content: &str, is_voice: bool) -> String {
 	if is_voice {
-		// Strip [voice] prefix
 		let text = content.strip_prefix("[voice] ").unwrap_or(content);
 		return text.to_string();
 	}

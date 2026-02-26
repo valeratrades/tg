@@ -23,6 +23,7 @@ use crate::{
 pub mod config;
 mod last;
 pub mod pull;
+mod since;
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
 pub struct Cli {
@@ -263,6 +264,9 @@ async fn run() -> Result<()> {
 		Commands::Last(args) => {
 			last::run(args.count, &settings).await?;
 		}
+		Commands::Since(args) => {
+			since::run(args.datetime, args.back, &settings).await?;
+		}
 		Commands::ScheduleUpdate(args) => {
 			match args.action {
 				UpdateAction::Delete { group_id, topic_id, message_id } => {
@@ -367,6 +371,16 @@ enum Commands {
 	/// tg last 3
 	/// ```
 	Last(LastArgs),
+	/// Show all messages since a given date (or timeframe back from now)
+	/// Ex:
+	/// ```sh
+	/// tg since 2025-01-15
+	/// tg since 01-15
+	/// tg since 15
+	/// tg since -b 3d
+	/// tg since --back 1w
+	/// ```
+	Since(SinceArgs),
 }
 #[derive(Args, Clone, Debug)]
 struct SendArgs {
@@ -418,6 +432,14 @@ struct ScheduleUpdateArgs {
 struct LastArgs {
 	/// Number of most recent messages to show
 	count: usize,
+}
+#[derive(Args, Clone, Debug)]
+struct SinceArgs {
+	/// Date to show messages from (YYYY-MM-DD, MM-DD, or DD; missing parts filled from now)
+	datetime: Option<String>,
+	/// Show messages from this timeframe back from now (e.g. 3d, 1w, 2h)
+	#[arg(short, long)]
+	back: Option<v_utils::trades::Timeframe>,
 }
 #[derive(Clone, Debug, Subcommand)]
 enum UpdateAction {
@@ -986,6 +1008,7 @@ mod tests {
 			content: content.to_string(),
 			is_voice,
 			reply_to_msg_id: None,
+			ts: None,
 		}
 	}
 

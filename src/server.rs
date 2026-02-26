@@ -331,14 +331,23 @@ async fn send_message_mtproto(client: &Client, message: &Message) -> Result<i32>
 	crate::mtproto::send_text_message(client, message.group_id, message.topic_id, &message.message).await
 }
 
-pub(crate) fn format_message_append(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>, forwarded: bool, reply_to_msg_id: Option<i32>) -> String {
+pub(crate) fn format_message_append(
+	message: &str,
+	last_write_datetime: Option<Timestamp>,
+	now: Timestamp,
+	msg_id: Option<i32>,
+	sender: Option<&str>,
+	forwarded: bool,
+	reply_to_msg_id: Option<i32>,
+) -> String {
 	debug!("Formatting message append");
 
 	let fwd_prefix = if forwarded { "forwarded " } else { "" };
+	let ts_part = format!(" ts:{}", now.as_second());
 	let reply_part = reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
 	let id_suffix = match (msg_id, sender) {
-		(Some(id), Some(s)) => format!(" <!-- {fwd_prefix}msg:{id}{reply_part} {s} -->"),
-		(Some(id), None) => format!(" <!-- {fwd_prefix}msg:{id}{reply_part} -->"),
+		(Some(id), Some(s)) => format!(" <!-- {fwd_prefix}msg:{id}{ts_part}{reply_part} {s} -->"),
+		(Some(id), None) => format!(" <!-- {fwd_prefix}msg:{id}{ts_part}{reply_part} -->"),
 		_ => String::new(),
 	};
 
@@ -669,7 +678,7 @@ mod tests {
 
 		// will no longer need separate repo for it
 		`````
-		<!-- msg:123 user -->
+		<!-- msg:123 ts:0 user -->
 		");
 	}
 
@@ -681,7 +690,7 @@ mod tests {
 		let now = Timestamp::UNIX_EPOCH;
 		let formatted = format_message_append_with_sender(message, None, now, Some(456), Some("bot"));
 
-		insta::assert_snapshot!(formatted, @"just a simple message <!-- msg:456 bot -->");
+		insta::assert_snapshot!(formatted, @"just a simple message <!-- msg:456 ts:0 bot -->");
 	}
 
 	#[test]
@@ -721,7 +730,37 @@ mod tests {
 
 		// The msg tag should be on the NEXT line
 		let tag_line = lines[fence_line_idx + 1];
-		assert!(tag_line.contains("<!-- msg:999 bot -->"), "Tag should be on line after closing fence, got: {tag_line:?}");
+		assert!(
+			tag_line.contains("<!-- msg:999") && tag_line.contains("bot -->"),
+			"Tag should be on line after closing fence, got: {tag_line:?}"
+		);
+	}
+
+	#[test]
+	fn no_duplicate_date_header_with_stale_xattr() {
+		// Regression test: when pull writes "## Feb 25, 2026" header + messages to file
+		// but the xattr still has a timestamp from Feb 24, the send path would read the
+		// stale xattr and emit another "## Feb 25, 2026" header → duplicate.
+		//
+		// After the fix, merge_mtproto_messages_to_file updates xattr, so the send path
+		// sees the correct last_write_datetime and doesn't emit a duplicate.
+
+		// Simulate: xattr says "Feb 24 at 22:00" (stale from previous session)
+		let stale_xattr_time = jiff::civil::date(2026, 2, 24).at(22, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp();
+		// New message arrives on Feb 25 at 14:00
+		let now = jiff::civil::date(2026, 2, 25).at(14, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp();
+
+		let formatted = format_message_append_with_sender("new message after restart", Some(stale_xattr_time), now, Some(3416), None);
+		// With stale xattr pointing to Feb 24, this would emit "## Feb 25, 2026" header
+		// even though the file already has that header from pull.
+		assert!(formatted.contains("## Feb 25, 2026"), "stale xattr produces date header (pre-fix behavior)");
+
+		// Now simulate the correct scenario: xattr updated by pull to reflect actual last message time
+		let correct_xattr_time = jiff::civil::date(2026, 2, 25).at(12, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap().timestamp();
+		let formatted = format_message_append_with_sender("new message after restart", Some(correct_xattr_time), now, Some(3416), None);
+		// With correct xattr on the same day (2h gap > 6min), should get ". " prefix, NOT a new header
+		assert!(!formatted.contains("## Feb 25"), "correct xattr should not produce duplicate header");
+		assert!(formatted.contains(". new message"), "same-day gap should produce dot prefix");
 	}
 
 	#[test]

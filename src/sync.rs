@@ -283,7 +283,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 	}
 
 	let metadata = TopicsMetadata::load();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
 
 	for (group_id, items) in &successful_deletions {
 		// Group by topic_id
@@ -414,12 +414,14 @@ pub struct ParsedMessage {
 	pub content: String,
 	pub is_voice: bool,
 	pub reply_to_msg_id: Option<i32>,
+	/// UTC unix timestamp from the message tag (None for old messages without ts:)
+	pub ts: Option<i64>,
 }
 /// Parse a topic file and extract all messages with their IDs
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let mut messages = BTreeMap::new();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
 
 	let lines: Vec<&str> = content.lines().collect();
 	let mut i = 0;
@@ -448,8 +450,17 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 					{
 						let is_voice = has_voice_qualifier(&caps);
 						let reply_to_msg_id = extract_reply_to(&caps);
+						let ts = extract_ts(&caps);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content, is_voice, reply_to_msg_id });
+						messages.insert(
+							id,
+							ParsedMessage {
+								content: msg_content,
+								is_voice,
+								reply_to_msg_id,
+								ts,
+							},
+						);
 					}
 					i += 1;
 					break;
@@ -460,8 +471,17 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 					{
 						let is_voice = has_voice_qualifier(&caps);
 						let reply_to_msg_id = extract_reply_to(&caps);
+						let ts = extract_ts(&caps);
 						let msg_content = block_content.join("\n");
-						messages.insert(id, ParsedMessage { content: msg_content, is_voice, reply_to_msg_id });
+						messages.insert(
+							id,
+							ParsedMessage {
+								content: msg_content,
+								is_voice,
+								reply_to_msg_id,
+								ts,
+							},
+						);
 					}
 					i += 1;
 					break;
@@ -479,9 +499,18 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 		{
 			let is_voice = has_voice_qualifier(&caps);
 			let reply_to_msg_id = extract_reply_to(&caps);
+			let ts = extract_ts(&caps);
 			// Extract content by removing the message ID marker
 			let msg_content = msg_id_re.replace(line, "").trim().to_string();
-			messages.insert(id, ParsedMessage { content: msg_content, is_voice, reply_to_msg_id });
+			messages.insert(
+				id,
+				ParsedMessage {
+					content: msg_content,
+					is_voice,
+					reply_to_msg_id,
+					ts,
+				},
+			);
 		}
 
 		i += 1;
@@ -502,7 +531,7 @@ pub struct FileContentInfo {
 }
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
 
 	let mut info = FileContentInfo {
 		last_tagged_line: None,
@@ -515,8 +544,17 @@ pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 			if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
 				let is_voice = has_voice_qualifier(&caps);
 				let reply_to_msg_id = extract_reply_to(&caps);
+				let ts = extract_ts(&caps);
 				let msg_content = msg_id_re.replace(line, "").trim().to_string();
-				info.tagged_messages.insert(id, ParsedMessage { content: msg_content, is_voice, reply_to_msg_id });
+				info.tagged_messages.insert(
+					id,
+					ParsedMessage {
+						content: msg_content,
+						is_voice,
+						reply_to_msg_id,
+						ts,
+					},
+				);
 				info.last_tagged_line = Some(line_num);
 			}
 		} else {
@@ -693,9 +731,12 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 	None
 }
 fn has_voice_qualifier(caps: &regex::Captures<'_>) -> bool {
-	caps.get(3).map(|m| m.as_str().split_whitespace().any(|w| w == "voice")).unwrap_or(false)
+	caps.get(4).map(|m| m.as_str().split_whitespace().any(|w| w == "voice")).unwrap_or(false)
 }
 fn extract_reply_to(caps: &regex::Captures<'_>) -> Option<i32> {
+	caps.get(3).and_then(|m| m.as_str().parse().ok())
+}
+pub(crate) fn extract_ts(caps: &regex::Captures<'_>) -> Option<i64> {
 	caps.get(2).and_then(|m| m.as_str().parse().ok())
 }
 
@@ -841,6 +882,7 @@ Legacy multi-line message
 				content: "message 1".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		old.insert(
@@ -849,6 +891,7 @@ Legacy multi-line message
 				content: "message 2".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 
@@ -859,6 +902,7 @@ Legacy multi-line message
 				content: "message 1".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		// message 2 is deleted
@@ -877,6 +921,7 @@ Legacy multi-line message
 				content: "message 1".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		old.insert(
@@ -885,6 +930,7 @@ Legacy multi-line message
 				content: "message 2".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 
@@ -895,6 +941,7 @@ Legacy multi-line message
 				content: "message 1".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		new.insert(
@@ -903,6 +950,7 @@ Legacy multi-line message
 				content: "message 2 edited".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 
@@ -920,6 +968,7 @@ Legacy multi-line message
 				content: "message 1".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		old.insert(
@@ -928,6 +977,7 @@ Legacy multi-line message
 				content: "message 2".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		old.insert(
@@ -936,6 +986,7 @@ Legacy multi-line message
 				content: "message 3".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 
@@ -946,6 +997,7 @@ Legacy multi-line message
 				content: "message 1 edited".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 		// message 2 deleted
@@ -955,6 +1007,7 @@ Legacy multi-line message
 				content: "message 3".to_string(),
 				is_voice: false,
 				reply_to_msg_id: None,
+				ts: None,
 			},
 		);
 
@@ -1076,6 +1129,7 @@ that should be combined
 		        content: "original message",
 		        is_voice: false,
 		        reply_to_msg_id: None,
+		        ts: None,
 		    },
 		    100: ParsedMessage {
 		        content: "check this out",
@@ -1083,6 +1137,7 @@ that should be combined
 		        reply_to_msg_id: Some(
 		            99,
 		        ),
+		        ts: None,
 		    },
 		}
 		"#);

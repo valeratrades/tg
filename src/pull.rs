@@ -4,6 +4,7 @@ use grammers_tl_types as tl;
 use jiff::Timestamp;
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
+use xattr::FileExt as _;
 
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
@@ -963,10 +964,11 @@ async fn merge_mtproto_messages_to_file(
 			let content = format!("[voice] {transcript}");
 			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			// Inject `voice` qualifier into the tag so sync knows it's immutable
+			let ts_part = format!(" ts:{}", msg_time.as_second());
 			let reply_part = msg.reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
 			let formatted = formatted.replace(
-				&format!("<!-- msg:{}{reply_part} {sender} -->", msg.id),
-				&format!("<!-- msg:{}{reply_part} {sender} voice -->", msg.id),
+				&format!("<!-- msg:{}{ts_part}{reply_part} {sender} -->", msg.id),
+				&format!("<!-- msg:{}{ts_part}{reply_part} {sender} voice -->", msg.id),
 			);
 			new_content.push_str(&formatted);
 			last_write = Some(msg_time);
@@ -984,6 +986,18 @@ async fn merge_mtproto_messages_to_file(
 
 	// Write the complete file
 	std::fs::write(&chat_filepath, &new_content)?;
+
+	// Update xattr with the last message timestamp so the send path
+	// (which reads xattr for last_write_datetime) stays in sync with pull-written content.
+	// Without this, the send path uses stale xattr and can emit duplicate date headers.
+	if let Some(last_ts) = last_write {
+		if let Ok(file) = std::fs::File::open(&chat_filepath) {
+			let ts_str = last_ts.to_string();
+			if let Err(e) = file.set_xattr("user.last_changed", ts_str.as_bytes()) {
+				warn!("Failed to set xattr after merge: {e}");
+			}
+		}
+	}
 
 	Ok(())
 }

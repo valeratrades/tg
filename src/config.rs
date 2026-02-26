@@ -100,6 +100,8 @@ pub(crate) struct AppConfig {
 	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
 	#[private_value]
 	pub alerts_channel: Option<TelegramDestination>,
+	/// Maximum number of messages to print without confirmation prompt (default: 64)
+	pub print_confirm_threshold: Option<usize>,
 	/// Telegram API ID from https://my.telegram.org/
 	pub api_id: Option<i32>,
 	/// Telegram API hash (can be { env = "VAR_NAME" })
@@ -121,6 +123,10 @@ impl AppConfig {
 
 	pub fn alerts_interval(&self) -> Timeframe {
 		self.alerts_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
+	}
+
+	pub fn print_confirm_threshold(&self) -> usize {
+		self.print_confirm_threshold.unwrap_or(64)
 	}
 
 	/// Get unique group IDs from all group destinations

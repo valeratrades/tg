@@ -990,12 +990,12 @@ async fn merge_mtproto_messages_to_file(
 	// Update xattr with the last message timestamp so the send path
 	// (which reads xattr for last_write_datetime) stays in sync with pull-written content.
 	// Without this, the send path uses stale xattr and can emit duplicate date headers.
-	if let Some(last_ts) = last_write {
-		if let Ok(file) = std::fs::File::open(&chat_filepath) {
-			let ts_str = last_ts.to_string();
-			if let Err(e) = file.set_xattr("user.last_changed", ts_str.as_bytes()) {
-				warn!("Failed to set xattr after merge: {e}");
-			}
+	if let Some(last_ts) = last_write
+		&& let Ok(file) = std::fs::File::open(&chat_filepath)
+	{
+		let ts_str = last_ts.to_string();
+		if let Err(e) = file.set_xattr("user.last_changed", ts_str.as_bytes()) {
+			warn!("Failed to set xattr after merge: {e}");
 		}
 	}
 

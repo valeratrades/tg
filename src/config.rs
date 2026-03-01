@@ -100,6 +100,8 @@ pub(crate) struct AppConfig {
 	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
 	#[private_value]
 	pub alerts_channel: Option<TelegramDestination>,
+	/// Inline reply context in TODOs if message is under this many chars (default: 256). 0 to always link.
+	pub inline_up_to_chars: Option<usize>,
 	/// Maximum number of messages to print without confirmation prompt (default: 64)
 	pub print_confirm_threshold: Option<usize>,
 	/// Telegram API ID from https://my.telegram.org/
@@ -123,6 +125,10 @@ impl AppConfig {
 
 	pub fn alerts_interval(&self) -> Timeframe {
 		self.alerts_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
+	}
+
+	pub fn inline_up_to_chars(&self) -> usize {
+		self.inline_up_to_chars.unwrap_or(256)
 	}
 
 	pub fn print_confirm_threshold(&self) -> usize {

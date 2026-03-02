@@ -2,13 +2,63 @@ use std::{future::Future, io::Write as _, path::PathBuf, sync::Arc};
 
 use eyre::{Result, bail, eyre};
 use grammers_client::{Client, SignInError};
-use grammers_mtsender::SenderPool;
+use grammers_mtsender::{SenderPool, SenderPoolRunner};
 use grammers_session::storages::SqliteSession;
 use grammers_tl_types as tl;
 use tg::telegram_chat_id;
 use tracing::{debug, error, info, warn};
 
 use crate::config::LiveSettings;
+
+/// An authenticated MTProto session ready to use.
+/// The runner must be driven (via `runner.run()`) for the client to work.
+pub struct MtprotoSession {
+	pub client: Client,
+	pub runner: SenderPoolRunner,
+}
+
+/// Create an authenticated MTProto session without starting the runner.
+/// For server use — the caller drives the runner and can reconnect on failure.
+pub async fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
+	let cfg = config.config()?;
+	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
+	let username = cfg.username.clone().unwrap_or_else(|| "@user".to_string());
+
+	let session_file = session_path(&username);
+	info!("Using session file: {}", session_file.display());
+
+	if let Some(parent) = session_file.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+
+	let session = match SqliteSession::open(&session_file) {
+		Ok(s) => Arc::new(s),
+		Err(e) => {
+			let err_str = e.to_string();
+			if err_str.contains("not a database") || err_str.contains("code 26") {
+				error!("Session database is corrupted: {e}");
+				info!("Deleting corrupted session file and creating a new one");
+				std::fs::remove_file(&session_file)?;
+				Arc::new(SqliteSession::open(&session_file)?)
+			} else {
+				return Err(e.into());
+			}
+		}
+	};
+
+	info!("Connecting to Telegram with api_id: {api_id}");
+	let pool = SenderPool::new(Arc::clone(&session), api_id);
+	let client = Client::new(&pool);
+	let SenderPool { runner, .. } = pool;
+
+	// Server sessions must already be authenticated (interactive auth requires a terminal)
+	if !client.is_authorized().await? {
+		bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
+	}
+
+	info!("Telegram client authorized (existing session)");
+	Ok(MtprotoSession { client, runner })
+}
 
 /// Run an operation with an authenticated MTProto client.
 /// Uses structured concurrency - the runner task lives only for the duration of the operation.

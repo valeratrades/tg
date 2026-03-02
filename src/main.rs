@@ -321,6 +321,7 @@ async fn run() -> Result<()> {
 	Ok(())
 }
 mod alerts;
+mod connectivity;
 mod errors;
 mod mtproto;
 mod server;

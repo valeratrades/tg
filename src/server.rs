@@ -108,210 +108,240 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 		warn!("Failed to clear alerts state: {e}");
 	}
 
-	// Run the entire server inside with_client for a long-lived MTProto session
-	let settings_for_client = settings.clone();
-	crate::mtproto::with_client(&settings_for_client, |client| async move {
-		let settings = settings;
-		// Discover forum topics and create topic files at startup
-		info!("Discovering forum topics for configured groups...");
-		pull::discover_and_create_topic_files(&settings, &client).await?;
+	// Bind TCP listener once — survives reconnections
+	let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
+	debug!("Binding to address: {addr}");
+	let listener = TcpListener::bind(&addr).await?;
+	info!("Listening on: {addr}");
 
-		// Create push channel for the MTProto worker
-		// This ensures all push operations are serialized through a single MTProto client
-		let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
-		let push_handle = PushHandle { tx: push_tx };
+	loop {
+		crate::connectivity::wait_for_telegram().await;
 
-		// Create channel for background send tasks (fire-and-forget with retries)
-		let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
-		let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
-
-		let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
-		debug!("Binding to address: {addr}");
-		let listener = TcpListener::bind(&addr).await?;
-		info!("Listening on: {addr}");
-
-		let cfg = settings.config()?;
-		let pull_interval = cfg.pull_interval();
-		let alerts_interval = cfg.alerts_interval();
-		let interval_duration = pull_interval.duration();
-		info!("Pull interval: {pull_interval}");
-
-		type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, Client, PushHandle, BackgroundSendHandle)> + Send>>;
-		let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
-
-		// Initial pull task
-		let pull_interval_timer = tokio::time::interval(interval_duration);
-		let settings_clone = Arc::clone(&settings);
-		let client_clone = client.clone();
-		let push_handle_clone = push_handle.clone();
-		let bg_send_handle_clone = bg_send_handle.clone();
-		futures.push(Box::pin(async move {
-			let mut interval = pull_interval_timer;
-			interval.tick().await;
-
-			match pull::pull(&settings_clone, &client_clone).await {
-				Ok(()) => debug!("Pull completed successfully"),
-				Err(e) => warn!("Pull failed: {e}"),
+		let session = match crate::mtproto::create_session(&settings).await {
+			Ok(s) => s,
+			Err(e) => {
+				warn!("Failed to create MTProto session: {e}");
+				continue; // loop back to wait_for_telegram
 			}
+		};
 
-			(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-		}));
-
-		// Initial alerts check task
-		let alerts_interval_timer = tokio::time::interval(alerts_interval.duration());
-		let settings_clone = Arc::clone(&settings);
-		let client_clone = client.clone();
-		let push_handle_clone = push_handle.clone();
-		let bg_send_handle_clone = bg_send_handle.clone();
-		futures.push(Box::pin(async move {
-			let mut interval = alerts_interval_timer;
-			interval.tick().await;
-
-			match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
-				Ok(()) => debug!("Alerts check completed successfully"),
-				Err(e) => warn!("Alerts check failed: {e}"),
-			}
-
-			(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-		}));
-
-		//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
-		loop {
-			tokio::select! {
-				accept_result = listener.accept() => {
-					let (socket, addr) = accept_result?;
-					info!("Accepted connection from: {addr}");
-
-					let settings_clone = Arc::clone(&settings);
-					let client_clone = client.clone();
-					let push_handle_clone = push_handle.clone();
-					let bg_send_handle_clone = bg_send_handle.clone();
-					futures.push(Box::pin(async move {
-						handle_connection(socket, &settings_clone, &push_handle_clone, &bg_send_handle_clone, &client_clone).await;
-						(TaskResult::Connection, settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-					}));
-				}
-				task_result = futures.next() => {
-					match task_result {
-						Some((result, settings_ret, client_ret, push_handle_ret, bg_send_handle_ret)) => match result {
-							TaskResult::Connection => {
-								debug!("Connection task completed");
-							}
-							TaskResult::Pull(mut interval) => {
-								debug!("Pull task completed, re-queuing");
-								let settings_clone = settings_ret;
-								let client_clone = client_ret;
-								let push_handle_clone = push_handle_ret;
-								let bg_send_handle_clone = bg_send_handle_ret;
-								futures.push(Box::pin(async move {
-									interval.tick().await;
-
-									match pull::pull(&settings_clone, &client_clone).await {
-										Ok(()) => debug!("Pull completed successfully"),
-										Err(e) => warn!("Pull failed: {e}"),
-									}
-
-									(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-								}));
-							}
-							TaskResult::BackgroundSend => {
-								debug!("Background send task completed");
-							}
-							TaskResult::AlertsCheck(mut interval) => {
-								debug!("Alerts check task completed, re-queuing");
-								let settings_clone = settings_ret;
-								let client_clone = client_ret;
-								let push_handle_clone = push_handle_ret;
-								let bg_send_handle_clone = bg_send_handle_ret;
-								futures.push(Box::pin(async move {
-									interval.tick().await;
-
-									match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
-										Ok(()) => debug!("Alerts check completed successfully"),
-										Err(e) => warn!("Alerts check failed: {e}"),
-									}
-
-									(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-								}));
-							}
-						}
-						None => {
-							// FuturesUnordered is empty - shouldn't happen since pull is always re-queued
-							warn!("All tasks completed unexpectedly");
-							break;
-						}
-					}
-				}
-				Some(push_request) = push_rx.recv() => {
-					debug!("Processing push request with {} updates", push_request.updates.len());
-					let result = crate::sync::push(push_request.updates, &settings, &client).await;
-					let _ = push_request.response_tx.send(result);
-				}
-				Some(bg_send_task) = bg_send_rx.recv() => {
-					// Spawn background send into FuturesUnordered so retries continue independently
-					let settings_clone = Arc::clone(&settings);
-					let client_clone = client.clone();
-					let push_handle_clone = push_handle.clone();
-					let bg_send_handle_clone = bg_send_handle.clone();
-					futures.push(Box::pin(async move {
-						let mut delay_secs = 1.0_f64;
-						const E: f64 = std::f64::consts::E;
-						const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
-
-						let msg_id = loop {
-							match send_message_mtproto(&client_clone, &bg_send_task.message).await {
-								Ok(id) => break Some(id),
-								Err(e) => {
-									let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
-									if total_elapsed_secs >= THIRTY_MINS_SECS {
-										error!("Failed to send message to Telegram after 30+ minutes: {e}");
-										break None;
-									}
-									warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
-									tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-									delay_secs *= E;
-								}
-							}
-						};
-
-						// Write the message to file with tag after successful send
-						if let Some(msg_id) = msg_id {
-							let now = Timestamp::now();
-							let formatted = format_message_append_with_sender(
-								&bg_send_task.message.message,
-								bg_send_task.last_write_datetime,
-								now,
-								Some(msg_id),
-								None,
-							);
-
-							if let Some(parent) = bg_send_task.chat_filepath.parent()
-								&& let Err(e) = std::fs::create_dir_all(parent)
-							{
-								error!("Failed to create directory '{}': {e}", parent.display());
-							}
-
-							match write_message_to_file(&bg_send_task.chat_filepath, &formatted) {
-								Ok(()) => info!("Wrote message with tag to {}", bg_send_task.chat_filepath.display()),
-								Err(e) => error!("Failed to write message to file: {e}"),
-							}
-						}
-
-						info!("Background send completed");
-						(TaskResult::BackgroundSend, settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-					}));
-				}
+		match run_with_session(settings.clone(), session, &listener).await {
+			Ok(()) => return Ok(()), // clean shutdown
+			Err(e) => {
+				warn!("Server session ended: {e}, reconnecting...");
 			}
 		}
-
-		info!("Server stopped");
-		Ok(())
-	})
-	.await
+	}
 }
+
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	format_message_append(message, last_write_datetime, now, msg_id, sender, false, None)
+}
+/// Run the server with an established session. Returns when the runner dies or on clean shutdown.
+async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::MtprotoSession, listener: &TcpListener) -> Result<()> {
+	let crate::mtproto::MtprotoSession { client, runner } = session;
+
+	// Discover forum topics and create topic files
+	info!("Discovering forum topics for configured groups...");
+	pull::discover_and_create_topic_files(&settings, &client).await?;
+
+	// Create push channel for the MTProto worker
+	let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
+	let push_handle = PushHandle { tx: push_tx };
+
+	// Create channel for background send tasks (fire-and-forget with retries)
+	let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
+	let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
+
+	let cfg = settings.config()?;
+	let pull_interval = cfg.pull_interval();
+	let alerts_interval = cfg.alerts_interval();
+	let interval_duration = pull_interval.duration();
+	info!("Pull interval: {pull_interval}");
+
+	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, Client, PushHandle, BackgroundSendHandle)> + Send>>;
+	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
+
+	// Initial pull task
+	let pull_interval_timer = tokio::time::interval(interval_duration);
+	let settings_clone = Arc::clone(&settings);
+	let client_clone = client.clone();
+	let push_handle_clone = push_handle.clone();
+	let bg_send_handle_clone = bg_send_handle.clone();
+	futures.push(Box::pin(async move {
+		let mut interval = pull_interval_timer;
+		interval.tick().await;
+
+		match pull::pull(&settings_clone, &client_clone).await {
+			Ok(()) => debug!("Pull completed successfully"),
+			Err(e) => warn!("Pull failed: {e}"),
+		}
+
+		(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+	}));
+
+	// Initial alerts check task
+	let alerts_interval_timer = tokio::time::interval(alerts_interval.duration());
+	let settings_clone = Arc::clone(&settings);
+	let client_clone = client.clone();
+	let push_handle_clone = push_handle.clone();
+	let bg_send_handle_clone = bg_send_handle.clone();
+	futures.push(Box::pin(async move {
+		let mut interval = alerts_interval_timer;
+		interval.tick().await;
+
+		match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
+			Ok(()) => debug!("Alerts check completed successfully"),
+			Err(e) => warn!("Alerts check failed: {e}"),
+		}
+
+		(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+	}));
+
+	// Run event loop alongside the MTProto runner
+	tokio::select! {
+		biased;
+		result = async {
+			//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
+			loop {
+				tokio::select! {
+					accept_result = listener.accept() => {
+						let (socket, addr) = accept_result?;
+						info!("Accepted connection from: {addr}");
+
+						let settings_clone = Arc::clone(&settings);
+						let client_clone = client.clone();
+						let push_handle_clone = push_handle.clone();
+						let bg_send_handle_clone = bg_send_handle.clone();
+						futures.push(Box::pin(async move {
+							handle_connection(socket, &settings_clone, &push_handle_clone, &bg_send_handle_clone, &client_clone).await;
+							(TaskResult::Connection, settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+						}));
+					}
+					task_result = futures.next() => {
+						match task_result {
+							Some((result, settings_ret, client_ret, push_handle_ret, bg_send_handle_ret)) => match result {
+								TaskResult::Connection => {
+									debug!("Connection task completed");
+								}
+								TaskResult::Pull(mut interval) => {
+									debug!("Pull task completed, re-queuing");
+									let settings_clone = settings_ret;
+									let client_clone = client_ret;
+									let push_handle_clone = push_handle_ret;
+									let bg_send_handle_clone = bg_send_handle_ret;
+									futures.push(Box::pin(async move {
+										interval.tick().await;
+
+										match pull::pull(&settings_clone, &client_clone).await {
+											Ok(()) => debug!("Pull completed successfully"),
+											Err(e) => warn!("Pull failed: {e}"),
+										}
+
+										(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+									}));
+								}
+								TaskResult::BackgroundSend => {
+									debug!("Background send task completed");
+								}
+								TaskResult::AlertsCheck(mut interval) => {
+									debug!("Alerts check task completed, re-queuing");
+									let settings_clone = settings_ret;
+									let client_clone = client_ret;
+									let push_handle_clone = push_handle_ret;
+									let bg_send_handle_clone = bg_send_handle_ret;
+									futures.push(Box::pin(async move {
+										interval.tick().await;
+
+										match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
+											Ok(()) => debug!("Alerts check completed successfully"),
+											Err(e) => warn!("Alerts check failed: {e}"),
+										}
+
+										(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+									}));
+								}
+							}
+							None => {
+								// FuturesUnordered is empty - shouldn't happen since pull is always re-queued
+								warn!("All tasks completed unexpectedly");
+								break;
+							}
+						}
+					}
+					Some(push_request) = push_rx.recv() => {
+						debug!("Processing push request with {} updates", push_request.updates.len());
+						let result = crate::sync::push(push_request.updates, &settings, &client).await;
+						let _ = push_request.response_tx.send(result);
+					}
+					Some(bg_send_task) = bg_send_rx.recv() => {
+						// Spawn background send into FuturesUnordered so retries continue independently
+						let settings_clone = Arc::clone(&settings);
+						let client_clone = client.clone();
+						let push_handle_clone = push_handle.clone();
+						let bg_send_handle_clone = bg_send_handle.clone();
+						futures.push(Box::pin(async move {
+							let mut delay_secs = 1.0_f64;
+							const E: f64 = std::f64::consts::E;
+							const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
+
+							let msg_id = loop {
+								match send_message_mtproto(&client_clone, &bg_send_task.message).await {
+									Ok(id) => break Some(id),
+									Err(e) => {
+										let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
+										if total_elapsed_secs >= THIRTY_MINS_SECS {
+											error!("Failed to send message to Telegram after 30+ minutes: {e}");
+											break None;
+										}
+										warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
+										tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+										delay_secs *= E;
+									}
+								}
+							};
+
+							// Write the message to file with tag after successful send
+							if let Some(msg_id) = msg_id {
+								let now = Timestamp::now();
+								let formatted = format_message_append_with_sender(
+									&bg_send_task.message.message,
+									bg_send_task.last_write_datetime,
+									now,
+									Some(msg_id),
+									None,
+								);
+
+								if let Some(parent) = bg_send_task.chat_filepath.parent()
+									&& let Err(e) = std::fs::create_dir_all(parent)
+								{
+									error!("Failed to create directory '{}': {e}", parent.display());
+								}
+
+								match write_message_to_file(&bg_send_task.chat_filepath, &formatted) {
+									Ok(()) => info!("Wrote message with tag to {}", bg_send_task.chat_filepath.display()),
+									Err(e) => error!("Failed to write message to file: {e}"),
+								}
+							}
+
+							info!("Background send completed");
+							(TaskResult::BackgroundSend, settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+						}));
+					}
+				}
+			}
+
+			info!("Server stopped");
+			Ok(())
+		} => {
+			client.disconnect();
+			result
+		}
+		_ = runner.run() => {
+			Err(eyre::eyre!("MTProto runner exited"))
+		}
+	}
 }
 /// Send a message via MTProto, handling image extraction
 /// Returns the message ID assigned by Telegram

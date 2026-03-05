@@ -17,9 +17,11 @@ pub struct MtprotoSession {
 	pub runner: SenderPoolRunner,
 }
 
-/// Create an authenticated MTProto session without starting the runner.
+/// Create an MTProto session without starting the runner.
 /// For server use — the caller drives the runner and can reconnect on failure.
-pub async fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
+/// Note: authorization is checked later in `run_with_session` where the runner is alive,
+/// since `is_authorized()` makes an RPC call that requires the runner to be driving I/O.
+pub fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 	let cfg = config.config()?;
 	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
 	let username = cfg.username.clone().unwrap_or_else(|| "@user".to_string());
@@ -51,12 +53,6 @@ pub async fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 	let client = Client::new(&pool);
 	let SenderPool { runner, .. } = pool;
 
-	// Server sessions must already be authenticated (interactive auth requires a terminal)
-	if !client.is_authorized().await? {
-		bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
-	}
-
-	info!("Telegram client authorized (existing session)");
 	Ok(MtprotoSession { client, runner })
 }
 

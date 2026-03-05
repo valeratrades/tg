@@ -1,7 +1,6 @@
 use std::{
 	io::{Read, Seek, SeekFrom, Write},
 	path::PathBuf,
-	pin::Pin,
 	sync::{Arc, OnceLock},
 };
 
@@ -117,7 +116,7 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 	loop {
 		crate::connectivity::wait_for_telegram().await;
 
-		let session = match crate::mtproto::create_session(&settings).await {
+		let session = match crate::mtproto::create_session(&settings) {
 			Ok(s) => s,
 			Err(e) => {
 				warn!("Failed to create MTProto session: {e}");
@@ -142,67 +141,74 @@ pub fn format_message_append_with_sender(message: &str, last_write_datetime: Opt
 async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::MtprotoSession, listener: &TcpListener) -> Result<()> {
 	let crate::mtproto::MtprotoSession { client, runner } = session;
 
-	// Discover forum topics and create topic files
-	info!("Discovering forum topics for configured groups...");
-	pull::discover_and_create_topic_files(&settings, &client).await?;
-
-	// Create push channel for the MTProto worker
-	let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
-	let push_handle = PushHandle { tx: push_tx };
-
-	// Create channel for background send tasks (fire-and-forget with retries)
-	let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
-	let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
-
-	let cfg = settings.config()?;
-	let pull_interval = cfg.pull_interval();
-	let alerts_interval = cfg.alerts_interval();
-	let interval_duration = pull_interval.duration();
-	info!("Pull interval: {pull_interval}");
-
-	type BoxFut = Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, Client, PushHandle, BackgroundSendHandle)> + Send>>;
-	let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
-
-	// Initial pull task
-	let pull_interval_timer = tokio::time::interval(interval_duration);
-	let settings_clone = Arc::clone(&settings);
-	let client_clone = client.clone();
-	let push_handle_clone = push_handle.clone();
-	let bg_send_handle_clone = bg_send_handle.clone();
-	futures.push(Box::pin(async move {
-		let mut interval = pull_interval_timer;
-		interval.tick().await;
-
-		match pull::pull(&settings_clone, &client_clone).await {
-			Ok(()) => debug!("Pull completed successfully"),
-			Err(e) => warn!("Pull failed: {e}"),
-		}
-
-		(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-	}));
-
-	// Initial alerts check task
-	let alerts_interval_timer = tokio::time::interval(alerts_interval.duration());
-	let settings_clone = Arc::clone(&settings);
-	let client_clone = client.clone();
-	let push_handle_clone = push_handle.clone();
-	let bg_send_handle_clone = bg_send_handle.clone();
-	futures.push(Box::pin(async move {
-		let mut interval = alerts_interval_timer;
-		interval.tick().await;
-
-		match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
-			Ok(()) => debug!("Alerts check completed successfully"),
-			Err(e) => warn!("Alerts check failed: {e}"),
-		}
-
-		(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
-	}));
-
-	// Run event loop alongside the MTProto runner
+	// All RPC-dependent setup must happen inside tokio::select! where the runner is alive
+	// (is_authorized, discover_and_create_topic_files, etc. all need the runner driving I/O)
 	tokio::select! {
 		biased;
 		result = async {
+			// Check authorization (requires runner to be driving I/O)
+			if !client.is_authorized().await? {
+				eyre::bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
+			}
+			info!("Telegram client authorized (existing session)");
+
+			// Discover forum topics and create topic files
+			info!("Discovering forum topics for configured groups...");
+			pull::discover_and_create_topic_files(&settings, &client).await?;
+
+			// Create push channel for the MTProto worker
+			let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
+			let push_handle = PushHandle { tx: push_tx };
+
+			// Create channel for background send tasks (fire-and-forget with retries)
+			let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
+			let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
+
+			let cfg = settings.config()?;
+			let pull_interval = cfg.pull_interval();
+			let alerts_interval = cfg.alerts_interval();
+			let interval_duration = pull_interval.duration();
+			info!("Pull interval: {pull_interval}");
+
+			type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = (TaskResult, Arc<LiveSettings>, Client, PushHandle, BackgroundSendHandle)> + Send>>;
+			let mut futures: FuturesUnordered<BoxFut> = FuturesUnordered::new();
+
+			// Initial pull task
+			let pull_interval_timer = tokio::time::interval(interval_duration);
+			let settings_clone = Arc::clone(&settings);
+			let client_clone = client.clone();
+			let push_handle_clone = push_handle.clone();
+			let bg_send_handle_clone = bg_send_handle.clone();
+			futures.push(Box::pin(async move {
+				let mut interval = pull_interval_timer;
+				interval.tick().await;
+
+				match pull::pull(&settings_clone, &client_clone).await {
+					Ok(()) => debug!("Pull completed successfully"),
+					Err(e) => warn!("Pull failed: {e}"),
+				}
+
+				(TaskResult::Pull(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+			}));
+
+			// Initial alerts check task
+			let alerts_interval_timer = tokio::time::interval(alerts_interval.duration());
+			let settings_clone = Arc::clone(&settings);
+			let client_clone = client.clone();
+			let push_handle_clone = push_handle.clone();
+			let bg_send_handle_clone = bg_send_handle.clone();
+			futures.push(Box::pin(async move {
+				let mut interval = alerts_interval_timer;
+				interval.tick().await;
+
+				match crate::alerts::check_alerts(&client_clone, &settings_clone).await {
+					Ok(()) => debug!("Alerts check completed successfully"),
+					Err(e) => warn!("Alerts check failed: {e}"),
+				}
+
+				(TaskResult::AlertsCheck(interval), settings_clone, client_clone, push_handle_clone, bg_send_handle_clone)
+			}));
+
 			//LOOP: main event loop for accepting connections, processing pull ticks, and handling push requests
 			loop {
 				tokio::select! {

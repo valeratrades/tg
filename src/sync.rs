@@ -73,14 +73,17 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 
 	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
 
-	let mut stream = match TcpStream::connect(&addr).await {
-		Ok(s) => s,
-		Err(e) => {
+	let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr)).await {
+		Ok(Ok(s)) => s,
+		Ok(Err(e)) => {
 			eyre::bail!(
 				"Cannot connect to server at {addr}: {e}\n\
 				 Either the server is not running, or it's running on a different port.\n\
 				 Start/restart it with `tg server`"
 			);
+		}
+		Err(_) => {
+			eyre::bail!("Timed out connecting to server at {addr}");
 		}
 	};
 
@@ -89,9 +92,12 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 	let request_json = serde_json::to_string(&request)?;
 	stream.write_all(request_json.as_bytes()).await?;
 
-	// Read response (may be larger than 4096 for many operations)
+	// Read response with timeout (push operations can take a while with multiple MTProto calls)
 	let mut buf = vec![0u8; 65536];
-	let n = stream.read(&mut buf).await?;
+	let n = tokio::time::timeout(std::time::Duration::from_secs(60), stream.read(&mut buf))
+		.await
+		.map_err(|_| eyre::eyre!("Timed out waiting for server push response (server may be reconnecting to Telegram)"))?
+		.map_err(|e| eyre::eyre!("Failed to read server response: {e}"))?;
 	if n == 0 {
 		eyre::bail!("Server closed connection without response");
 	}

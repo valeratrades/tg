@@ -97,6 +97,47 @@ impl ServerResponse {
 	}
 }
 
+/// Wait for Telegram connectivity while draining and rejecting any queued TCP connections.
+/// This prevents CLI clients from hanging when the server is reconnecting.
+async fn wait_for_telegram_draining(listener: &TcpListener) {
+	if crate::connectivity::check_telegram_reachable().await {
+		return;
+	}
+
+	warn!("Telegram not reachable, waiting for connectivity...");
+
+	// Spawn connectivity polling into a background task so we can drain connections concurrently.
+	// `check_telegram_reachable` blocks up to 5s on timeout — without spawning, accept() stalls.
+	let (notify_tx, notify_rx) = oneshot::channel::<()>();
+	tokio::spawn(async move {
+		loop {
+			tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+			if crate::connectivity::check_telegram_reachable().await {
+				let _ = notify_tx.send(());
+				return;
+			}
+		}
+	});
+
+	tokio::pin!(notify_rx);
+	loop {
+		tokio::select! {
+			biased;
+			accept_result = listener.accept() => {
+				if let Ok((mut socket, addr)) = accept_result {
+					warn!("Rejecting connection from {addr}: server is reconnecting to Telegram");
+					let response = ServerResponse::err("Server is reconnecting to Telegram, try again shortly");
+					let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
+				}
+			}
+			_ = &mut notify_rx => {
+				info!("Telegram is now reachable");
+				return;
+			}
+		}
+	}
+}
+
 /// # Panics
 /// On unsuccessful io operations
 pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
@@ -114,13 +155,14 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 	info!("Listening on: {addr}");
 
 	loop {
-		crate::connectivity::wait_for_telegram().await;
+		// Wait for Telegram connectivity while rejecting queued connections
+		wait_for_telegram_draining(&listener).await;
 
 		let session = match crate::mtproto::create_session(&settings) {
 			Ok(s) => s,
 			Err(e) => {
 				warn!("Failed to create MTProto session: {e}");
-				continue; // loop back to wait_for_telegram
+				continue; // loop back to connectivity check
 			}
 		};
 

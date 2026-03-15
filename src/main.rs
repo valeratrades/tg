@@ -86,16 +86,22 @@ async fn run() -> Result<()> {
 			let message = Message::new(group_id, topic_id, msg_text.clone());
 			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
-			// Connect to server (required)
-			let mut stream = TcpStream::connect(&addr).await.map_err(|e| ConnectionError::new(addr.clone(), e))?;
+			// Connect to server with timeout
+			let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+				.await
+				.map_err(|_| eyre!("Timed out connecting to server at {addr}"))?
+				.map_err(|e| ConnectionError::new(addr.clone(), e))?;
 
 			// Server handles send + file write with message tag
 			let json = serde_json::to_string(&message)?;
 			stream.write_all(json.as_bytes()).await?;
 
-			// Read JSON response and check version
+			// Read JSON response with timeout
 			let mut buf = vec![0u8; 4096];
-			let n = stream.read(&mut buf).await?;
+			let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf))
+				.await
+				.map_err(|_| eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
+				.map_err(|e| eyre!("Failed to read server response: {e}"))?;
 			if n == 0 {
 				bail!("Server closed connection without response");
 			}
@@ -298,13 +304,19 @@ async fn run() -> Result<()> {
 					let message = server::Message::new(group_id, topic_id, content);
 					let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
 
-					let mut stream = TcpStream::connect(&addr).await.map_err(|e| ConnectionError::new(addr.clone(), e))?;
+					let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+						.await
+						.map_err(|_| eyre!("Timed out connecting to server at {addr}"))?
+						.map_err(|e| ConnectionError::new(addr.clone(), e))?;
 
 					let json = serde_json::to_string(&message)?;
 					stream.write_all(json.as_bytes()).await?;
 
 					let mut buf = vec![0u8; 4096];
-					let n = stream.read(&mut buf).await?;
+					let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf))
+						.await
+						.map_err(|_| eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
+						.map_err(|e| eyre!("Failed to read server response: {e}"))?;
 					if n == 0 {
 						bail!("Server closed connection without response");
 					}

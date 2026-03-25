@@ -20,10 +20,18 @@ use crate::{
 	sync::PushResults,
 };
 
+mod alerts;
 pub mod config;
+mod connectivity;
+mod errors;
 mod last;
+mod mtproto;
 pub mod pull;
+mod server;
+mod shell_init;
 mod since;
+mod sync;
+
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]
 pub struct Cli {
@@ -33,6 +41,155 @@ pub struct Cli {
 	settings: SettingsFlags,
 	#[arg(long)]
 	token: Option<String>,
+}
+#[derive(Clone, Debug, Subcommand)]
+enum Commands {
+	/// Send a message to a channel/topic
+	/// Ex:
+	/// ```sh
+	/// tg send -c journal "today I'm feeling blue"
+	/// tg send -g 2244305221 -t 7 "direct message"
+	/// echo "piped message" | tg send -c journal -
+	/// ```
+	Send(SendArgs),
+	/// Send a message directly to the configured alerts channel (no server needed)
+	#[command(name = "send-alert")]
+	SendAlert(SendAlertArgs),
+	/// Start a telegram server, syncing messages from configured forum groups
+	Server(ServerArgs),
+	/// Open a topic file with $EDITOR. Uses fzf for pattern matching.
+	/// Ex:
+	/// ```sh
+	/// tg open           # fzf over all topics
+	/// tg open journal   # open if unique, else fzf
+	/// ```
+	Open(OpenArgs),
+	/// Pull messages from Telegram for all configured forum groups
+	Pull(PullArgs),
+	/// List all discovered topics
+	List,
+	/// Aggregate TODOs from all topics
+	#[command(subcommand)]
+	Todos(TodosCommands),
+	/// Shell aliases and hooks. Usage: `tg init <shell> | source`
+	Init(shell_init::ShellInitArgs),
+	/// Directly schedule an update (delete or edit) for a specific message
+	/// Ex:
+	/// ```sh
+	/// tg schedule-update delete 2244305221 1 2645
+	/// tg schedule-update edit 2244305221 1 2645 "new message text"
+	/// ```
+	ScheduleUpdate(ScheduleUpdateArgs),
+	/// Show the N most recent messages across all topics
+	/// Ex:
+	/// ```sh
+	/// tg last 10
+	/// tg last 3
+	/// ```
+	Last(LastArgs),
+	/// Show all messages since a given date (or timeframe back from now)
+	/// Ex:
+	/// ```sh
+	/// tg since 2025-01-15
+	/// tg since 01-15
+	/// tg since 15
+	/// tg since -b 3d
+	/// tg since --back 1w
+	/// ```
+	Since(SinceArgs),
+}
+#[derive(Clone, Debug, Subcommand)]
+enum TodosCommands {
+	/// Compile TODOs from all topics into todos.md
+	Compile,
+	/// Compile TODOs and open todos.md with $EDITOR
+	Open,
+}
+#[derive(Clone, Debug, Subcommand)]
+enum UpdateAction {
+	/// Delete a message from Telegram
+	Delete {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID
+		topic_id: u64,
+		/// Message ID
+		message_id: i32,
+	},
+	/// Edit a message on Telegram
+	Edit {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID (required for local file cleanup)
+		topic_id: u64,
+		/// Message ID
+		message_id: i32,
+		/// New message content
+		new_content: String,
+	},
+	/// Create (send) a new message to Telegram
+	/// Note: This is handled by the server's background tasks; using this directly
+	/// will write the message to file without a tag and queue it for sending.
+	Create {
+		/// Group ID
+		group_id: u64,
+		/// Topic ID
+		topic_id: u64,
+		/// Message content
+		content: String,
+	},
+}
+#[derive(Args, Clone, Debug)]
+struct SendArgs {
+	/// Pattern to match channel/topic name (uses fzf if multiple matches)
+	#[arg(short, long)]
+	channel: Option<String>,
+	/// Direct group ID (bypasses pattern matching)
+	#[arg(short, long)]
+	group_id: Option<u64>,
+	/// Direct topic ID (requires --group-id)
+	#[arg(short, long)]
+	topic_id: Option<u64>,
+	/// Message to send. Pass '-' to read from stdin.
+	message: MaybeStdin<String>,
+}
+#[derive(Args, Clone, Debug)]
+struct SendAlertArgs {
+	/// Message to send. Pass '-' to read from stdin.
+	message: MaybeStdin<String>,
+}
+#[derive(Args, Clone, Debug)]
+struct OpenArgs {
+	/// Pattern to match topic name (uses fzf if multiple matches)
+	pattern: Option<String>,
+}
+#[derive(Args, Clone, Debug)]
+struct PullArgs {
+	/// Reset sync state and re-fetch all messages (clears topic files)
+	/// Use this to add message ID markers to old messages for TODO tracking
+	#[arg(long)]
+	reset: bool,
+}
+#[derive(Args, Clone, Debug)]
+struct ServerArgs {}
+#[derive(Args, Clone, Debug)]
+struct ScheduleUpdateArgs {
+	/// Action to perform
+	#[command(subcommand)]
+	action: UpdateAction,
+}
+#[derive(Args, Clone, Debug)]
+struct LastArgs {
+	/// Number of most recent messages to show
+	count: usize,
+}
+#[derive(Args, Clone, Debug)]
+struct SinceArgs {
+	/// Date to show messages from (YYYY-MM-DD, MM-DD, or DD; missing parts filled from now)
+	datetime: Option<String>,
+	/// Show messages from this timeframe back from now (e.g. 3d, 1w, 2h)
+	#[arg(short, long)]
+	back: Option<v_utils::trades::Timeframe>,
 }
 #[tokio::main]
 async fn main() {
@@ -331,162 +488,6 @@ async fn run() -> Result<()> {
 	};
 
 	Ok(())
-}
-mod alerts;
-mod connectivity;
-mod errors;
-mod mtproto;
-mod server;
-mod shell_init;
-mod sync;
-#[derive(Clone, Debug, Subcommand)]
-enum Commands {
-	/// Send a message to a channel/topic
-	/// Ex:
-	/// ```sh
-	/// tg send -c journal "today I'm feeling blue"
-	/// tg send -g 2244305221 -t 7 "direct message"
-	/// echo "piped message" | tg send -c journal -
-	/// ```
-	Send(SendArgs),
-	/// Send a message directly to the configured alerts channel (no server needed)
-	#[command(name = "send-alert")]
-	SendAlert(SendAlertArgs),
-	/// Start a telegram server, syncing messages from configured forum groups
-	Server(ServerArgs),
-	/// Open a topic file with $EDITOR. Uses fzf for pattern matching.
-	/// Ex:
-	/// ```sh
-	/// tg open           # fzf over all topics
-	/// tg open journal   # open if unique, else fzf
-	/// ```
-	Open(OpenArgs),
-	/// Pull messages from Telegram for all configured forum groups
-	Pull(PullArgs),
-	/// List all discovered topics
-	List,
-	/// Aggregate TODOs from all topics
-	#[command(subcommand)]
-	Todos(TodosCommands),
-	/// Shell aliases and hooks. Usage: `tg init <shell> | source`
-	Init(shell_init::ShellInitArgs),
-	/// Directly schedule an update (delete or edit) for a specific message
-	/// Ex:
-	/// ```sh
-	/// tg schedule-update delete 2244305221 1 2645
-	/// tg schedule-update edit 2244305221 1 2645 "new message text"
-	/// ```
-	ScheduleUpdate(ScheduleUpdateArgs),
-	/// Show the N most recent messages across all topics
-	/// Ex:
-	/// ```sh
-	/// tg last 10
-	/// tg last 3
-	/// ```
-	Last(LastArgs),
-	/// Show all messages since a given date (or timeframe back from now)
-	/// Ex:
-	/// ```sh
-	/// tg since 2025-01-15
-	/// tg since 01-15
-	/// tg since 15
-	/// tg since -b 3d
-	/// tg since --back 1w
-	/// ```
-	Since(SinceArgs),
-}
-#[derive(Args, Clone, Debug)]
-struct SendArgs {
-	/// Pattern to match channel/topic name (uses fzf if multiple matches)
-	#[arg(short, long)]
-	channel: Option<String>,
-	/// Direct group ID (bypasses pattern matching)
-	#[arg(short, long)]
-	group_id: Option<u64>,
-	/// Direct topic ID (requires --group-id)
-	#[arg(short, long)]
-	topic_id: Option<u64>,
-	/// Message to send. Pass '-' to read from stdin.
-	message: MaybeStdin<String>,
-}
-#[derive(Args, Clone, Debug)]
-struct SendAlertArgs {
-	/// Message to send. Pass '-' to read from stdin.
-	message: MaybeStdin<String>,
-}
-#[derive(Args, Clone, Debug)]
-struct OpenArgs {
-	/// Pattern to match topic name (uses fzf if multiple matches)
-	pattern: Option<String>,
-}
-#[derive(Args, Clone, Debug)]
-struct PullArgs {
-	/// Reset sync state and re-fetch all messages (clears topic files)
-	/// Use this to add message ID markers to old messages for TODO tracking
-	#[arg(long)]
-	reset: bool,
-}
-#[derive(Args, Clone, Debug)]
-struct ServerArgs {}
-#[derive(Clone, Debug, Subcommand)]
-enum TodosCommands {
-	/// Compile TODOs from all topics into todos.md
-	Compile,
-	/// Compile TODOs and open todos.md with $EDITOR
-	Open,
-}
-#[derive(Args, Clone, Debug)]
-struct ScheduleUpdateArgs {
-	/// Action to perform
-	#[command(subcommand)]
-	action: UpdateAction,
-}
-#[derive(Args, Clone, Debug)]
-struct LastArgs {
-	/// Number of most recent messages to show
-	count: usize,
-}
-#[derive(Args, Clone, Debug)]
-struct SinceArgs {
-	/// Date to show messages from (YYYY-MM-DD, MM-DD, or DD; missing parts filled from now)
-	datetime: Option<String>,
-	/// Show messages from this timeframe back from now (e.g. 3d, 1w, 2h)
-	#[arg(short, long)]
-	back: Option<v_utils::trades::Timeframe>,
-}
-#[derive(Clone, Debug, Subcommand)]
-enum UpdateAction {
-	/// Delete a message from Telegram
-	Delete {
-		/// Group ID
-		group_id: u64,
-		/// Topic ID
-		topic_id: u64,
-		/// Message ID
-		message_id: i32,
-	},
-	/// Edit a message on Telegram
-	Edit {
-		/// Group ID
-		group_id: u64,
-		/// Topic ID (required for local file cleanup)
-		topic_id: u64,
-		/// Message ID
-		message_id: i32,
-		/// New message content
-		new_content: String,
-	},
-	/// Create (send) a new message to Telegram
-	/// Note: This is handled by the server's background tasks; using this directly
-	/// will write the message to file without a tag and queue it for sending.
-	Create {
-		/// Group ID
-		group_id: u64,
-		/// Topic ID
-		topic_id: u64,
-		/// Message content
-		content: String,
-	},
 }
 /// Resolve send destination from channel name using metadata
 fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
@@ -847,7 +848,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 
 	let cfg = settings.config()?;
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
-	let cutoff_duration = cfg.pull_todos_over().duration();
+	let cutoff_duration = cfg.todos.time_range.duration();
 	let today = Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
 	let cutoff_span = jiff::Span::try_from(cutoff_duration).unwrap_or_else(|_| 1.week());
 	let cutoff_date = today.checked_sub(cutoff_span).unwrap_or(today);
@@ -885,7 +886,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 					if include {
 						let reply_context = parsed
 							.reply_to_msg_id
-							.map(|reply_id| format_reply_context(reply_id, &messages, &source, &msg_lines, cfg.inline_up_to_chars()));
+							.map(|reply_id| format_reply_context(reply_id, &messages, &source, &msg_lines, cfg.inline_up_to_chars));
 						todos.push(TodoItem {
 							content: parsed.content.clone(),
 							source: source.clone(),
@@ -913,7 +914,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
 	let todos_path = data_dir.join("todos.md");
 	let mut output = String::new();
 	output.push_str("# TODOs\n");
-	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", cfg.pull_todos_over()));
+	output.push_str(&format!("*Auto-aggregated from group messages (last {}).*\n\n", cfg.todos.time_range));
 
 	if todos.is_empty() {
 		output.push_str("No TODOs found.\n");

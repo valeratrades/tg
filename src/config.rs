@@ -82,28 +82,37 @@ pub struct GroupMetadata {
 	/// Maps topic_id -> custom_name
 	pub topics: std::collections::BTreeMap<u64, String>,
 }
+fn default_1m() -> Timeframe {
+	Timeframe::from(&"1m")
+}
+fn default_7d() -> Timeframe {
+	Timeframe::from(&"7d")
+}
+
 #[derive(Clone, Debug, Default, LiveSettings, MyConfigPrimitives, Settings)]
 pub(crate) struct AppConfig {
 	#[settings(default = 8123)]
 	pub localhost_port: u16,
 	#[settings(default = 1000)]
 	pub max_messages_per_chat: usize,
-	/// How far back to pull TODOs from channel messages (default: 1 week)
-	pub pull_todos_over: Option<Timeframe>,
 	/// Named group destinations
 	#[primitives(skip)]
 	pub groups: Option<std::collections::HashMap<String, TelegramDestination>>,
-	/// Interval for periodic pull from Telegram (default: 1m)
-	pub pull_interval: Option<Timeframe>,
-	/// Interval for alerts channel polling (default: 1m)
-	pub alerts_interval: Option<Timeframe>,
+	/// Interval for periodic pull from Telegram
+	#[serde(default = "default_1m")]
+	pub pull_interval: Timeframe,
+	/// Interval for alerts channel polling
+	#[serde(default = "default_1m")]
+	pub alerts_interval: Timeframe,
 	/// Channel to monitor for alerts (shows desktop notifications for unread messages)
 	#[private_value]
 	pub alerts_channel: Option<TelegramDestination>,
-	/// Inline reply context in TODOs if message is under this many chars (default: 256). 0 to always link.
-	pub inline_up_to_chars: Option<usize>,
-	/// Maximum number of messages to print without confirmation prompt (default: 64)
-	pub print_confirm_threshold: Option<usize>,
+	/// Inline reply context in TODOs if message is under this many chars. 0 to always link.
+	#[serde(default = "default_inline_up_to_chars")]
+	pub inline_up_to_chars: usize,
+	/// Maximum number of messages to print without confirmation prompt
+	#[serde(default = "default_print_confirm_threshold")]
+	pub print_confirm_threshold: usize,
 	/// Telegram API ID from https://my.telegram.org/
 	pub api_id: Option<i32>,
 	/// Telegram API hash (can be { env = "VAR_NAME" })
@@ -112,29 +121,12 @@ pub(crate) struct AppConfig {
 	pub phone: Option<String>,
 	/// Telegram username for session file naming
 	pub username: Option<String>,
+	/// `[todos]` section
+	#[serde(default)]
+	#[primitives(skip)]
+	pub todos: TodosConfig,
 }
-
 impl AppConfig {
-	pub fn pull_todos_over(&self) -> Timeframe {
-		self.pull_todos_over.unwrap_or_else(|| Timeframe::from(&"1w"))
-	}
-
-	pub fn pull_interval(&self) -> Timeframe {
-		self.pull_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
-	}
-
-	pub fn alerts_interval(&self) -> Timeframe {
-		self.alerts_interval.unwrap_or_else(|| Timeframe::from(&"1m"))
-	}
-
-	pub fn inline_up_to_chars(&self) -> usize {
-		self.inline_up_to_chars.unwrap_or(256)
-	}
-
-	pub fn print_confirm_threshold(&self) -> usize {
-		self.print_confirm_threshold.unwrap_or(64)
-	}
-
 	/// Get unique group IDs from all group destinations
 	pub fn forum_group_ids(&self) -> Vec<u64> {
 		let mut group_ids = std::collections::HashSet::new();
@@ -152,6 +144,25 @@ impl AppConfig {
 	#[cfg(test)]
 	pub fn resolve_group(&self, name: &str) -> Option<&TelegramDestination> {
 		self.groups.as_ref()?.get(name)
+	}
+}
+
+fn default_inline_up_to_chars() -> usize {
+	256
+}
+fn default_print_confirm_threshold() -> usize {
+	64
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct TodosConfig {
+	/// Time range for aggregation
+	#[serde(default = "default_7d")]
+	pub time_range: Timeframe,
+}
+impl Default for TodosConfig {
+	fn default() -> Self {
+		Self { time_range: default_7d() }
 	}
 }
 

@@ -28,7 +28,7 @@ pub async fn run(count: usize, config: &LiveSettings) -> Result<()> {
 /// Prompt for confirmation if message count exceeds the configured threshold.
 /// Returns true to proceed, false to abort.
 pub(crate) fn confirm_large_output(count: usize, config: &LiveSettings) -> Result<bool> {
-	let threshold = config.config()?.print_confirm_threshold();
+	let threshold = config.config()?.print_confirm_threshold;
 	if count <= threshold {
 		return Ok(true);
 	}

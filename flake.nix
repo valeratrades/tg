@@ -4,11 +4,11 @@
     rust-overlay.url = "github:oxalica/rust-overlay";
     flake-utils.url = "github:numtide/flake-utils";
     pre-commit-hooks.url = "github:cachix/git-hooks.nix";
-    v-utils.url = "github:valeratrades/.github?ref=v1.4";
+    v_flakes.url = "github:valeratrades/v_flakes?ref=v1.4";
   };
 
   outputs =
-    { self, nixpkgs, rust-overlay, flake-utils, pre-commit-hooks, v-utils }:
+    { self, nixpkgs, rust-overlay, flake-utils, pre-commit-hooks, v_flakes }:
     let
       manifest = (nixpkgs.lib.importTOML ./Cargo.toml).package;
       pname = manifest.name;
@@ -22,14 +22,14 @@
             inherit system overlays;
           };
           rust = pkgs.rust-bin.nightly."2025-10-10".default;
-          pre-commit-check = pre-commit-hooks.lib.${system}.run (v-utils.files.preCommit { inherit pkgs; });
+          pre-commit-check = pre-commit-hooks.lib.${system}.run (v_flakes.files.preCommit { inherit pkgs; });
           stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.stdenv;
 
           github =
             let
               jobDeps = { packages = [ "mold" ]; debug = true; };
             in
-            v-utils.github {
+            v_flakes.github {
               inherit pkgs pname;
               langs = [ "rs" ];
               lastSupportedVersion = "nightly-2025-10-10";
@@ -38,19 +38,19 @@
                 warnings.install = jobDeps;
               };
             };
-          readme = v-utils.readme-fw {
+          readme = v_flakes.readme-fw {
             inherit pkgs pname;
             lastSupportedVersion = "nightly-1.92";
             rootDir = ./.;
-            licenses = [{ license = v-utils.files.licenses.nsfw; }];
+            licenses = [{ license = v_flakes.files.licenses.nsfw; }];
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
           };
-          rs = v-utils.rs {
+          rs = v_flakes.rs {
             inherit pkgs rust;
             build.enable = true;
           };
 
-          combined = v-utils.utils.combine [ github readme rs ];
+          combined = v_flakes.utils.combine [ github readme rs ];
         in
         {
           packages =
@@ -84,7 +84,7 @@
                 pre-commit-check.shellHook +
                 combined.shellHook +
                 ''
-                  cp -f ${(v-utils.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
+                  cp -f ${(v_flakes.files.treefmt) { inherit pkgs; }} ./.treefmt.toml
                 '';
               env = {
                 RUST_BACKTRACE = 1;
@@ -96,6 +96,7 @@
                 openssl
                 pkg-config
                 rust
+                treefmt
               ]
               ++ combined.enabledPackages;
             };

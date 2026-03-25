@@ -97,47 +97,6 @@ impl ServerResponse {
 	}
 }
 
-/// Wait for Telegram connectivity while draining and rejecting any queued TCP connections.
-/// This prevents CLI clients from hanging when the server is reconnecting.
-async fn wait_for_telegram_draining(listener: &TcpListener) {
-	if crate::connectivity::check_telegram_reachable().await {
-		return;
-	}
-
-	warn!("Telegram not reachable, waiting for connectivity...");
-
-	// Spawn connectivity polling into a background task so we can drain connections concurrently.
-	// `check_telegram_reachable` blocks up to 5s on timeout — without spawning, accept() stalls.
-	let (notify_tx, notify_rx) = oneshot::channel::<()>();
-	tokio::spawn(async move {
-		loop {
-			tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-			if crate::connectivity::check_telegram_reachable().await {
-				let _ = notify_tx.send(());
-				return;
-			}
-		}
-	});
-
-	tokio::pin!(notify_rx);
-	loop {
-		tokio::select! {
-			biased;
-			accept_result = listener.accept() => {
-				if let Ok((mut socket, addr)) = accept_result {
-					warn!("Rejecting connection from {addr}: server is reconnecting to Telegram");
-					let response = ServerResponse::err("Server is reconnecting to Telegram, try again shortly");
-					let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
-				}
-			}
-			_ = &mut notify_rx => {
-				info!("Telegram is now reachable");
-				return;
-			}
-		}
-	}
-}
-
 /// # Panics
 /// On unsuccessful io operations
 pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
@@ -154,6 +113,7 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {addr}");
 
+	//LOOP: main logic
 	loop {
 		// Wait for Telegram connectivity while rejecting queued connections
 		wait_for_telegram_draining(&listener).await;
@@ -174,11 +134,54 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 		}
 	}
 }
-
 /// Format a message append with message ID and sender info
 pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
 	format_message_append(message, last_write_datetime, now, msg_id, sender, false, None)
 }
+/// Wait for Telegram connectivity while draining and rejecting any queued TCP connections.
+/// This prevents CLI clients from hanging when the server is reconnecting.
+async fn wait_for_telegram_draining(listener: &TcpListener) {
+	if crate::connectivity::check_telegram_reachable().await {
+		return;
+	}
+
+	warn!("Telegram not reachable, waiting for connectivity...");
+
+	type ConnCheck = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
+	let mut connectivity: FuturesUnordered<ConnCheck> = FuturesUnordered::new();
+
+	// Seed the initial connectivity check (with delay)
+	connectivity.push(Box::pin(async {
+		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		crate::connectivity::check_telegram_reachable().await
+	}));
+
+	// select! returns false while waiting, true once reachable.
+	// Accept branch always returns false (drain and continue).
+	// Connectivity branch returns the check result — true breaks the loop.
+	while !tokio::select! {
+		accept_result = listener.accept() => {
+			if let Ok((mut socket, addr)) = accept_result {
+				warn!("Rejecting connection from {addr}: server is reconnecting to Telegram");
+				let response = ServerResponse::err("Server is reconnecting to Telegram, try again shortly");
+				let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
+			}
+			false
+		}
+		Some(reachable) = connectivity.next() => {
+			if !reachable {
+				connectivity.push(Box::pin(async {
+					tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+					crate::connectivity::check_telegram_reachable().await
+				}));
+			}
+			reachable
+		}
+	} {}
+
+	info!("Telegram is now reachable");
+}
+
 /// Run the server with an established session. Returns when the runner dies or on clean shutdown.
 async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::MtprotoSession, listener: &TcpListener) -> Result<()> {
 	let crate::mtproto::MtprotoSession { client, runner } = session;
@@ -207,8 +210,8 @@ async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::
 			let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
 
 			let cfg = settings.config()?;
-			let pull_interval = cfg.pull_interval();
-			let alerts_interval = cfg.alerts_interval();
+			let pull_interval = &cfg.pull_interval;
+			let alerts_interval = &cfg.alerts_interval;
 			let interval_duration = pull_interval.duration();
 			info!("Pull interval: {pull_interval}");
 

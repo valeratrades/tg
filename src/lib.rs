@@ -1,3 +1,4 @@
+#![feature(default_field_values)]
 // tg library - Telegram forum group syncing tool
 
 use eyre::{Result, eyre};

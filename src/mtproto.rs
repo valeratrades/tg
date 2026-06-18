@@ -1,4 +1,9 @@
-use std::{future::Future, io::Write as _, path::PathBuf, sync::Arc};
+use std::{
+	future::Future,
+	io::Write as _,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use eyre::{Result, bail, eyre};
 use grammers_client::{Client, SignInError};
@@ -389,7 +394,7 @@ pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, te
 }
 /// Send a photo with optional caption to a forum topic via MTProto
 /// Returns the message ID assigned by Telegram
-pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &std::path::Path, caption: Option<&str>) -> Result<i32> {
+pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>) -> Result<i32> {
 	let chat_id = telegram_chat_id(group_id);
 	let input_peer = get_input_peer(client, chat_id).await?;
 
@@ -536,6 +541,22 @@ pub fn extract_channel_id(chat_id: i64) -> i64 {
 		chat_id.abs()
 	}
 }
+/// True when the error means the MTProto connection/session is dead and the whole
+/// session must be torn down and rebuilt — as opposed to a per-request server reply
+/// (FLOOD_WAIT, bad peer, etc.) that we can skip and keep going.
+pub(crate) fn is_connection_dead(e: &grammers_client::InvocationError) -> bool {
+	use grammers_client::InvocationError::*;
+	// Rpc/Deserialize = the server answered → benign. InvalidDc = request misrouted, not a dead link.
+	matches!(e, Dropped | Io(_) | Transport(_) | Authentication(_))
+}
+
+/// Walk an `eyre::Report`'s source chain for a connection-dead `InvocationError`.
+/// `?` erases the typed error into a `Report`, but eyre preserves the source, so the
+/// typed variant remains downcastable at the loop boundary.
+pub(crate) fn report_is_connection_dead(e: &eyre::Report) -> bool {
+	e.chain().any(|src| src.downcast_ref::<grammers_client::InvocationError>().is_some_and(is_connection_dead))
+}
+
 /// Get the session file path (same convention as social_networks)
 fn session_path(username: &str) -> PathBuf {
 	v_utils::xdg_state_file!(&format!("{}.session", username))
@@ -569,4 +590,35 @@ fn rand_i64() -> i64 {
 		hash::{BuildHasher, Hasher},
 	};
 	RandomState::new().build_hasher().finish() as i64
+}
+
+#[cfg(test)]
+mod tests {
+	use grammers_client::InvocationError;
+
+	use super::*;
+
+	// The whole reconnect-storm fix hinges on this split: a dead pool (`Dropped`) must tear the
+	// session down, while a server reply like FLOOD_WAIT must keep it alive and skip one item.
+	#[test]
+	fn classifier_splits_dead_from_benign() {
+		assert!(is_connection_dead(&InvocationError::Dropped));
+
+		let flood = InvocationError::Rpc(grammers_mtsender::RpcError::from(tl::types::RpcError {
+			error_code: 420,
+			error_message: "FLOOD_WAIT_31".into(),
+		}));
+		assert!(!is_connection_dead(&flood));
+	}
+
+	// `?` erases the typed error into a Report with the InvocationError as a *source*, not the
+	// top-level error. The loop boundary must still recognize it — so the walk uses .chain().
+	#[test]
+	fn report_walk_finds_source_chained_invocation_error() {
+		let dead: eyre::Report = eyre::Report::new(InvocationError::Dropped).wrap_err("could not get peer");
+		assert!(report_is_connection_dead(&dead));
+
+		let benign: eyre::Report = eyre::eyre!("Could not find channel in dialogs");
+		assert!(!report_is_connection_dead(&benign));
+	}
 }

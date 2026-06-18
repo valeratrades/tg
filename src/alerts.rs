@@ -3,7 +3,7 @@
 //! Persists notification state to avoid re-notifying for the same messages.
 //! Spawns `notify-send` with no timeout for unread alerts, kills them when read.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use eyre::Result;
 use grammers_client::Client;
@@ -22,7 +22,7 @@ pub struct AlertsState {
 }
 
 impl AlertsState {
-	fn file_path() -> std::path::PathBuf {
+	fn file_path() -> PathBuf {
 		v_utils::xdg_state_file!("alerts_channel.json")
 	}
 

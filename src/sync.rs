@@ -791,6 +791,8 @@ fn coalesce_new_messages(lines: &[String]) -> Vec<String> {
 }
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeMap;
+
 	use super::*;
 
 	#[test]

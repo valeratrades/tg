@@ -1,3 +1,5 @@
+use std::{collections::BTreeMap, path::PathBuf};
+
 use serde::{Deserialize, Serialize};
 use tg::TelegramDestination;
 use v_utils::{
@@ -17,10 +19,10 @@ pub fn init_data_dir() {
 pub struct TopicsMetadata {
 	/// Maps group_id -> { topic_id -> custom_name }
 	/// If a topic has a custom name, use it; otherwise fall back to topic_{id}
-	pub groups: std::collections::BTreeMap<u64, GroupMetadata>,
+	pub groups: BTreeMap<u64, GroupMetadata>,
 }
 impl TopicsMetadata {
-	pub fn file_path() -> std::path::PathBuf {
+	pub fn file_path() -> PathBuf {
 		v_utils::xdg_state_file!("topics_metadata.json")
 	}
 
@@ -80,7 +82,7 @@ pub struct GroupMetadata {
 	/// Custom name for the group (optional, falls back to group_id)
 	pub name: Option<String>,
 	/// Maps topic_id -> custom_name
-	pub topics: std::collections::BTreeMap<u64, String>,
+	pub topics: BTreeMap<u64, String>,
 }
 fn default_1m() -> Timeframe {
 	Timeframe::from(&"1m")

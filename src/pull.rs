@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use eyre::Result;
 use grammers_client::Client;
 use grammers_tl_types as tl;
@@ -122,6 +124,9 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 		let input_peer = match mtproto::get_input_peer(client, telegram_chat_id(group_id)).await {
 			Ok(p) => p,
 			Err(e) => {
+				if mtproto::report_is_connection_dead(&e) {
+					return Err(e); // fatal: propagate → session torn down
+				}
 				warn!("Could not get peer for group {group_id}: {e}");
 				continue;
 			}
@@ -146,6 +151,9 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 			let messages = match fetch_topic_messages(client, &input_peer, topic_id as i32, last_synced_id, max_messages).await {
 				Ok(m) => m,
 				Err(e) => {
+					if mtproto::report_is_connection_dead(&e) {
+						return Err(e); // fatal: propagate → session torn down
+					}
 					warn!("Failed to fetch messages for topic {topic_name}: {e}");
 					continue;
 				}
@@ -193,7 +201,7 @@ pub struct FetchedMessage {
 	pub reply_to_msg_id: Option<i32>,
 }
 /// Get the file path for a topic
-pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> std::path::PathBuf {
+pub fn topic_filepath(group_id: u64, topic_id: u64, metadata: &TopicsMetadata) -> PathBuf {
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 	let group_name = metadata.group_name(group_id);
 	let topic_name = metadata.topic_name(group_id, topic_id);
@@ -213,7 +221,7 @@ fn sanitize_topic_name(name: &str) -> String {
 	mtproto::sanitize_topic_name(name)
 }
 /// Extract the highest message ID from a file's content by parsing `<!-- msg:ID ... -->` tags
-fn extract_max_message_id(file_path: &std::path::Path) -> i32 {
+fn extract_max_message_id(file_path: &Path) -> i32 {
 	let content = match std::fs::read_to_string(file_path) {
 		Ok(c) => c,
 		Err(_) => return 0,
@@ -367,7 +375,7 @@ fn month_name(month: i8) -> &'static str {
 	}
 }
 /// Backfill date header years in a file if any headers are missing years
-fn backfill_file_date_headers(file_path: &std::path::Path) -> Result<()> {
+fn backfill_file_date_headers(file_path: &Path) -> Result<()> {
 	let content = std::fs::read_to_string(file_path)?;
 
 	// Check if any headers need backfilling
@@ -1005,7 +1013,7 @@ async fn merge_mtproto_messages_to_file(
 /// 1. Remove tagless message lines (optimistic writes that should be replaced by tagged versions)
 /// 2. Remove empty date sections (date headers followed by only empty lines or another header)
 /// 3. Collapse multiple consecutive empty lines into one
-fn cleanup_tagless_messages(file_path: &std::path::Path) -> Result<()> {
+fn cleanup_tagless_messages(file_path: &Path) -> Result<()> {
 	use regex::Regex;
 
 	let content = std::fs::read_to_string(file_path)?;

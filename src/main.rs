@@ -1,5 +1,7 @@
 use std::{
+	collections::BTreeMap,
 	io::Write as IoWrite,
+	path::PathBuf,
 	process::{Command, Stdio},
 };
 
@@ -546,7 +548,7 @@ fn resolve_send_destination(args: &SendArgs) -> Result<(u64, u64)> {
 	}
 }
 /// Search for topic files using a pattern
-fn search_topics_by_pattern(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
+fn search_topics_by_pattern(pattern: &str) -> Result<Vec<PathBuf>> {
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 
 	let output = Command::new("find").args([data_dir.to_str().unwrap(), "-name", "*.md", "-type", "f"]).output()?;
@@ -571,7 +573,7 @@ fn search_topics_by_pattern(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
 			continue;
 		}
 
-		let path = std::path::PathBuf::from(file_path);
+		let path = PathBuf::from(file_path);
 
 		// Get relative path from data_dir for matching
 		if let Ok(rel_path) = path.strip_prefix(data_dir) {
@@ -589,7 +591,7 @@ fn search_topics_by_pattern(pattern: &str) -> Result<Vec<std::path::PathBuf>> {
 	Ok(matches)
 }
 /// Get all topic files
-fn get_all_topic_files() -> Result<Vec<std::path::PathBuf>> {
+fn get_all_topic_files() -> Result<Vec<PathBuf>> {
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 
 	let output = Command::new("find").args([data_dir.to_str().unwrap(), "-name", "*.md", "-type", "f"]).output()?;
@@ -606,13 +608,13 @@ fn get_all_topic_files() -> Result<Vec<std::path::PathBuf>> {
 		if file_path.is_empty() || file_path.contains("/images/") {
 			continue;
 		}
-		files.push(std::path::PathBuf::from(file_path));
+		files.push(PathBuf::from(file_path));
 	}
 
 	Ok(files)
 }
 /// Use fzf to let user choose from multiple topic matches
-fn choose_topic_with_fzf(matches: &[std::path::PathBuf], initial_query: &str) -> Result<Option<std::path::PathBuf>> {
+fn choose_topic_with_fzf(matches: &[PathBuf], initial_query: &str) -> Result<Option<PathBuf>> {
 	let data_dir = crate::server::DATA_DIR.get().unwrap();
 
 	// Prepare input for fzf - use relative paths for display
@@ -640,7 +642,7 @@ fn choose_topic_with_fzf(matches: &[std::path::PathBuf], initial_query: &str) ->
 	}
 }
 /// Resolve a topic pattern to a file path
-fn resolve_topic_path(pattern: Option<&str>) -> Result<std::path::PathBuf> {
+fn resolve_topic_path(pattern: Option<&str>) -> Result<PathBuf> {
 	match pattern {
 		None => {
 			// No pattern: fzf over all files
@@ -806,13 +808,7 @@ struct TodoItem {
 	/// Blockquote context from the replied-to message
 	reply_context: Option<String>,
 }
-fn format_reply_context(
-	reply_id: i32,
-	messages: &std::collections::BTreeMap<i32, sync::ParsedMessage>,
-	source: &str,
-	msg_lines: &std::collections::HashMap<i32, usize>,
-	inline_up_to_chars: usize,
-) -> String {
+fn format_reply_context(reply_id: i32, messages: &BTreeMap<i32, sync::ParsedMessage>, source: &str, msg_lines: &std::collections::HashMap<i32, usize>, inline_up_to_chars: usize) -> String {
 	let msg = messages.get(&reply_id);
 	let is_voice = msg.is_some_and(|m| m.is_voice);
 	let content = msg.map(|m| m.content.as_str()).unwrap_or("");
@@ -843,7 +839,7 @@ fn build_message_line_map(content: &str) -> std::collections::HashMap<i32, usize
 	map
 }
 /// Aggregate TODOs from all topic files into todos.md, returning the path
-fn aggregate_todos(settings: &LiveSettings) -> Result<std::path::PathBuf> {
+fn aggregate_todos(settings: &LiveSettings) -> Result<PathBuf> {
 	use std::io::Read as _;
 
 	let cfg = settings.config()?;

@@ -23,10 +23,10 @@ dirs = "6.0.0"
 eyre = "^0.6.12"
 futures = "0.3.31"
 futures-util = "^0.3.31"
-grammers-client = "0.8.1"
-grammers-mtsender = "0.8.1"
-grammers-session = "0.8.0"
-grammers-tl-types = "0.8.0"
+grammers-client = { git = "https://codeberg.org/Lonami/grammers", rev = "d07f96f6bee22a3a850a1f3067834686a08b396c" }
+grammers-mtsender = { git = "https://codeberg.org/Lonami/grammers", rev = "d07f96f6bee22a3a850a1f3067834686a08b396c" }
+grammers-session = { git = "https://codeberg.org/Lonami/grammers", rev = "d07f96f6bee22a3a850a1f3067834686a08b396c" }
+grammers-tl-types = { git = "https://codeberg.org/Lonami/grammers", rev = "d07f96f6bee22a3a850a1f3067834686a08b396c" }
 jiff = "0.2"
 miette = { version = "7", features = ["fancy"] }
 regex = "1"

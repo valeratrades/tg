@@ -334,6 +334,7 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 		reply_markup: None,
 		entities: None,
 		schedule_date: None,
+		schedule_repeat_period: None,
 		quick_reply_shortcut_id: None,
 	};
 
@@ -380,6 +381,7 @@ pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, te
 		reply_markup: None,
 		entities: None,
 		schedule_date: None,
+		schedule_repeat_period: None,
 		send_as: None,
 		quick_reply_shortcut: None,
 		effect: None,
@@ -440,6 +442,7 @@ pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &Pa
 		reply_markup: None,
 		entities: None,
 		schedule_date: None,
+		schedule_repeat_period: None,
 		send_as: None,
 		quick_reply_shortcut: None,
 		effect: None,

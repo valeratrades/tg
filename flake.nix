@@ -71,7 +71,14 @@
                 ];
                 nativeBuildInputs = with pkgs; [ pkg-config ];
 
-                cargoLock.lockFile = ./Cargo.lock;
+                cargoLock = {
+                  lockFile = ./Cargo.lock;
+                  # grammers pinned to a codeberg git rev (crates.io 0.8.1 has a CPU-spinning
+                  # infinite-recursion bug in its error conversions); git deps need explicit hashes.
+                  outputHashes = {
+                    "grammers-client-0.8.1" = "sha256-yDmX1J2B5T0IYF8QqAuUQKrNfsd+FhUREk6qFIhtQ64=";
+                  };
+                };
                 src = pkgs.lib.cleanSource ./.;
               };
             };

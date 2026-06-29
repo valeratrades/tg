@@ -9,11 +9,6 @@ use clap::{Args, Parser, Subcommand};
 use clap_stdin::MaybeStdin;
 use eyre::{Result, bail, eyre};
 use jiff::{Timestamp, ToSpan, civil::Date};
-use server::Message;
-use tokio::{
-	io::{AsyncReadExt, AsyncWriteExt},
-	net::TcpStream,
-};
 use v_utils::io::file_open::open;
 
 use crate::{
@@ -240,33 +235,16 @@ async fn run() -> Result<()> {
 	match cli.command {
 		Commands::Send(args) => {
 			let (group_id, topic_id) = resolve_send_destination(&args)?;
-			let msg_text = args.message.to_string();
-
-			let message = Message::new(group_id, topic_id, msg_text.clone());
-			let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
-
-			// Connect to server with timeout
-			let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
-				.await
-				.map_err(|_| eyre!("Timed out connecting to server at {addr}"))?
-				.map_err(|e| ConnectionError::new(addr.clone(), e))?;
-
-			// Server handles send + file write with message tag
-			let json = serde_json::to_string(&message)?;
-			stream.write_all(json.as_bytes()).await?;
-
-			// Read JSON response with timeout
-			let mut buf = vec![0u8; 4096];
-			let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf))
-				.await
-				.map_err(|_| eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
-				.map_err(|e| eyre!("Failed to read server response: {e}"))?;
-			if n == 0 {
-				bail!("Server closed connection without response");
+			let update = sync::MessageUpdate::Create {
+				group_id,
+				topic_id,
+				content: args.message.to_string(),
+			};
+			let results = sync::push_via_server(vec![update], &settings).await?;
+			display_push_results(&results);
+			if results.creates.iter().any(|(_, _, op)| !op.success) {
+				bail!("Send failed");
 			}
-			let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
-			let response: server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| JsonParseError::from_serde(response_str.clone(), e))?;
-			check_server_version(&response)?;
 		}
 		Commands::SendAlert(args) => {
 			let bot_token = cli
@@ -457,33 +435,10 @@ async fn run() -> Result<()> {
 					display_push_results(&results);
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
-					// Send through server (which handles file write + telegram send)
 					eprintln!("Creating message in group {group_id} topic {topic_id}");
-
-					let message = server::Message::new(group_id, topic_id, content);
-					let addr = format!("127.0.0.1:{}", settings.config()?.localhost_port);
-
-					let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
-						.await
-						.map_err(|_| eyre!("Timed out connecting to server at {addr}"))?
-						.map_err(|e| ConnectionError::new(addr.clone(), e))?;
-
-					let json = serde_json::to_string(&message)?;
-					stream.write_all(json.as_bytes()).await?;
-
-					let mut buf = vec![0u8; 4096];
-					let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf))
-						.await
-						.map_err(|_| eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
-						.map_err(|e| eyre!("Failed to read server response: {e}"))?;
-					if n == 0 {
-						bail!("Server closed connection without response");
-					}
-					let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
-					let response: server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| JsonParseError::from_serde(response_str.clone(), e))?;
-					check_server_version(&response)?;
-
-					eprintln!("Message queued for sending");
+					let update = sync::MessageUpdate::Create { group_id, topic_id, content };
+					let results = sync::push_via_server(vec![update], &settings).await?;
+					display_push_results(&results);
 				}
 			};
 		}
@@ -945,25 +900,6 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<PathBuf> {
 
 	Ok(todos_path)
 }
-/// Check server version and fail with miette error if mismatched
-fn check_server_version(response: &server::ServerResponse) -> Result<()> {
-	let client_version = env!("CARGO_PKG_VERSION");
-	match &response.version {
-		Some(server_version) if server_version != client_version => Err(VersionMismatchError {
-			server_version: server_version.clone(),
-			client_version: client_version.to_string(),
-		})?,
-		None => {
-			// Old server without version field - definitely outdated
-			Err(VersionMismatchError {
-				server_version: "unknown (no version info)".to_string(),
-				client_version: client_version.to_string(),
-			})?
-		}
-		Some(_) => Ok(()), // Versions match
-	}
-}
-
 /// Display push operation results to the user
 fn display_push_results(results: &PushResults) {
 	if results.deletions.is_empty() && results.edits.is_empty() && results.creates.is_empty() {

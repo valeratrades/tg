@@ -1,6 +1,5 @@
 use std::{
-	io::{Read, Seek, SeekFrom, Write},
-	path::{Path, PathBuf},
+	path::PathBuf,
 	sync::{Arc, OnceLock},
 };
 
@@ -15,12 +14,8 @@ use tokio::{
 	sync::{mpsc, oneshot},
 };
 use tracing::{debug, error, info, warn};
-use xattr::FileExt as _;
 
-use crate::{
-	config::{LiveSettings, TopicsMetadata},
-	pull::{self, topic_filepath},
-};
+use crate::{config::LiveSettings, pull};
 
 /// Handle to send push requests to the MTProto worker
 #[derive(Clone)]
@@ -37,20 +32,11 @@ impl PushHandle {
 }
 
 pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
-/// Message to send to a specific topic in a forum group
-#[derive(Clone, Debug, Default, Deserialize, Serialize, derive_new::new)]
-pub struct Message {
-	pub group_id: u64,
-	pub topic_id: u64,
-	pub message: String,
-}
 /// Request types that the server can handle
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerRequest {
-	/// Send a new message (legacy format, also supports bare Message object)
-	Send(Message),
-	/// Push updates (delete/edit/create) to Telegram via MTProto
+	/// Push updates (create/delete/edit) to Telegram via MTProto
 	Push { updates: Vec<crate::sync::MessageUpdate> },
 	/// Ping to check server version
 	Ping,
@@ -197,155 +183,96 @@ async fn wait_for_telegram_draining(listener: &TcpListener) {
 	info!("Telegram is now reachable");
 }
 
-/// Run the server with an established session. Returns when the runner dies or on clean shutdown.
+/// Run the server with an established session. Returns when a fatal error occurs or on clean shutdown.
+///
+/// `worker_loop` owns all MTProto + file-mutating work (pull, alerts, pushes) and runs it serially,
+/// so concurrent writes can never corrupt a topic file. `network_loop` only accepts connections and
+/// forwards their requests to the worker — it must never block on the worker, otherwise a slow pull
+/// would stall the ack and clients would time out (the bug this split fixes).
 async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::MtprotoSession, listener: &TcpListener) -> Result<()> {
 	let crate::mtproto::MtprotoSession { client, runner } = session;
 
-	// All RPC-dependent setup must happen inside tokio::select! where the runner is alive
-	// (is_authorized, discover_and_create_topic_files, etc. all need the runner driving I/O)
+	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+	let push_handle = PushHandle { tx: push_tx };
+
 	tokio::select! {
 		biased;
-		result = async {
-			// Check authorization (requires runner to be driving I/O)
-			if !client.is_authorized().await? {
-				eyre::bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
+		result = worker_loop(&settings, &client, push_rx) => { client.disconnect(); result }
+		result = network_loop(listener, &push_handle) => { client.disconnect(); result }
+		_ = runner.run() => Err(eyre::eyre!("MTProto runner exited")),
+	}
+}
+/// Serially process all MTProto + file-mutating work. Runs concurrently with the runner, which
+/// drives the I/O the RPC-dependent setup needs. Any error here is fatal: it tears the session
+/// down so `run` can reconnect.
+async fn worker_loop(settings: &LiveSettings, client: &Client, mut push_rx: mpsc::Receiver<PushRequest>) -> Result<()> {
+	if !client.is_authorized().await? {
+		eyre::bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
+	}
+	info!("Telegram client authorized (existing session)");
+
+	info!("Discovering forum topics for configured groups...");
+	pull::discover_and_create_topic_files(settings, client).await?;
+
+	let cfg = settings.config()?;
+	info!("Pull interval: {}", cfg.pull_interval);
+	// `Delay` (≥interval between ticks regardless of backlog) prevents the catch-up storm `Burst`
+	// would cause once work errors in µs.
+	let mut pull_timer = tokio::time::interval(cfg.pull_interval.duration());
+	pull_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+	let mut alerts_timer = tokio::time::interval(cfg.alerts_interval.duration());
+	alerts_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+	//LOOP: serial worker
+	loop {
+		tokio::select! {
+			biased;
+			// On-demand pushes win over periodic ticks so interactive sends aren't delayed.
+			// ponytail: a continuous push flood could starve pull; not a concern for a personal CLI.
+			Some(req) = push_rx.recv() => {
+				let result = crate::sync::push(req.updates, settings, client).await;
+				let _ = req.response_tx.send(result);
 			}
-			info!("Telegram client authorized (existing session)");
-
-			// Discover forum topics and create topic files
-			info!("Discovering forum topics for configured groups...");
-			pull::discover_and_create_topic_files(&settings, &client).await?;
-
-			// Create push channel for the MTProto worker
-			let (push_tx, mut push_rx) = mpsc::channel::<PushRequest>(32);
-			let push_handle = PushHandle { tx: push_tx };
-
-			// Create channel for background send tasks (fire-and-forget with retries)
-			let (bg_send_tx, mut bg_send_rx) = mpsc::channel::<BackgroundSendTask>(32);
-			let bg_send_handle = BackgroundSendHandle { tx: bg_send_tx };
-
-			let cfg = settings.config()?;
-			let pull_interval = &cfg.pull_interval;
-			let alerts_interval = &cfg.alerts_interval;
-			let interval_duration = pull_interval.duration();
-			info!("Pull interval: {pull_interval}");
-
-			// Two interval clocks driven directly. `Delay` (≥interval between ticks regardless of
-			// backlog) prevents the catch-up storm `Burst` would cause once work errors in µs.
-			let mut pull_timer = tokio::time::interval(interval_duration);
-			pull_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-			let mut alerts_timer = tokio::time::interval(alerts_interval.duration());
-			alerts_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-			// Inflight set ONLY for fire-and-forget work (connection handlers + background sends)
-			// whose individual failure must NOT tear the session down. Owned here, dropped with the
-			// scope. pull/alerts run inline in their select arms so their `?` propagates as fatal.
-			type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-			let mut inflight: FuturesUnordered<BoxFut> = FuturesUnordered::new();
-
-			//LOOP: main event loop
-			loop {
-				tokio::select! {
-					_ = pull_timer.tick() => {
-						pull::pull(&settings, &client).await?; // fatal connection-dead → tears session down
-						debug!("Pull completed successfully");
-					}
-					_ = alerts_timer.tick() => {
-						crate::alerts::check_alerts(&client, &settings).await?;
-						debug!("Alerts check completed successfully");
-					}
-					accept_result = listener.accept() => {
-						let (socket, addr) = accept_result?;
-						info!("Accepted connection from: {addr}");
-
-						let settings_clone = Arc::clone(&settings);
-						let client_clone = client.clone();
-						let push_handle_clone = push_handle.clone();
-						let bg_send_handle_clone = bg_send_handle.clone();
-						inflight.push(Box::pin(async move {
-							handle_connection(socket, &settings_clone, &push_handle_clone, &bg_send_handle_clone, &client_clone).await;
-						}));
-					}
-					Some(push_request) = push_rx.recv() => {
-						debug!("Processing push request with {} updates", push_request.updates.len());
-						let result = crate::sync::push(push_request.updates, &settings, &client).await;
-						let _ = push_request.response_tx.send(result);
-					}
-					Some(bg_send_task) = bg_send_rx.recv() => {
-						let client_clone = client.clone();
-						inflight.push(Box::pin(background_send(bg_send_task, client_clone)));
-					}
-					Some(()) = inflight.next() => {} // reap fire-and-forget jobs; never the sole liveness driver
-				}
+			_ = pull_timer.tick() => {
+				pull::pull(settings, client).await?; // fatal connection-dead → tears session down
+				debug!("Pull completed successfully");
 			}
-		} => {
-			client.disconnect();
-			result
-		}
-		_ = runner.run() => {
-			Err(eyre::eyre!("MTProto runner exited"))
+			_ = alerts_timer.tick() => {
+				crate::alerts::check_alerts(client, settings).await?;
+				debug!("Alerts check completed successfully");
+			}
 		}
 	}
 }
-/// Send a message via MTProto, handling image extraction
-/// Returns the message ID assigned by Telegram
-async fn send_message_mtproto(client: &Client, message: &Message) -> Result<i32> {
-	// Check if message contains an image
-	if let Some((image_path, caption)) = extract_image_path(&message.message) {
-		let full_path = DATA_DIR.get().unwrap().join(&image_path);
+/// Accept connections and run each request handler concurrently. Connection-level failures are
+/// isolated per-connection; only a listener failure is fatal.
+async fn network_loop(listener: &TcpListener, push_handle: &PushHandle) -> Result<()> {
+	type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+	let mut conns: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
+	loop {
+		tokio::select! {
+			accept_result = listener.accept() => {
+				let (socket, addr) = accept_result?;
+				info!("Accepted connection from: {addr}");
+				conns.push(Box::pin(handle_connection(socket, push_handle.clone())));
+			}
+			Some(()) = conns.next() => {} // reap finished connection handlers
+		}
+	}
+}
+/// Send a message (text, or a photo when it's a `![](path)` image) via MTProto.
+/// Returns the message ID assigned by Telegram.
+pub(crate) async fn send_message(client: &Client, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
+	if let Some((image_path, caption)) = extract_image_path(text) {
+		let full_path = DATA_DIR.get().unwrap().join(&image_path);
 		if full_path.exists() {
 			debug!("Sending photo from {}", full_path.display());
-			return crate::mtproto::send_photo(client, message.group_id, message.topic_id, &full_path, caption.as_deref()).await;
-		} else {
-			warn!("Image file not found: {}, sending as text", full_path.display());
+			return crate::mtproto::send_photo(client, group_id, topic_id, &full_path, caption.as_deref()).await;
 		}
+		warn!("Image file not found: {}, sending as text", full_path.display());
 	}
-
-	crate::mtproto::send_text_message(client, message.group_id, message.topic_id, &message.message).await
-}
-/// Fire-and-forget send with exponential backoff retries (up to ~30 min), then writes the
-/// message to its file with the Telegram-assigned tag. Failure here must not tear the session
-/// down — it owns its own retry loop and gives up locally.
-async fn background_send(task: BackgroundSendTask, client: Client) {
-	let mut delay_secs = 1.0_f64;
-	const E: f64 = std::f64::consts::E;
-	const THIRTY_MINS_SECS: f64 = 30.0 * 60.0;
-
-	let msg_id = loop {
-		match send_message_mtproto(&client, &task.message).await {
-			Ok(id) => break Some(id),
-			Err(e) => {
-				let total_elapsed_secs = (delay_secs - 1.0) * (E - 1.0).recip() * E;
-				if total_elapsed_secs >= THIRTY_MINS_SECS {
-					error!("Failed to send message to Telegram after 30+ minutes: {e}");
-					break None;
-				}
-				warn!("Failed to send message to Telegram, retrying in {delay_secs:.0}s: {e}");
-				tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
-				delay_secs *= E;
-			}
-		}
-	};
-
-	// Write the message to file with tag after successful send
-	if let Some(msg_id) = msg_id {
-		let now = Timestamp::now();
-		let formatted = format_message_append_with_sender(&task.message.message, task.last_write_datetime, now, Some(msg_id), None);
-
-		if let Some(parent) = task.chat_filepath.parent()
-			&& let Err(e) = std::fs::create_dir_all(parent)
-		{
-			error!("Failed to create directory '{}': {e}", parent.display());
-		}
-
-		match write_message_to_file(&task.chat_filepath, &formatted) {
-			Ok(()) => info!("Wrote message with tag to {}", task.chat_filepath.display()),
-			Err(e) => error!("Failed to write message to file: {e}"),
-		}
-	}
-
-	info!("Background send completed");
+	crate::mtproto::send_text_message(client, group_id, topic_id, text).await
 }
 
 pub(crate) fn format_message_append(
@@ -412,21 +339,10 @@ struct PushRequest {
 	updates: Vec<crate::sync::MessageUpdate>,
 	response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
 }
-/// A background send task - fire-and-forget message to Telegram with retries
-struct BackgroundSendTask {
-	message: Message,
-	/// Filepath to write the message to after successful send
-	chat_filepath: PathBuf,
-	/// Last write datetime for formatting (from xattr)
-	last_write_datetime: Option<Timestamp>,
-}
-/// Handle to queue background send tasks
-#[derive(Clone)]
-struct BackgroundSendHandle {
-	tx: mpsc::Sender<BackgroundSendTask>,
-}
-async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, push_handle: &PushHandle, bg_send_handle: &BackgroundSendHandle, _client: &Client) {
-	// Use a larger buffer for push requests which can contain many updates
+/// Read one request from a client, forward it to the serial worker, and write back the result.
+/// Runs concurrently with other connections; the worker it calls into is what serializes the work.
+async fn handle_connection(mut socket: TcpStream, push_handle: PushHandle) {
+	// Larger buffer for push requests which can contain many updates
 	let mut buf = vec![0; 64 * 1024];
 
 	while let Ok(n) = socket.read(&mut buf).await {
@@ -438,98 +354,30 @@ async fn handle_connection(mut socket: TcpStream, _settings: &LiveSettings, push
 		let received = String::from_utf8_lossy(&buf[0..n]);
 		debug!("Received raw message: {received}");
 
-		// Try parsing as ServerRequest first (has "type" field), fall back to legacy Message
-		let request: ServerRequest = if let Ok(req) = serde_json::from_str(&received) {
-			req
-		} else if let Ok(msg) = serde_json::from_str::<Message>(&received) {
-			// Legacy format: bare Message object
-			ServerRequest::Send(msg)
-		} else {
-			error!("Failed to deserialize request. Raw: {received}");
-			let response = ServerResponse::err("Invalid request format");
-			let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
-			return;
-		};
-
-		match request {
-			ServerRequest::Send(message) => {
-				// Handle send request (legacy behavior)
-				handle_send_message(&mut socket, message, bg_send_handle).await;
-			}
-			ServerRequest::Push { updates } => {
-				// Handle push request via the serialized push worker
-				handle_push_updates(&mut socket, updates, push_handle).await;
-			}
-			ServerRequest::Ping => {
-				// Just respond with version info
-				let response = ServerResponse::ok();
-				let response_json = serde_json::to_string(&response).unwrap();
-				if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-					error!("Failed to send ping response: {e}");
+		let response = match serde_json::from_str::<ServerRequest>(&received) {
+			Ok(ServerRequest::Push { updates }) => {
+				info!("Received push request with {} updates", updates.len());
+				match push_handle.push(updates).await {
+					Ok(results) => {
+						info!("Push completed successfully");
+						ServerResponse::ok_with_results(results)
+					}
+					Err(e) => {
+						error!("Push failed: {e}");
+						ServerResponse::err(e.to_string())
+					}
 				}
 			}
+			Ok(ServerRequest::Ping) => ServerResponse::ok(),
+			Err(e) => {
+				error!("Failed to deserialize request: {e}. Raw: {received}");
+				ServerResponse::err("Invalid request format")
+			}
+		};
+
+		if let Err(e) = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await {
+			error!("Failed to send response: {e}");
 		}
-	}
-}
-/// Handle a push request by sending it to the push worker
-async fn handle_push_updates(socket: &mut TcpStream, updates: Vec<crate::sync::MessageUpdate>, push_handle: &PushHandle) {
-	info!("Received push request with {} updates", updates.len());
-
-	let result = push_handle.push(updates).await;
-
-	let response = match result {
-		Ok(push_results) => {
-			info!("Push completed successfully");
-			ServerResponse::ok_with_results(push_results)
-		}
-		Err(e) => {
-			error!("Push failed: {e}");
-			ServerResponse::err(e.to_string())
-		}
-	};
-
-	let response_json = serde_json::to_string(&response).unwrap();
-	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send push response: {e}");
-	}
-}
-/// Handle a send message request
-async fn handle_send_message(socket: &mut TcpStream, message: Message, bg_send_handle: &BackgroundSendHandle) {
-	// Send proper JSON response with version info
-	let response = ServerResponse::ok();
-	let response_json = serde_json::to_string(&response).unwrap();
-	if let Err(e) = socket.write_all(response_json.as_bytes()).await {
-		error!("Failed to send acknowledgment: {e}");
-		return;
-	}
-	debug!("Sent acknowledgment");
-
-	let metadata = TopicsMetadata::load();
-	let chat_filepath = topic_filepath(message.group_id, message.topic_id, &metadata);
-	info!("Queuing message for group {} topic {} to file: {}", message.group_id, message.topic_id, chat_filepath.display());
-
-	// Read last write datetime for formatting (will be used after send succeeds)
-	let last_write_datetime: Option<Timestamp> = std::fs::File::open(&chat_filepath)
-		.ok()
-		.and_then(|file| {
-			debug!("Reading xattr from existing file");
-			file.get_xattr("user.last_changed").ok()
-		})
-		.flatten()
-		.and_then(|v| {
-			let s = String::from_utf8_lossy(&v);
-			s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok()
-		});
-
-	// Queue background task to send to Telegram (with retries)
-	// File write happens after successful send, with the message tag
-	let task = BackgroundSendTask {
-		message: message.clone(),
-		chat_filepath,
-		last_write_datetime,
-	};
-	if let Err(e) = bg_send_handle.tx.send(task).await {
-		error!("Failed to queue background send task: {e}");
 	}
 }
 /// Extract image path from markdown image syntax: ![alt](path) or ![](path)
@@ -543,28 +391,6 @@ fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	let remaining = text[full_match.end()..].trim();
 	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
 	Some((path, caption))
-}
-/// Write a formatted message to a file, trimming trailing whitespace and updating xattr
-fn write_message_to_file(chat_filepath: &Path, formatted_message: &str) -> Result<()> {
-	let mut file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(chat_filepath)?;
-
-	// Trim trailing whitespace, keeping at most one newline
-	let mut file_contents = String::new();
-	file.read_to_string(&mut file_contents)?;
-	let trimmed_len = file_contents.trim_end().len();
-	// Cap at file length to avoid extending the file if it doesn't end with whitespace
-	let truncate_to = std::cmp::min(trimmed_len + 1, file_contents.len());
-	file.set_len(truncate_to as u64)?;
-	file.seek(SeekFrom::End(0))?;
-
-	file.write_all(formatted_message.as_bytes())?;
-	debug!("Wrote message to file");
-
-	let now_rfc3339 = Timestamp::now().to_string();
-	file.set_xattr("user.last_changed", now_rfc3339.as_bytes())?;
-	debug!("Set xattr successfully");
-
-	Ok(())
 }
 /// Check if a message contains patterns that could break our markdown format
 fn needs_markdown_wrapping(message: &str) -> bool {
@@ -597,7 +423,6 @@ fn max_backtick_run(message: &str) -> usize {
 }
 #[cfg(test)]
 mod tests {
-	use eyre::Result;
 	use v_utils::distributions::ReimanZeta;
 
 	use super::*;
@@ -648,20 +473,6 @@ mod tests {
 
 		. 1970-01-03 20:36:00
 		");
-	}
-
-	#[test]
-	fn deser_message() -> Result<()> {
-		let message_str = r#"{"group_id":2244305221,"topic_id":3,"message":"a message"}"#;
-		let message: Message = serde_json::from_str(message_str)?;
-		insta::assert_debug_snapshot!(message, @r#"
-		Message {
-		    group_id: 2244305221,
-		    topic_id: 3,
-		    message: "a message",
-		}
-		"#);
-		Ok(())
 	}
 
 	#[test]

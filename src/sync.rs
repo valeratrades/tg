@@ -37,26 +37,6 @@ pub struct PushResults {
 	/// Local file cleanup results: (file_path, lines_removed, message)
 	pub file_cleanups: Vec<(String, usize, String)>,
 }
-/// Check server version and fail if mismatched
-pub fn check_server_version(response: &crate::server::ServerResponse) -> Result<()> {
-	let client_version = env!("CARGO_PKG_VERSION");
-	match &response.version {
-		Some(server_version) if server_version != client_version => {
-			eyre::bail!(
-				"Server version mismatch: server is v{server_version}, client is v{client_version}.\n\
-				 Restart the server with `tg server` to use the updated version."
-			);
-		}
-		None => {
-			// Old server without version field - definitely outdated
-			eyre::bail!(
-				"Server is outdated (no version info). Client is v{client_version}.\n\
-				 Restart the server with `tg server` to use the updated version."
-			);
-		}
-		Some(_) => Ok(()), // Versions match
-	}
-}
 /// Push updates via the running server (preferred) or fail with a clear error.
 /// This avoids SQLite session file locking issues when the server is running.
 /// Returns detailed results from the push operation.
@@ -73,19 +53,10 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 
 	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
 
-	let mut stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr)).await {
-		Ok(Ok(s)) => s,
-		Ok(Err(e)) => {
-			eyre::bail!(
-				"Cannot connect to server at {addr}: {e}\n\
-				 Either the server is not running, or it's running on a different port.\n\
-				 Start/restart it with `tg server`"
-			);
-		}
-		Err(_) => {
-			eyre::bail!("Timed out connecting to server at {addr}");
-		}
-	};
+	let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+		.await
+		.map_err(|_| eyre::eyre!("Timed out connecting to server at {addr}"))?
+		.map_err(|e| crate::errors::ConnectionError::new(addr.clone(), e))?;
 
 	// Send push request
 	let request = crate::server::ServerRequest::Push { updates };
@@ -102,10 +73,17 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 		eyre::bail!("Server closed connection without response");
 	}
 
-	let response: crate::server::ServerResponse = serde_json::from_slice(&buf[..n])?;
+	let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+	let response: crate::server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| crate::errors::JsonParseError::from_serde(response_str.clone(), e))?;
 
-	// Check version first
-	check_server_version(&response)?;
+	let client_version = env!("CARGO_PKG_VERSION");
+	match &response.version {
+		Some(v) if v == client_version => {}
+		other => Err(crate::errors::VersionMismatchError {
+			server_version: other.clone().unwrap_or_else(|| "unknown (no version info)".to_string()),
+			client_version: client_version.to_string(),
+		})?,
+	}
 
 	if response.success {
 		Ok(response.push_results.unwrap_or_default())
@@ -255,7 +233,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 	let mut successful_creates: Vec<(u64, u64, String, i32)> = Vec::new(); // (group_id, topic_id, content, msg_id)
 
 	for (group_id, topic_id, content) in &creates {
-		match mtproto::send_text_message(client, *group_id, *topic_id, content).await {
+		match crate::server::send_message(client, *group_id, *topic_id, content).await {
 			Ok(msg_id) => {
 				info!(group_id, topic_id, msg_id, "Created message on Telegram");
 				successful_creates.push((*group_id, *topic_id, content.clone(), msg_id));
@@ -794,43 +772,6 @@ mod tests {
 	use std::collections::BTreeMap;
 
 	use super::*;
-
-	#[test]
-	fn test_check_server_version_match() {
-		let response = crate::server::ServerResponse {
-			success: true,
-			error: None,
-			version: Some(env!("CARGO_PKG_VERSION").to_string()),
-			push_results: None,
-		};
-		assert!(check_server_version(&response).is_ok());
-	}
-
-	#[test]
-	fn test_check_server_version_mismatch() {
-		let response = crate::server::ServerResponse {
-			success: true,
-			error: None,
-			version: Some("0.0.1".to_string()), // old version
-			push_results: None,
-		};
-		let err = check_server_version(&response).unwrap_err();
-		assert!(err.to_string().contains("version mismatch"));
-		assert!(err.to_string().contains("Restart the server"));
-	}
-
-	#[test]
-	fn test_check_server_version_missing() {
-		let response = crate::server::ServerResponse {
-			success: true,
-			error: None,
-			version: None, // very old server without version field
-			push_results: None,
-		};
-		let err = check_server_version(&response).unwrap_err();
-		assert!(err.to_string().contains("outdated"));
-		assert!(err.to_string().contains("Restart the server"));
-	}
 
 	#[test]
 	fn test_parse_file_messages() {

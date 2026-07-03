@@ -851,7 +851,7 @@ fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
 async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> eyre::Result<String> {
 	// Wrapper to implement Downloadable for raw tl::types::Document
 	struct RawDoc<'a>(&'a tl::types::Document);
-	impl grammers_client::types::Downloadable for RawDoc<'_> {
+	impl grammers_client::media::Downloadable for RawDoc<'_> {
 		fn to_raw_input_location(&self) -> Option<grammers_tl_types::enums::InputFileLocation> {
 			Some(
 				grammers_tl_types::types::InputDocumentFileLocation {

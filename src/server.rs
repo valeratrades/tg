@@ -109,7 +109,7 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 		// Wait for Telegram connectivity while rejecting queued connections
 		wait_for_telegram_draining(&listener).await;
 
-		let session = match crate::mtproto::create_session(&settings) {
+		let session = match crate::mtproto::create_session(&settings).await {
 			Ok(s) => s,
 			Err(e) => {
 				warn!("Failed to create MTProto session: {e}; retrying in {backoff:?}");

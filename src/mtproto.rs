@@ -26,7 +26,7 @@ pub struct MtprotoSession {
 /// For server use — the caller drives the runner and can reconnect on failure.
 /// Note: authorization is checked later in `run_with_session` where the runner is alive,
 /// since `is_authorized()` makes an RPC call that requires the runner to be driving I/O.
-pub fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
+pub async fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 	let cfg = config.config()?;
 	let api_id = cfg.api_id.ok_or_else(|| eyre!("api_id not configured"))?;
 	let username = cfg.username.clone().unwrap_or_else(|| "@user".to_string());
@@ -38,7 +38,7 @@ pub fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 		std::fs::create_dir_all(parent)?;
 	}
 
-	let session = match SqliteSession::open(&session_file) {
+	let session = match SqliteSession::open(&session_file).await {
 		Ok(s) => Arc::new(s),
 		Err(e) => {
 			let err_str = e.to_string();
@@ -46,7 +46,7 @@ pub fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 				error!("Session database is corrupted: {e}");
 				info!("Deleting corrupted session file and creating a new one");
 				std::fs::remove_file(&session_file)?;
-				Arc::new(SqliteSession::open(&session_file)?)
+				Arc::new(SqliteSession::open(&session_file).await?)
 			} else {
 				return Err(e.into());
 			}
@@ -55,8 +55,8 @@ pub fn create_session(config: &LiveSettings) -> Result<MtprotoSession> {
 
 	info!("Connecting to Telegram with api_id: {api_id}");
 	let pool = SenderPool::new(Arc::clone(&session), api_id);
-	let client = Client::new(&pool);
-	let SenderPool { runner, .. } = pool;
+	let SenderPool { runner, handle, .. } = pool;
+	let client = Client::new(handle);
 
 	Ok(MtprotoSession { client, runner })
 }
@@ -89,7 +89,7 @@ where
 		std::fs::create_dir_all(parent)?;
 	}
 
-	let session = match SqliteSession::open(&session_file) {
+	let session = match SqliteSession::open(&session_file).await {
 		Ok(s) => Arc::new(s),
 		Err(e) => {
 			let err_str = e.to_string();
@@ -97,7 +97,7 @@ where
 				error!("Session database is corrupted: {e}");
 				info!("Deleting corrupted session file and creating a new one");
 				std::fs::remove_file(&session_file)?;
-				Arc::new(SqliteSession::open(&session_file)?)
+				Arc::new(SqliteSession::open(&session_file).await?)
 			} else {
 				return Err(e.into());
 			}
@@ -106,8 +106,8 @@ where
 
 	info!("Connecting to Telegram with api_id: {api_id}");
 	let pool = SenderPool::new(Arc::clone(&session), api_id);
-	let client = Client::new(&pool);
-	let SenderPool { runner, .. } = pool;
+	let SenderPool { runner, handle, .. } = pool;
+	let client = Client::new(handle);
 
 	// Run authentication and operation together with the runner using structured concurrency
 	let client_clone = client.clone();
@@ -336,6 +336,7 @@ pub async fn edit_message(client: &Client, group_id: u64, message_id: i32, new_t
 		schedule_date: None,
 		schedule_repeat_period: None,
 		quick_reply_shortcut_id: None,
+		rich_message: None,
 	};
 
 	client.invoke(&request).await?;
@@ -358,6 +359,7 @@ pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, te
 			quote_offset: None,
 			monoforum_peer_id: None,
 			todo_item_id: None,
+			poll_option: None,
 		}))
 	} else {
 		None
@@ -387,6 +389,7 @@ pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, te
 		effect: None,
 		allow_paid_stars: None,
 		suggested_post: None,
+		rich_message: None,
 	};
 
 	let updates = client.invoke(&request).await?;
@@ -410,6 +413,7 @@ pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &Pa
 			quote_offset: None,
 			monoforum_peer_id: None,
 			todo_item_id: None,
+			poll_option: None,
 		}))
 	} else {
 		None
@@ -419,9 +423,11 @@ pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &Pa
 
 	let media = tl::enums::InputMedia::UploadedPhoto(tl::types::InputMediaUploadedPhoto {
 		spoiler: false,
+		live_photo: false,
 		file: uploaded.raw,
 		stickers: None,
 		ttl_seconds: None,
+		video: None,
 	});
 
 	let random_id = rand_i64();
@@ -471,11 +477,11 @@ pub async fn get_chat_info(client: &Client, group_id: u64) -> Result<(String, bo
 			if peer_id == expected_id {
 				let peer = dialog.peer();
 				match peer {
-					grammers_client::types::Peer::Group(g) =>
+					grammers_client::peer::Peer::Group(g) =>
 						if let tl::enums::Chat::Channel(ch) = &g.raw {
 							return Ok((ch.title.clone(), ch.forum));
 						},
-					grammers_client::types::Peer::Channel(c) => {
+					grammers_client::peer::Peer::Channel(c) => {
 						return Ok((c.raw.title.clone(), c.raw.forum));
 					}
 					_ => {}
@@ -512,14 +518,14 @@ pub async fn get_input_peer(client: &Client, chat_id: i64) -> Result<tl::enums::
 				if peer_id == expected_id {
 					let peer = dialog.peer();
 					match peer {
-						grammers_client::types::Peer::Group(g) =>
+						grammers_client::peer::Peer::Group(g) =>
 							if let tl::enums::Chat::Channel(ch) = &g.raw {
 								return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
 									channel_id: ch.id,
 									access_hash: ch.access_hash.unwrap_or(0),
 								}));
 							},
-						grammers_client::types::Peer::Channel(c) => {
+						grammers_client::peer::Peer::Channel(c) => {
 							return Ok(tl::enums::InputPeer::Channel(tl::types::InputPeerChannel {
 								channel_id: c.raw.id,
 								access_hash: c.raw.access_hash.unwrap_or(0),

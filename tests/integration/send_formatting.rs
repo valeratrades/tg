@@ -26,8 +26,8 @@ fn gap_separator_after_interval() {
 
 	## [DATE]
 
-	second message <!-- msg:1000 ts:[TS] -->
-	third message <!-- msg:1001 ts:[TS] -->
+	second message <!-- msg:1000 [TS] -->
+	third message <!-- msg:1001 [TS] -->
 	");
 }
 
@@ -56,6 +56,6 @@ fn multiline_message_survives_as_code_block() {
 	nix:4 <Starship pwd disappearing>    draft
 	v_utils:4    empty
 	`````
-	<!-- msg:1000 ts:[TS] -->
+	<!-- msg:1000 [TS] -->
 	");
 }

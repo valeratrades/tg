@@ -158,6 +158,7 @@ impl Drop for TestCtx {
 /// Volatile values → stable placeholders so insta snapshots hold across runs
 pub fn redact(s: &str) -> String {
 	let s = regex::Regex::new(r"ts:\d+").unwrap().replace_all(s, "ts:[TS]");
+	let s = regex::Regex::new(r"\d{2}:\d{2}:\d{2}").unwrap().replace_all(&s, "[TS]");
 	let s = regex::Regex::new(r"## [A-Za-z]{3} \d{2}, \d{4}").unwrap().replace_all(&s, "## [DATE]");
 	s.into_owned()
 }

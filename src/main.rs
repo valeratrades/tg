@@ -994,7 +994,7 @@ mod tests {
 			content: content.to_string(),
 			is_voice,
 			reply_to_msg_id: None,
-			ts: None,
+			time: None,
 		}
 	}
 

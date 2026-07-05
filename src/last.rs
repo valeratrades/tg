@@ -42,8 +42,8 @@ pub(crate) fn confirm_large_output(count: usize, config: &LiveSettings) -> Resul
 pub(crate) struct RawMessage {
 	pub message_id: i32,
 	pub date: Date,
-	/// UTC unix timestamp from the message tag, if available.
-	pub ts: Option<i64>,
+	/// UTC time-of-day from the message tag, if available.
+	pub time: Option<jiff::civil::Time>,
 	pub content: String,
 	pub is_voice: bool,
 	pub group_name: String,
@@ -76,7 +76,7 @@ pub(crate) fn load_all_messages() -> Vec<RawMessage> {
 				all_messages.push(RawMessage {
 					message_id: msg_id,
 					date,
-					ts: parsed_msg.ts,
+					time: parsed_msg.time,
 					content: parsed_msg.content,
 					is_voice: parsed_msg.is_voice,
 					group_name: group_name.clone(),
@@ -118,12 +118,8 @@ pub(crate) fn print_message_groups(groups: &[(&str, &str, Vec<&RawMessage>)]) {
 }
 
 fn format_message_time(msg: &RawMessage) -> String {
-	match msg.ts {
-		Some(ts) => {
-			let timestamp = jiff::Timestamp::from_second(ts).expect("valid unix timestamp");
-			let zoned = timestamp.to_zoned(jiff::tz::TimeZone::UTC);
-			format!("{} UTC", zoned.strftime("%Y-%m-%d %H:%M"))
-		}
+	match msg.time {
+		Some(time) => format!("{} {} UTC", msg.date.strftime("%Y-%m-%d"), time.strftime("%H:%M")),
 		#[allow(deprecated)]
 		None => format_message_time_legacy(msg.date),
 	}

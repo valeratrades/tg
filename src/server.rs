@@ -418,7 +418,7 @@ pub(crate) fn format_message_append(
 	debug!("Formatting message append");
 
 	let fwd_prefix = if forwarded { "forwarded " } else { "" };
-	let ts_part = format!(" ts:{}", now.as_second());
+	let ts_part = format!(" {}", now.to_zoned(jiff::tz::TimeZone::UTC).strftime("%H:%M:%S"));
 	let reply_part = reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
 	let id_suffix = match (msg_id, sender) {
 		(Some(id), Some(s)) => format!(" <!-- {fwd_prefix}msg:{id}{ts_part}{reply_part} {s} -->"),
@@ -633,7 +633,7 @@ mod tests {
 
 		// will no longer need separate repo for it
 		`````
-		<!-- msg:123 ts:0 user -->
+		<!-- msg:123 00:00:00 user -->
 		");
 	}
 
@@ -645,7 +645,7 @@ mod tests {
 		let now = Timestamp::UNIX_EPOCH;
 		let formatted = format_message_append_with_sender(message, None, now, Some(456), Some("bot"));
 
-		insta::assert_snapshot!(formatted, @"just a simple message <!-- msg:456 ts:0 bot -->");
+		insta::assert_snapshot!(formatted, @"just a simple message <!-- msg:456 00:00:00 bot -->");
 	}
 
 	#[test]

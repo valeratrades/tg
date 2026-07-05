@@ -982,7 +982,7 @@ async fn merge_mtproto_messages_to_file(
 			let content = format!("[voice] {transcript}");
 			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
 			// Inject `voice` qualifier into the tag so sync knows it's immutable
-			let ts_part = format!(" ts:{}", msg_time.as_second());
+			let ts_part = format!(" {}", msg_time.to_zoned(jiff::tz::TimeZone::UTC).strftime("%H:%M:%S"));
 			let reply_part = msg.reply_to_msg_id.map(|id| format!(" reply_to:{id}")).unwrap_or_default();
 			let formatted = formatted.replace(
 				&format!("<!-- msg:{}{ts_part}{reply_part} {sender} -->", msg.id),

@@ -8,7 +8,6 @@
     pre-commit-hooks.inputs.nixpkgs.follows = "nixpkgs";
     v_flakes.url = "github:valeratrades/v_flakes?ref=v1.5";
     v_flakes.inputs.nixpkgs.follows = "nixpkgs";
-    v_flakes.inputs.rust-overlay.follows = "rust-overlay";
   };
 
   outputs =

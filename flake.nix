@@ -77,12 +77,13 @@
 
                 cargoLock = {
                   lockFile = ./Cargo.lock;
-                  # grammers pinned to a codeberg git rev (crates.io 0.8.1 has a CPU-spinning
-                  # infinite-recursion bug in its error conversions); git deps need explicit hashes.
-                  outputHashes = {
-                    "grammers-client-0.8.1" = "sha256-yDmX1J2B5T0IYF8QqAuUQKrNfsd+FhUREk6qFIhtQ64=";
-                  };
                 };
+                # integration tests spawn the server binary and need xattr support,
+                # which the nix build sandbox fs lacks; they run via `cargo t` instead
+                cargoTestFlags = [
+                  "--lib"
+                  "--bins"
+                ];
                 src = pkgs.lib.cleanSource ./.;
               };
             };

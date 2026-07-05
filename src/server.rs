@@ -405,20 +405,11 @@ fn extract_image_path(text: &str) -> Option<(String, Option<String>)> {
 	let caption = if remaining.is_empty() { None } else { Some(remaining.to_string()) };
 	Some((path, caption))
 }
-/// Check if a message contains patterns that could break our markdown format
+/// Check if a message contains patterns that could break our markdown format.
+/// Any multiline message must be wrapped: the file format is one line per message, so raw
+/// extra lines read as tagless messages and get eaten by the pull cleanup pass.
 fn needs_markdown_wrapping(message: &str) -> bool {
-	// Patterns that could break our format:
-	// - Double newlines (paragraph breaks)
-	// - Lines starting with # (headers)
-	// - Lines starting with ## (our date headers)
-	// - Lines starting with . followed by space (our message separator)
-	// - Backticks (``` or more) that could interfere with code blocks
-	message.contains("\n\n")
-		|| message.contains("```")
-		|| message.lines().any(|line| {
-			let trimmed = line.trim();
-			trimmed.starts_with('#') || trimmed.starts_with(". ")
-		})
+	message.contains('\n') || message.contains("```") || message.trim().starts_with('#') || message.trim().starts_with(". ")
 }
 /// Find the longest sequence of backticks in a message
 fn max_backtick_run(message: &str) -> usize {

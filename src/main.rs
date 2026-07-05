@@ -375,7 +375,7 @@ async fn run() -> Result<()> {
 				let old_todos = parse_todos_file(&old_content);
 
 				// Count total TODOs vs trackable ones
-				let total_todo_lines = old_content.lines().filter(|l| l.contains("<!-- todo:")).count();
+				let total_todo_lines = old_content.lines().filter(|l| l.contains("[todo:")).count();
 				let trackable_count = old_todos.len();
 				let untrackable_count = total_todo_lines - trackable_count;
 
@@ -676,8 +676,8 @@ struct TrackedTodo {
 /// Parse todos.md and extract all tracked TODO items
 fn parse_todos_file(content: &str) -> std::collections::HashSet<TrackedTodo> {
 	let mut tracked = std::collections::HashSet::new();
-	// Pattern: - [ ] content (date) <!-- todo:group_id:topic_id:msg_id -->
-	let todo_re = regex::Regex::new(r"^- \[ \] (.+?) \([A-Za-z]{3} \d{1,2}\) <!-- todo:(\d+):(\d+):(\d+) -->$").unwrap();
+	// Pattern: - [ ] content (date) [todo:group_id:topic_id:msg_id](source.md:line)
+	let todo_re = regex::Regex::new(r"^- \[ \] (.+?) \([A-Za-z]{3} \d{1,2}\) \[todo:(\d+):(\d+):(\d+)\]\([^)]*\)$").unwrap();
 
 	for line in content.lines() {
 		if let Some(caps) = todo_re.captures(line.trim()) {
@@ -775,6 +775,8 @@ struct TodoItem {
 	group_id: u64,
 	/// Topic ID for this TODO's source
 	topic_id: u64,
+	/// 1-indexed line of the message tag in the source file
+	line: Option<usize>,
 	/// Blockquote context from the replied-to message
 	reply_context: Option<String>,
 }
@@ -783,16 +785,17 @@ fn format_reply_context(reply_id: i32, messages: &BTreeMap<i32, sync::ParsedMess
 	let is_voice = msg.is_some_and(|m| m.is_voice);
 	let content = msg.map(|m| m.content.as_str()).unwrap_or("");
 	let label = if is_voice { format!("{reply_id} (voice)") } else { reply_id.to_string() };
+	let link = match msg_lines.get(&reply_id) {
+		Some(line) => format!("[{label}]({source}:{line})"),
+		// not in the file (e.g. reply to the topic root message) — best we can do is the file itself
+		None => format!("[{label}]({source})"),
+	};
 
-	// Inline short messages; link to file for long/empty ones
+	// Inline short messages; long/empty ones are reachable through the link
 	if !content.is_empty() && content.chars().count() <= inline_up_to_chars {
-		let text = content.replace('\n', " ");
-		format!("  > {label}: {text}")
+		format!("  > {link}: {}", content.replace('\n', " "))
 	} else {
-		match msg_lines.get(&reply_id) {
-			Some(line) => format!("  > [{label}]({source}:{line})"),
-			None => format!("  > <{label}>"),
-		}
+		format!("  > {link}")
 	}
 }
 /// Build a map of message_id -> 1-indexed line number by scanning raw file content for msg tags
@@ -860,6 +863,7 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<PathBuf> {
 							message_id: Some(*msg_id),
 							group_id: *group_id,
 							topic_id: *topic_id,
+							line: msg_lines.get(msg_id).copied(),
 							reply_context,
 						});
 					}
@@ -898,7 +902,11 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<PathBuf> {
 			let date_str = todo.date.map(|d| format!(" ({})", d.strftime("%b %d"))).unwrap_or_default();
 			// Include tracking info: group_id:topic_id:msg_id (msg_id is 0 if not available)
 			let msg_id = todo.message_id.unwrap_or(0);
-			let tracking = format!(" <!-- todo:{}:{}:{msg_id} -->", todo.group_id, todo.topic_id);
+			let target = match todo.line {
+				Some(line) => format!("{}:{line}", todo.source),
+				None => todo.source.clone(),
+			};
+			let tracking = format!(" [todo:{}:{}:{msg_id}]({target})", todo.group_id, todo.topic_id);
 			output.push_str(&format!("- [ ] {}{date_str}{tracking}\n", todo.content));
 			if let Some(ctx) = &todo.reply_context {
 				output.push_str(&format!("{ctx}\n"));
@@ -1004,7 +1012,7 @@ mod tests {
 		messages.insert(99, make_msg("Hey, can you check the deployment logs?", false));
 		let mut lines = std::collections::HashMap::new();
 		lines.insert(99, 10);
-		assert_snapshot!(format_reply_context(99, &messages, "personal/general.md", &lines, 256), @"  > 99: Hey, can you check the deployment logs?");
+		assert_snapshot!(format_reply_context(99, &messages, "personal/general.md", &lines, 256), @"  > [99](personal/general.md:10): Hey, can you check the deployment logs?");
 	}
 
 	#[test]
@@ -1022,7 +1030,7 @@ mod tests {
 		messages.insert(99, make_msg("transcribed voice content", true));
 		let mut lines = std::collections::HashMap::new();
 		lines.insert(99, 42);
-		assert_snapshot!(format_reply_context(99, &messages, "personal/general.md", &lines, 256), @"  > 99 (voice): transcribed voice content");
+		assert_snapshot!(format_reply_context(99, &messages, "personal/general.md", &lines, 256), @"  > [99 (voice)](personal/general.md:42): transcribed voice content");
 	}
 
 	#[test]
@@ -1038,6 +1046,6 @@ mod tests {
 	fn reply_context_missing() {
 		let messages = BTreeMap::new();
 		let lines = std::collections::HashMap::new();
-		assert_snapshot!(format_reply_context(42, &messages, "personal/general.md", &lines, 256), @"  > <42>");
+		assert_snapshot!(format_reply_context(42, &messages, "personal/general.md", &lines, 256), @"  > [42](personal/general.md)");
 	}
 }

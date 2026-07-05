@@ -120,6 +120,33 @@ test = "-100{GROUP_ID}/{TOPIC_ID}"
 	pub fn mock_sent(&self) -> String {
 		std::fs::read_to_string(self.tmp.path().join("state/tg/mock_sent.jsonl")).unwrap_or_default()
 	}
+
+	pub fn buffered_count(&self) -> String {
+		std::fs::read_to_string(self.tmp.path().join("state/tg/buffered_count")).unwrap_or_default().trim().to_string()
+	}
+
+	/// Flip the mock server's simulated Telegram connectivity (watched at 50ms granularity)
+	pub fn set_offline(&self, offline: bool) {
+		let flag = self.tmp.path().join("state/tg/mock_offline");
+		if offline {
+			std::fs::write(&flag, "").unwrap();
+		} else {
+			std::fs::remove_file(&flag).unwrap();
+		}
+		std::thread::sleep(Duration::from_millis(150)); // > watcher interval
+	}
+
+	/// Poll until `pred` holds on the topic file; panics with the last content on timeout
+	pub fn wait_topic(&self, pred: impl Fn(&str) -> bool) -> String {
+		for _ in 0..100 {
+			let content = self.read_topic();
+			if pred(&content) {
+				return content;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		panic!("timed out waiting on topic file, last content:\n{}", self.read_topic());
+	}
 }
 
 impl Drop for TestCtx {

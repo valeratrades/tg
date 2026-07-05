@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io::Write as _, path::Path};
+use std::{collections::BTreeMap, path::Path};
 
 use eyre::Result;
 use regex::Regex;
@@ -39,15 +39,37 @@ pub struct PushResults {
 /// This avoids SQLite session file locking issues when the server is running.
 /// Returns detailed results from the push operation.
 pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<PushResults> {
-	use tokio::{
-		io::{AsyncReadExt, AsyncWriteExt},
-		net::TcpStream,
-	};
-
 	if updates.is_empty() {
 		debug!("No updates to push");
 		return Ok(PushResults::default());
 	}
+
+	// Push operations can take a while with multiple MTProto calls
+	let response = request_server(config, &crate::server::ServerRequest::Push { updates }, std::time::Duration::from_secs(60)).await?;
+
+	if response.success {
+		Ok(response.push_results.unwrap_or_default())
+	} else {
+		eyre::bail!("Server push failed: {}", response.error.unwrap_or_else(|| "unknown error".to_string()))
+	}
+}
+/// Fire-and-forget send: the server persists the message to its send buffer and answers
+/// instantly. Success means the message is on disk and the Telegram head was healthy at
+/// accept time — safe to walk away. Returns the queue length.
+pub async fn buffer_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<usize> {
+	let response = request_server(config, &crate::server::ServerRequest::Buffer { updates }, std::time::Duration::from_secs(5)).await?;
+
+	if response.success {
+		Ok(response.buffered_count.unwrap_or(0))
+	} else {
+		eyre::bail!("{}", response.error.unwrap_or_else(|| "unknown error".to_string()))
+	}
+}
+async fn request_server(config: &LiveSettings, request: &crate::server::ServerRequest, read_timeout: std::time::Duration) -> Result<crate::server::ServerResponse> {
+	use tokio::{
+		io::{AsyncReadExt, AsyncWriteExt},
+		net::TcpStream,
+	};
 
 	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
 
@@ -56,16 +78,13 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 		.map_err(|_| eyre::eyre!("Timed out connecting to server at {addr}"))?
 		.map_err(|e| crate::errors::ConnectionError::new(addr.clone(), e))?;
 
-	// Send push request
-	let request = crate::server::ServerRequest::Push { updates };
-	let request_json = serde_json::to_string(&request)?;
+	let request_json = serde_json::to_string(request)?;
 	stream.write_all(request_json.as_bytes()).await?;
 
-	// Read response with timeout (push operations can take a while with multiple MTProto calls)
 	let mut buf = vec![0u8; 65536];
-	let n = tokio::time::timeout(std::time::Duration::from_secs(60), stream.read(&mut buf))
+	let n = tokio::time::timeout(read_timeout, stream.read(&mut buf))
 		.await
-		.map_err(|_| eyre::eyre!("Timed out waiting for server push response (server may be reconnecting to Telegram)"))?
+		.map_err(|_| eyre::eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
 		.map_err(|e| eyre::eyre!("Failed to read server response: {e}"))?;
 	if n == 0 {
 		eyre::bail!("Server closed connection without response");
@@ -83,11 +102,7 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 		})?,
 	}
 
-	if response.success {
-		Ok(response.push_results.unwrap_or_default())
-	} else {
-		eyre::bail!("Server push failed: {}", response.error.unwrap_or_else(|| "unknown error".to_string()))
-	}
+	Ok(response)
 }
 /// Push updates to Telegram and sync local files
 /// - Deletes/edits messages on Telegram via MTProto
@@ -110,20 +125,6 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 	let total = updates.len();
 
 	info!("Pushing {total} updates ({delete_count} deletions, {edit_count} edits, {create_count} creates)");
-	eprintln!("Pushing {total} updates ({delete_count} deletions, {edit_count} edits, {create_count} creates)");
-
-	// Sanity check for many changes
-	if total > 25 {
-		eprint!("About to modify {total} messages on Telegram. Continue? [y/N] ");
-		std::io::stdout().flush()?;
-		let mut input = String::new();
-		std::io::stdin().read_line(&mut input)?;
-		if !input.trim().eq_ignore_ascii_case("y") {
-			info!("Aborted by user");
-			eprintln!("Aborted.");
-			return Ok(results);
-		}
-	}
 
 	// Group deletions by group_id for batch delete
 	let mut deletions_by_group: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new(); // group_id -> [(topic_id, msg_id)]
@@ -244,6 +245,9 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 					},
 				));
 			}
+			// Connection-dead must propagate (not degrade into a per-op failure): the buffer
+			// drain relies on it to keep unsent messages queued instead of dead-lettering them.
+			Err(e) if crate::mtproto::report_is_connection_dead(&e) => return Err(e),
 			Err(e) => {
 				warn!(group_id, topic_id, error = %e, "Failed to create message");
 				results.creates.push((

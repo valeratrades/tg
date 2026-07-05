@@ -14,9 +14,11 @@ fn gap_separator_after_interval() {
 
 	let out = ctx.send("second message");
 	assert!(out.status.success(), "send failed: {}", String::from_utf8_lossy(&out.stderr));
+	ctx.wait_topic(|c| c.contains("second message <!-- msg:"));
 	// Sent right after the previous one → no separator
 	let out = ctx.send("third message");
 	assert!(out.status.success(), "send failed: {}", String::from_utf8_lossy(&out.stderr));
+	ctx.wait_topic(|c| c.contains("third message <!-- msg:"));
 
 	insta::assert_snapshot!(common::redact(&ctx.read_topic()), @"
 	## [DATE]
@@ -40,6 +42,7 @@ fn multiline_message_survives_as_code_block() {
 	let table = "zero_fee_arb:4    empty\nnix:4 <Starship pwd disappearing>    draft\nv_utils:4    empty";
 	let out = ctx.send(table);
 	assert!(out.status.success(), "send failed: {}", String::from_utf8_lossy(&out.stderr));
+	ctx.wait_topic(|c| c.contains("zero_fee_arb:4"));
 
 	// Telegram receives the content verbatim
 	assert!(ctx.mock_sent().contains("zero_fee_arb:4"), "content missing from mock send log: {}", ctx.mock_sent());

@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod alerts;
+mod buffer;
 pub mod config;
 mod connectivity;
 mod errors;
@@ -245,11 +246,9 @@ async fn run() -> Result<()> {
 				topic_id,
 				content: args.message.to_string(),
 			};
-			let results = sync::push_via_server(vec![update], &settings).await?;
-			display_push_results(&results);
-			if results.creates.iter().any(|(_, _, op)| !op.success) {
-				bail!("Send failed");
-			}
+			// Fire-and-forget: exit 0 = buffered on a healthy server, no need to wait for delivery
+			let pending = sync::buffer_via_server(vec![update], &settings).await?;
+			eprintln!("buffered ({pending} pending)");
 		}
 		Commands::SendAlert(args) => {
 			let bot_token = cli
@@ -343,6 +342,17 @@ async fn run() -> Result<()> {
 			if !changes.is_empty() {
 				if let Some((group_id, topic_id)) = sync::resolve_topic_ids_from_path(&path) {
 					let updates = sync::changes_to_updates(&changes, group_id, topic_id);
+					// Mass-change guard lives client-side: the server must never block on a prompt
+					if updates.len() > 25 {
+						eprint!("About to modify {} messages on Telegram. Continue? [y/N] ", updates.len());
+						std::io::stdout().flush()?;
+						let mut input = String::new();
+						std::io::stdin().read_line(&mut input)?;
+						if !input.trim().eq_ignore_ascii_case("y") {
+							eprintln!("Aborted.");
+							return Ok(());
+						}
+					}
 					let results = sync::push_via_server(updates, &settings).await?;
 					display_push_results(&results);
 				} else {

@@ -1,6 +1,9 @@
 use std::{
 	path::PathBuf,
-	sync::{Arc, OnceLock},
+	sync::{
+		Arc, OnceLock,
+		atomic::{AtomicBool, Ordering},
+	},
 };
 
 use eyre::Result;
@@ -35,8 +38,12 @@ pub static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerRequest {
-	/// Push updates (create/delete/edit) to Telegram via MTProto
+	/// Push updates (create/delete/edit) to Telegram via MTProto, waiting for the result
 	Push { updates: Vec<crate::sync::MessageUpdate> },
+	/// Fire-and-forget: persist creates to the send buffer and return immediately.
+	/// Accepted only while the Telegram head is healthy — a success response means the
+	/// message is on disk and all but guaranteed to go out.
+	Buffer { updates: Vec<crate::sync::MessageUpdate> },
 	/// Ping to check server version
 	Ping,
 }
@@ -51,6 +58,9 @@ pub struct ServerResponse {
 	/// Detailed results from push operations
 	#[serde(default)]
 	pub push_results: Option<crate::sync::PushResults>,
+	/// Queue length after a Buffer request
+	#[serde(default)]
+	pub buffered_count: Option<usize>,
 }
 
 impl ServerResponse {
@@ -97,14 +107,35 @@ pub async fn run(settings: Arc<LiveSettings>, mock: bool) -> Result<()> {
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {addr}");
 
+	let buffer = Arc::new(crate::buffer::SendBuffer::load()?);
+	// Flipped on failure detection / recovery, never computed per request: the Buffer
+	// endpoint must answer instantly and truthfully.
+	let healthy = Arc::new(AtomicBool::new(false));
+
 	if mock {
 		let telegram = crate::mtproto::Telegram::Mock(crate::mtproto::MockTelegram::new());
 		let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
-		let push_handle = PushHandle { tx: push_tx };
+		let (drain_tx, drain_rx) = mpsc::channel::<()>(1);
+		let net = NetCtx {
+			push: PushHandle { tx: push_tx },
+			buffer: Arc::clone(&buffer),
+			healthy: Arc::clone(&healthy),
+			drain_tx,
+		};
+		// Tests flip connectivity by creating/removing this flag file
+		let offline_flag = DATA_DIR.get().unwrap().join("mock_offline");
+		healthy.store(!offline_flag.exists(), Ordering::Relaxed);
+		let health_watcher = async {
+			loop {
+				healthy.store(!offline_flag.exists(), Ordering::Relaxed);
+				tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+			}
+		};
 		return tokio::select! {
 			biased;
-			result = worker_loop(&settings, &telegram, push_rx) => result,
-			result = network_loop(&listener, &push_handle) => result,
+			result = worker_loop(&settings, &telegram, push_rx, drain_rx, &buffer, &healthy) => result,
+			result = network_loop(&listener, &net) => result,
+			_ = health_watcher => unreachable!("health watcher never exits"),
 		};
 	}
 
@@ -116,25 +147,43 @@ pub async fn run(settings: Arc<LiveSettings>, mock: bool) -> Result<()> {
 	let mut backoff = std::time::Duration::from_secs(1);
 	const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
 	loop {
+		healthy.store(false, Ordering::Relaxed);
+
 		// Wait for Telegram connectivity while rejecting queued connections
 		wait_for_telegram_draining(&listener).await;
 
-		let session = match crate::mtproto::create_session(&settings).await {
+		// The socket must answer instantly at every point in the reconnect cycle, so every
+		// wait below races against the rejector.
+		let session = tokio::select! {
+			biased;
+			s = crate::mtproto::create_session(&settings) => s,
+			r = reject_connections(&listener) => { r?; unreachable!("reject_connections only exits on listener failure") }
+		};
+		let session = match session {
 			Ok(s) => s,
 			Err(e) => {
 				warn!("Failed to create MTProto session: {e}; retrying in {backoff:?}");
-				tokio::time::sleep(backoff).await;
+				tokio::select! {
+					biased;
+					_ = tokio::time::sleep(backoff) => {}
+					r = reject_connections(&listener) => r?,
+				}
 				backoff = (backoff * 2).min(MAX_BACKOFF);
 				continue;
 			}
 		};
 
 		let started = std::time::Instant::now();
-		match run_with_session(settings.clone(), session, &listener).await {
+		match run_with_session(settings.clone(), session, &listener, &buffer, &healthy).await {
 			Ok(()) => return Ok(()), // clean shutdown
 			Err(e) => {
+				healthy.store(false, Ordering::Relaxed);
 				warn!("Session died: {e}; reconnecting in {backoff:?}");
-				tokio::time::sleep(backoff).await;
+				tokio::select! {
+					biased;
+					_ = tokio::time::sleep(backoff) => {}
+					r = reject_connections(&listener) => r?,
+				}
 				// Reset only if the session stayed up long enough to count as healthy.
 				backoff = if started.elapsed() >= MAX_BACKOFF {
 					std::time::Duration::from_secs(1)
@@ -143,6 +192,15 @@ pub async fn run(settings: Arc<LiveSettings>, mock: bool) -> Result<()> {
 				};
 			}
 		}
+	}
+}
+/// Answer every connection with an instant rejection while the Telegram head is down.
+async fn reject_connections(listener: &TcpListener) -> Result<()> {
+	loop {
+		let (mut socket, addr) = listener.accept().await?;
+		warn!("Rejecting connection from {addr}: Telegram head is offline");
+		let response = ServerResponse::err("Telegram head is offline, try again shortly");
+		let _ = socket.write_all(serde_json::to_string(&response).unwrap().as_bytes()).await;
 	}
 }
 /// Format a message append with message ID and sender info
@@ -199,31 +257,59 @@ async fn wait_for_telegram_draining(listener: &TcpListener) {
 /// so concurrent writes can never corrupt a topic file. `network_loop` only accepts connections and
 /// forwards their requests to the worker — it must never block on the worker, otherwise a slow pull
 /// would stall the ack and clients would time out (the bug this split fixes).
-async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::MtprotoSession, listener: &TcpListener) -> Result<()> {
+async fn run_with_session(
+	settings: Arc<LiveSettings>,
+	session: crate::mtproto::MtprotoSession,
+	listener: &TcpListener,
+	buffer: &Arc<crate::buffer::SendBuffer>,
+	healthy: &Arc<AtomicBool>,
+) -> Result<()> {
 	let crate::mtproto::MtprotoSession { client, runner } = session;
 
 	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
-	let push_handle = PushHandle { tx: push_tx };
+	let (drain_tx, drain_rx) = mpsc::channel::<()>(1);
+	let net = NetCtx {
+		push: PushHandle { tx: push_tx },
+		buffer: Arc::clone(buffer),
+		healthy: Arc::clone(healthy),
+		drain_tx,
+	};
 
 	let telegram = crate::mtproto::Telegram::Real(client.clone());
 	tokio::select! {
 		biased;
-		result = worker_loop(&settings, &telegram, push_rx) => { client.disconnect(); result }
-		result = network_loop(listener, &push_handle) => { client.disconnect(); result }
+		result = worker_loop(&settings, &telegram, push_rx, drain_rx, buffer, healthy) => { client.disconnect(); result }
+		result = network_loop(listener, &net) => { client.disconnect(); result }
 		_ = runner.run() => Err(eyre::eyre!("MTProto runner exited")),
 	}
 }
 /// Serially process all MTProto + file-mutating work. Runs concurrently with the runner, which
 /// drives the I/O the RPC-dependent setup needs. Any error here is fatal: it tears the session
 /// down so `run` can reconnect.
-async fn worker_loop(settings: &LiveSettings, telegram: &crate::mtproto::Telegram, mut push_rx: mpsc::Receiver<PushRequest>) -> Result<()> {
+async fn worker_loop(
+	settings: &LiveSettings,
+	telegram: &crate::mtproto::Telegram,
+	mut push_rx: mpsc::Receiver<PushRequest>,
+	mut drain_rx: mpsc::Receiver<()>,
+	buffer: &Arc<crate::buffer::SendBuffer>,
+	healthy: &Arc<AtomicBool>,
+) -> Result<()> {
 	if !telegram.is_authorized().await? {
 		eyre::bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
 	}
 	info!("Telegram client authorized (existing session)");
+	// In mock mode the health watcher owns the flag
+	if telegram.real().is_some() {
+		healthy.store(true, Ordering::Relaxed);
+	}
 
 	info!("Discovering forum topics for configured groups...");
 	pull::discover_and_create_topic_files(settings, telegram).await?;
+
+	// Messages accepted before the head last went down go out as soon as it's back
+	if healthy.load(Ordering::Relaxed) {
+		drain_buffer(buffer, settings, telegram).await?;
+	}
 
 	let cfg = settings.config()?;
 	info!("Pull interval: {}", cfg.pull_interval);
@@ -244,6 +330,11 @@ async fn worker_loop(settings: &LiveSettings, telegram: &crate::mtproto::Telegra
 				let result = crate::sync::push(req.updates, settings, telegram).await;
 				let _ = req.response_tx.send(result);
 			}
+			Some(()) = drain_rx.recv() => {
+				if healthy.load(Ordering::Relaxed) {
+					drain_buffer(buffer, settings, telegram).await?; // fatal connection-dead → tears session down, buffer intact
+				}
+			}
 			_ = pull_timer.tick() => {
 				pull::pull(settings, telegram).await?; // fatal connection-dead → tears session down
 				debug!("Pull completed successfully");
@@ -257,9 +348,36 @@ async fn worker_loop(settings: &LiveSettings, telegram: &crate::mtproto::Telegra
 		}
 	}
 }
+/// Everything a connection handler needs; cloned per connection.
+#[derive(Clone)]
+struct NetCtx {
+	push: PushHandle,
+	buffer: Arc<crate::buffer::SendBuffer>,
+	healthy: Arc<AtomicBool>,
+	drain_tx: mpsc::Sender<()>,
+}
+/// Send all queued messages, then drop them from the buffer. Telegram-rejected ones are
+/// dead-lettered instead of retried; a transport-dead error propagates with the buffer intact.
+async fn drain_buffer(buffer: &crate::buffer::SendBuffer, settings: &LiveSettings, telegram: &crate::mtproto::Telegram) -> Result<()> {
+	let entries = buffer.snapshot()?;
+	if entries.is_empty() {
+		return Ok(());
+	}
+	info!("Draining {} buffered message(s)", entries.len());
+	let results = crate::sync::push(entries.clone(), settings, telegram).await?;
+	// The buffer only ever holds creates (`tg send`), so results align with entries by index
+	assert!(entries.iter().all(|u| matches!(u, crate::sync::MessageUpdate::Create { .. })), "non-create in send buffer");
+	for (entry, (_, _, op)) in entries.iter().zip(&results.creates) {
+		if !op.success {
+			buffer.dead_letter(entry, &op.message)?;
+		}
+	}
+	buffer.pop_first(entries.len())?;
+	Ok(())
+}
 /// Accept connections and run each request handler concurrently. Connection-level failures are
 /// isolated per-connection; only a listener failure is fatal.
-async fn network_loop(listener: &TcpListener, push_handle: &PushHandle) -> Result<()> {
+async fn network_loop(listener: &TcpListener, net: &NetCtx) -> Result<()> {
 	type BoxFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 	let mut conns: FuturesUnordered<BoxFut> = FuturesUnordered::new();
 
@@ -268,7 +386,7 @@ async fn network_loop(listener: &TcpListener, push_handle: &PushHandle) -> Resul
 			accept_result = listener.accept() => {
 				let (socket, addr) = accept_result?;
 				info!("Accepted connection from: {addr}");
-				conns.push(Box::pin(handle_connection(socket, push_handle.clone())));
+				conns.push(Box::pin(handle_connection(socket, net.clone())));
 			}
 			Some(()) = conns.next() => {} // reap finished connection handlers
 		}
@@ -354,7 +472,7 @@ struct PushRequest {
 }
 /// Read one request from a client, forward it to the serial worker, and write back the result.
 /// Runs concurrently with other connections; the worker it calls into is what serializes the work.
-async fn handle_connection(mut socket: TcpStream, push_handle: PushHandle) {
+async fn handle_connection(mut socket: TcpStream, net: NetCtx) {
 	// Larger buffer for push requests which can contain many updates
 	let mut buf = vec![0; 64 * 1024];
 
@@ -370,7 +488,7 @@ async fn handle_connection(mut socket: TcpStream, push_handle: PushHandle) {
 		let response = match serde_json::from_str::<ServerRequest>(&received) {
 			Ok(ServerRequest::Push { updates }) => {
 				info!("Received push request with {} updates", updates.len());
-				match push_handle.push(updates).await {
+				match net.push.push(updates).await {
 					Ok(results) => {
 						info!("Push completed successfully");
 						ServerResponse::ok_with_results(results)
@@ -381,6 +499,22 @@ async fn handle_connection(mut socket: TcpStream, push_handle: PushHandle) {
 					}
 				}
 			}
+			// Answered inline — never blocks on the worker
+			Ok(ServerRequest::Buffer { updates }) =>
+				if !net.healthy.load(Ordering::Relaxed) {
+					ServerResponse::err("Telegram head is offline, message not buffered")
+				} else {
+					match net.buffer.append(&updates) {
+						Ok(count) => {
+							let _ = net.drain_tx.try_send(()); // full = a drain is already pending
+							ServerResponse {
+								buffered_count: Some(count),
+								..ServerResponse::ok()
+							}
+						}
+						Err(e) => ServerResponse::err(format!("Failed to write send buffer: {e}")),
+					}
+				},
 			Ok(ServerRequest::Ping) => ServerResponse::ok(),
 			Err(e) => {
 				error!("Failed to deserialize request: {e}. Raw: {received}");

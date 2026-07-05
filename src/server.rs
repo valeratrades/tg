@@ -5,7 +5,6 @@ use std::{
 
 use eyre::Result;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
-use grammers_client::Client;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -84,7 +83,7 @@ impl ServerResponse {
 
 /// # Panics
 /// On unsuccessful io operations
-pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
+pub async fn run(settings: Arc<LiveSettings>, mock: bool) -> Result<()> {
 	info!("Starting telegram server v{}", env!("CARGO_PKG_VERSION"));
 
 	// Clear alerts state from previous session
@@ -97,6 +96,17 @@ pub async fn run(settings: Arc<LiveSettings>) -> Result<()> {
 	debug!("Binding to address: {addr}");
 	let listener = TcpListener::bind(&addr).await?;
 	info!("Listening on: {addr}");
+
+	if mock {
+		let telegram = crate::mtproto::Telegram::Mock(crate::mtproto::MockTelegram::new());
+		let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+		let push_handle = PushHandle { tx: push_tx };
+		return tokio::select! {
+			biased;
+			result = worker_loop(&settings, &telegram, push_rx) => result,
+			result = network_loop(&listener, &push_handle) => result,
+		};
+	}
 
 	//LOOP: main logic
 	// Bounded exponential backoff: grammers reconnects its dead pool lazily with zero delay,
@@ -195,9 +205,10 @@ async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::
 	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
 	let push_handle = PushHandle { tx: push_tx };
 
+	let telegram = crate::mtproto::Telegram::Real(client.clone());
 	tokio::select! {
 		biased;
-		result = worker_loop(&settings, &client, push_rx) => { client.disconnect(); result }
+		result = worker_loop(&settings, &telegram, push_rx) => { client.disconnect(); result }
 		result = network_loop(listener, &push_handle) => { client.disconnect(); result }
 		_ = runner.run() => Err(eyre::eyre!("MTProto runner exited")),
 	}
@@ -205,14 +216,14 @@ async fn run_with_session(settings: Arc<LiveSettings>, session: crate::mtproto::
 /// Serially process all MTProto + file-mutating work. Runs concurrently with the runner, which
 /// drives the I/O the RPC-dependent setup needs. Any error here is fatal: it tears the session
 /// down so `run` can reconnect.
-async fn worker_loop(settings: &LiveSettings, client: &Client, mut push_rx: mpsc::Receiver<PushRequest>) -> Result<()> {
-	if !client.is_authorized().await? {
+async fn worker_loop(settings: &LiveSettings, telegram: &crate::mtproto::Telegram, mut push_rx: mpsc::Receiver<PushRequest>) -> Result<()> {
+	if !telegram.is_authorized().await? {
 		eyre::bail!("Session not authorized. Run `tg pull` interactively first to authenticate.");
 	}
 	info!("Telegram client authorized (existing session)");
 
 	info!("Discovering forum topics for configured groups...");
-	pull::discover_and_create_topic_files(settings, client).await?;
+	pull::discover_and_create_topic_files(settings, telegram).await?;
 
 	let cfg = settings.config()?;
 	info!("Pull interval: {}", cfg.pull_interval);
@@ -230,16 +241,18 @@ async fn worker_loop(settings: &LiveSettings, client: &Client, mut push_rx: mpsc
 			// On-demand pushes win over periodic ticks so interactive sends aren't delayed.
 			// ponytail: a continuous push flood could starve pull; not a concern for a personal CLI.
 			Some(req) = push_rx.recv() => {
-				let result = crate::sync::push(req.updates, settings, client).await;
+				let result = crate::sync::push(req.updates, settings, telegram).await;
 				let _ = req.response_tx.send(result);
 			}
 			_ = pull_timer.tick() => {
-				pull::pull(settings, client).await?; // fatal connection-dead → tears session down
+				pull::pull(settings, telegram).await?; // fatal connection-dead → tears session down
 				debug!("Pull completed successfully");
 			}
 			_ = alerts_timer.tick() => {
-				crate::alerts::check_alerts(client, settings).await?;
-				debug!("Alerts check completed successfully");
+				if let Some(client) = telegram.real() {
+					crate::alerts::check_alerts(client, settings).await?;
+					debug!("Alerts check completed successfully");
+				}
 			}
 		}
 	}
@@ -263,16 +276,16 @@ async fn network_loop(listener: &TcpListener, push_handle: &PushHandle) -> Resul
 }
 /// Send a message (text, or a photo when it's a `![](path)` image) via MTProto.
 /// Returns the message ID assigned by Telegram.
-pub(crate) async fn send_message(client: &Client, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
+pub(crate) async fn send_message(telegram: &crate::mtproto::Telegram, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
 	if let Some((image_path, caption)) = extract_image_path(text) {
 		let full_path = DATA_DIR.get().unwrap().join(&image_path);
 		if full_path.exists() {
 			debug!("Sending photo from {}", full_path.display());
-			return crate::mtproto::send_photo(client, group_id, topic_id, &full_path, caption.as_deref()).await;
+			return telegram.send_photo(group_id, topic_id, &full_path, caption.as_deref()).await;
 		}
 		warn!("Image file not found: {}, sending as text", full_path.display());
 	}
-	crate::mtproto::send_text_message(client, group_id, topic_id, text).await
+	telegram.send_text_message(group_id, topic_id, text).await
 }
 
 pub(crate) fn format_message_append(

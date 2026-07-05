@@ -16,50 +16,53 @@ use crate::{
 /// Fetch group info and discover topics for all configured groups.
 /// Creates topic files for each discovered topic in the XDG data home.
 /// Uses MTProto API (via grammers) to list all forum topics directly.
-pub async fn discover_and_create_topic_files(config: &LiveSettings, client: &Client) -> Result<()> {
-	let mut topics_metadata = TopicsMetadata::load();
+pub async fn discover_and_create_topic_files(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result<()> {
+	// Mock mode works off pre-seeded metadata; only the real client can discover
+	if let Some(client) = telegram.real() {
+		let mut topics_metadata = TopicsMetadata::load();
 
-	// Get group names via MTProto dialogs
-	let cfg = config.config()?;
-	for group_id in cfg.forum_group_ids() {
-		match mtproto::get_chat_info(client, group_id).await {
-			Ok((title, is_forum)) => {
-				if !is_forum {
-					warn!("Group {group_id} is not a forum");
+		// Get group names via MTProto dialogs
+		let cfg = config.config()?;
+		for group_id in cfg.forum_group_ids() {
+			match mtproto::get_chat_info(client, group_id).await {
+				Ok((title, is_forum)) => {
+					if !is_forum {
+						warn!("Group {group_id} is not a forum");
+						continue;
+					}
+					let sanitized_name = sanitize_topic_name(&title);
+					topics_metadata.set_group_name(group_id, sanitized_name);
+					info!("Discovered forum group: {title} (id: {group_id})");
+				}
+				Err(e) => {
+					warn!("Failed to get chat info for {group_id}: {e}");
 					continue;
 				}
-				let sanitized_name = sanitize_topic_name(&title);
-				topics_metadata.set_group_name(group_id, sanitized_name);
-				info!("Discovered forum group: {title} (id: {group_id})");
-			}
-			Err(e) => {
-				warn!("Failed to get chat info for {group_id}: {e}");
-				continue;
 			}
 		}
-	}
 
-	topics_metadata.save()?;
+		topics_metadata.save()?;
 
-	// Discover all topics via MTProto
-	info!("Discovering forum topics via MTProto...");
-	let group_ids = cfg.forum_group_ids();
-	let mut metadata = TopicsMetadata::load();
-	for group_id in group_ids {
-		info!("Fetching topics for group {group_id}...");
-		match mtproto::fetch_forum_topics(client, group_id).await {
-			Ok(topics) =>
-				for topic in topics {
-					let sanitized_name = mtproto::sanitize_topic_name(&topic.title);
-					metadata.set_topic_name(group_id, topic.topic_id as u64, sanitized_name);
-				},
-			Err(e) => {
-				warn!("Failed to fetch topics for group {group_id}: {e}");
+		// Discover all topics via MTProto
+		info!("Discovering forum topics via MTProto...");
+		let group_ids = cfg.forum_group_ids();
+		let mut metadata = TopicsMetadata::load();
+		for group_id in group_ids {
+			info!("Fetching topics for group {group_id}...");
+			match mtproto::fetch_forum_topics(client, group_id).await {
+				Ok(topics) =>
+					for topic in topics {
+						let sanitized_name = mtproto::sanitize_topic_name(&topic.title);
+						metadata.set_topic_name(group_id, topic.topic_id as u64, sanitized_name);
+					},
+				Err(e) => {
+					warn!("Failed to fetch topics for group {group_id}: {e}");
+				}
 			}
 		}
+		metadata.save()?;
+		info!("Topics metadata updated");
 	}
-	metadata.save()?;
-	info!("Topics metadata updated");
 
 	// Reload metadata
 	let topics_metadata = TopicsMetadata::load();
@@ -69,7 +72,7 @@ pub async fn discover_and_create_topic_files(config: &LiveSettings, client: &Cli
 
 	// Run pull to sync messages
 	info!("Running pull to sync messages...");
-	pull(config, client).await?;
+	pull(config, telegram).await?;
 
 	Ok(())
 }
@@ -100,8 +103,10 @@ pub fn create_topic_files(metadata: &TopicsMetadata) -> Result<()> {
 
 	Ok(())
 }
-/// Run a single pull operation for all configured forum groups using an existing MTProto client
-pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
+/// Run a single pull operation for all configured forum groups using an existing MTProto client.
+/// In mock mode there is nothing to fetch, but the file maintenance (backfill + cleanup) still runs,
+/// exercising the same post-pull passes the real server applies.
+pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result<()> {
 	let cfg = config.config()?;
 	let topics_metadata = TopicsMetadata::load();
 	info!("Starting pull via MTProto...");
@@ -121,15 +126,18 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 		info!("Pulling messages for group {group_id} ({} topics)...", group.topics.len());
 
 		// Get InputPeer for this group
-		let input_peer = match mtproto::get_input_peer(client, telegram_chat_id(group_id)).await {
-			Ok(p) => p,
-			Err(e) => {
-				if mtproto::report_is_connection_dead(&e) {
-					return Err(e); // fatal: propagate → session torn down
+		let client_and_peer = match telegram.real() {
+			Some(client) => match mtproto::get_input_peer(client, telegram_chat_id(group_id)).await {
+				Ok(p) => Some((client, p)),
+				Err(e) => {
+					if mtproto::report_is_connection_dead(&e) {
+						return Err(e); // fatal: propagate → session torn down
+					}
+					warn!("Could not get peer for group {group_id}: {e}");
+					continue;
 				}
-				warn!("Could not get peer for group {group_id}: {e}");
-				continue;
-			}
+			},
+			None => None,
 		};
 
 		for (&topic_id, topic_name) in &group.topics {
@@ -142,30 +150,32 @@ pub async fn pull(config: &LiveSettings, client: &Client) -> Result<()> {
 				warn!("Failed to backfill date headers in {}: {e}", file_path.display());
 			}
 
-			// Extract last message ID directly from the file content
-			let last_synced_id = extract_max_message_id(&file_path);
+			if let Some((client, input_peer)) = &client_and_peer {
+				// Extract last message ID directly from the file content
+				let last_synced_id = extract_max_message_id(&file_path);
 
-			debug!("Pulling topic {topic_name} (last_synced_id={last_synced_id} from file)");
+				debug!("Pulling topic {topic_name} (last_synced_id={last_synced_id} from file)");
 
-			// Fetch messages for this topic
-			let messages = match fetch_topic_messages(client, &input_peer, topic_id as i32, last_synced_id, max_messages).await {
-				Ok(m) => m,
-				Err(e) => {
-					if mtproto::report_is_connection_dead(&e) {
-						return Err(e); // fatal: propagate → session torn down
+				// Fetch messages for this topic
+				let messages = match fetch_topic_messages(client, input_peer, topic_id as i32, last_synced_id, max_messages).await {
+					Ok(m) => m,
+					Err(e) => {
+						if mtproto::report_is_connection_dead(&e) {
+							return Err(e); // fatal: propagate → session torn down
+						}
+						warn!("Failed to fetch messages for topic {topic_name}: {e}");
+						continue;
 					}
-					warn!("Failed to fetch messages for topic {topic_name}: {e}");
-					continue;
+				};
+
+				if messages.is_empty() {
+					debug!("No new messages for topic {topic_name}");
+				} else {
+					info!("Fetched {} messages for topic {topic_name}", messages.len());
+
+					// Merge messages into file
+					merge_mtproto_messages_to_file(client, input_peer, group_id, topic_id, &messages, &topics_metadata).await?;
 				}
-			};
-
-			if messages.is_empty() {
-				debug!("No new messages for topic {topic_name}");
-			} else {
-				info!("Fetched {} messages for topic {topic_name}", messages.len());
-
-				// Merge messages into file
-				merge_mtproto_messages_to_file(client, &input_peer, group_id, topic_id, &messages, &topics_metadata).await?;
 			}
 
 			// Cleanup tagless messages (optimistic writes that have now been confirmed or failed)

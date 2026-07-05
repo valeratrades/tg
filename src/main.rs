@@ -168,7 +168,12 @@ struct PullArgs {
 	reset: bool,
 }
 #[derive(Args, Clone, Debug)]
-struct ServerArgs {}
+struct ServerArgs {
+	/// Run without Telegram: sends are recorded to mock_sent.jsonl in the data dir.
+	/// Exists for integration tests.
+	#[arg(long, hide = true)]
+	mock: bool,
+}
 #[derive(Args, Clone, Debug)]
 struct ScheduleUpdateArgs {
 	/// Action to perform
@@ -270,8 +275,8 @@ async fn run() -> Result<()> {
 				Err(errors::TelegramApiError::from_status(status, body))?;
 			}
 		}
-		Commands::Server(_) => {
-			server::run(Arc::clone(&settings)).await?;
+		Commands::Server(args) => {
+			server::run(Arc::clone(&settings), args.mock).await?;
 		}
 		Commands::Pull(args) => {
 			if args.reset {
@@ -309,7 +314,7 @@ async fn run() -> Result<()> {
 				eprintln!("Re-pulling all messages...");
 			}
 			let settings_for_pull = Arc::clone(&settings);
-			crate::mtproto::with_client(&settings, |client| async move { pull::pull(&settings_for_pull, &client).await }).await?;
+			crate::mtproto::with_client(&settings, |client| async move { pull::pull(&settings_for_pull, &mtproto::Telegram::Real(client)).await }).await?;
 		}
 		Commands::Open(args) => {
 			let path = resolve_topic_path(args.pattern.as_deref())?;

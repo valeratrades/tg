@@ -1,14 +1,12 @@
 use std::{collections::BTreeMap, io::Write as _, path::Path};
 
 use eyre::Result;
-use grammers_client::Client;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::{
 	config::{LiveSettings, TopicsMetadata},
-	mtproto,
 	pull::topic_filepath,
 };
 
@@ -98,7 +96,7 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 ///
 /// NOTE: When called from the server, the client is already connected.
 /// When called directly (CLI), use `push_via_server` instead to avoid database locking issues.
-pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &Client) -> Result<PushResults> {
+pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram: &crate::mtproto::Telegram) -> Result<PushResults> {
 	let mut results = PushResults::default();
 
 	if updates.is_empty() {
@@ -156,7 +154,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 
 	for (group_id, items) in &deletions_by_group {
 		let msg_ids: Vec<i32> = items.iter().map(|(_, id)| *id).collect();
-		match mtproto::delete_messages(client, *group_id, &msg_ids).await {
+		match telegram.delete_messages(*group_id, &msg_ids).await {
 			Ok(count) => {
 				info!(group_id, count, "Deleted messages from Telegram");
 				if count > 0 {
@@ -203,7 +201,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 
 	// Apply edits - all via MTProto
 	for (group_id, _topic_id, msg_id, new_content) in &edits {
-		match mtproto::edit_message(client, *group_id, *msg_id, new_content).await {
+		match telegram.edit_message(*group_id, *msg_id, new_content).await {
 			Ok(()) => {
 				info!(group_id, msg_id, "Edited message on Telegram");
 				results.edits.push((
@@ -233,7 +231,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 	let mut successful_creates: Vec<(u64, u64, String, i32)> = Vec::new(); // (group_id, topic_id, content, msg_id)
 
 	for (group_id, topic_id, content) in &creates {
-		match crate::server::send_message(client, *group_id, *topic_id, content).await {
+		match crate::server::send_message(telegram, *group_id, *topic_id, content).await {
 			Ok(msg_id) => {
 				info!(group_id, topic_id, msg_id, "Created message on Telegram");
 				successful_creates.push((*group_id, *topic_id, content.clone(), msg_id));
@@ -345,10 +343,19 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 		}
 
 		for ((group_id, topic_id), messages) in creates_by_topic {
+			use xattr::FileExt as _;
+
 			let file_path = topic_filepath(group_id, topic_id, &metadata);
 
 			// Read current file content
 			let mut file_content = std::fs::read_to_string(&file_path).unwrap_or_default();
+
+			// Gap separators / date headers need the last write time; pull keeps this xattr in sync
+			let mut last_write: Option<Timestamp> = std::fs::File::open(&file_path)
+				.ok()
+				.and_then(|f| f.get_xattr("user.last_changed").ok().flatten())
+				.and_then(|v| String::from_utf8(v).ok())
+				.and_then(|s| s.parse::<Timestamp>().inspect_err(|e| warn!("Failed to parse last_changed xattr: {e}")).ok());
 
 			// Remove untagged lines from the end (the ones we just sent)
 			// We need to be careful to only remove the content we sent
@@ -373,11 +380,11 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 			}
 
 			// Now append the messages with proper tags
-			// Get the last write time from existing file content to format correctly
 			let now = Timestamp::now();
 			for (content, msg_id) in messages {
-				let formatted = format_message_append_with_sender(&content, None, now, Some(msg_id), None);
+				let formatted = format_message_append_with_sender(&content, last_write, now, Some(msg_id), None);
 				file_content.push_str(&formatted);
+				last_write = Some(now);
 			}
 
 			// Write back
@@ -385,6 +392,13 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, client: &
 				warn!(path = %file_path.display(), error = %e, "Failed to update topic file with message IDs");
 			} else {
 				info!(path = %file_path.display(), "Updated topic file with message IDs");
+				match std::fs::File::open(&file_path) {
+					Ok(f) =>
+						if let Err(e) = f.set_xattr("user.last_changed", now.to_string().as_bytes()) {
+							warn!("Failed to set last_changed xattr: {e}");
+						},
+					Err(e) => warn!("Failed to reopen topic file for xattr update: {e}"),
+				}
 			}
 		}
 	}

@@ -22,6 +22,91 @@ pub struct MtprotoSession {
 	pub runner: SenderPoolRunner,
 }
 
+/// The single seam between app logic and Telegram. `Mock` lets integration tests run the real
+/// server binary against real files without network: sends are recorded to `mock_sent.jsonl`
+/// in the data dir and get deterministic message IDs.
+pub enum Telegram {
+	Real(Client),
+	Mock(MockTelegram),
+}
+
+impl Telegram {
+	pub fn real(&self) -> Option<&Client> {
+		match self {
+			Self::Real(c) => Some(c),
+			Self::Mock(_) => None,
+		}
+	}
+
+	pub async fn is_authorized(&self) -> Result<bool> {
+		match self {
+			Self::Real(c) => Ok(c.is_authorized().await?),
+			Self::Mock(_) => Ok(true),
+		}
+	}
+
+	pub async fn send_text_message(&self, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
+		match self {
+			Self::Real(c) => send_text_message(c, group_id, topic_id, text).await,
+			Self::Mock(m) => m.record_create(group_id, topic_id, text),
+		}
+	}
+
+	pub async fn send_photo(&self, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>) -> Result<i32> {
+		match self {
+			Self::Real(c) => send_photo(c, group_id, topic_id, path, caption).await,
+			Self::Mock(m) => m.record_create(group_id, topic_id, &format!("[photo:{}] {}", path.display(), caption.unwrap_or(""))),
+		}
+	}
+
+	pub async fn delete_messages(&self, group_id: u64, message_ids: &[i32]) -> Result<usize> {
+		match self {
+			Self::Real(c) => delete_messages(c, group_id, message_ids).await,
+			Self::Mock(m) => {
+				m.record(serde_json::json!({"op": "delete", "group_id": group_id, "message_ids": message_ids}))?;
+				Ok(message_ids.len())
+			}
+		}
+	}
+
+	pub async fn edit_message(&self, group_id: u64, message_id: i32, new_text: &str) -> Result<()> {
+		match self {
+			Self::Real(c) => edit_message(c, group_id, message_id, new_text).await,
+			Self::Mock(m) => m.record(serde_json::json!({"op": "edit", "group_id": group_id, "message_id": message_id, "content": new_text})),
+		}
+	}
+}
+
+pub struct MockTelegram {
+	next_id: std::sync::atomic::AtomicI32,
+	log: PathBuf,
+}
+
+impl MockTelegram {
+	pub fn new() -> Self {
+		let log = crate::server::DATA_DIR.get().expect("init_data_dir ran in main").join("mock_sent.jsonl");
+		// Survive server restarts within one test: keep IDs increasing across the log
+		let existing = std::fs::read_to_string(&log).map(|s| s.lines().count()).unwrap_or(0);
+		Self {
+			next_id: std::sync::atomic::AtomicI32::new(1000 + existing as i32),
+			log,
+		}
+	}
+
+	fn record_create(&self, group_id: u64, topic_id: u64, content: &str) -> Result<i32> {
+		let msg_id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+		self.record(serde_json::json!({"op": "create", "group_id": group_id, "topic_id": topic_id, "content": content, "msg_id": msg_id}))?;
+		Ok(msg_id)
+	}
+
+	fn record(&self, entry: serde_json::Value) -> Result<()> {
+		use std::io::Write as _;
+		let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.log)?;
+		writeln!(f, "{entry}")?;
+		Ok(())
+	}
+}
+
 /// Create an MTProto session without starting the runner.
 /// For server use — the caller drives the runner and can reconnect on failure.
 /// Note: authorization is checked later in `run_with_session` where the runner is alive,

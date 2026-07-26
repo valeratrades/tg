@@ -317,7 +317,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 				.collect();
 
 			if removed > 0 {
-				let new_content = new_lines.join("\n");
+				let new_content = format!("{}\n", new_lines.join("\n"));
 				if let Err(e) = std::fs::write(&file_path, new_content) {
 					warn!(path = %file_path.display(), error = %e, "Failed to write topic file");
 					results.file_cleanups.push((file_path.display().to_string(), 0, format!("Failed to write: {e}")));
@@ -383,7 +383,12 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 				}
 			}
 
-			// Now append the messages with proper tags
+			// An append glued to the previous line puts a ```md fence mid-line, which unbalances
+			// fence tracking for every later pass over the file
+			if !file_content.is_empty() && !file_content.ends_with('\n') {
+				file_content.push('\n');
+			}
+
 			let now = Timestamp::now();
 			for (content, msg_id) in messages {
 				let formatted = format_message_append_with_sender(&content, last_write, now, Some(msg_id), None);

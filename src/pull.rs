@@ -402,7 +402,8 @@ fn backfill_file_date_headers(file_path: &Path) -> Result<()> {
 		return Ok(());
 	}
 
-	let backfilled = backfill_date_header_years(&content);
+	// `backfill_date_header_years` rejoins lines, dropping the trailing newline the next append needs
+	let backfilled = format!("{}\n", backfill_date_header_years(&content).trim_end());
 	if backfilled != content {
 		std::fs::write(file_path, backfilled)?;
 	}

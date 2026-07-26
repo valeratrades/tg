@@ -103,6 +103,13 @@ test = "-100{GROUP_ID}/{TOPIC_ID}"
 		self.cmd().args(["send", "-g", &GROUP_ID.to_string(), "-t", &TOPIC_ID.to_string(), msg]).output().unwrap()
 	}
 
+	pub fn delete(&self, msg_id: i32) -> Output {
+		self.cmd()
+			.args(["schedule-update", "delete", &GROUP_ID.to_string(), &TOPIC_ID.to_string(), &msg_id.to_string()])
+			.output()
+			.unwrap()
+	}
+
 	pub fn topic_path(&self) -> PathBuf {
 		self.tmp.path().join("state/tg/testgroup/general.md")
 	}

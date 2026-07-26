@@ -59,3 +59,32 @@ fn multiline_message_survives_as_code_block() {
 	<!-- msg:1000 [TS] -->
 	");
 }
+
+/// Deleting a message rewrites the topic file; the next send must still land on its own line.
+/// Glueing it to the previous one puts the opening ```` ```md ```` fence mid-line, which unbalances
+/// fence tracking and makes the cleanup pass eat the block's contents.
+#[test]
+fn send_after_delete_starts_on_new_line() {
+	let mut ctx = common::TestCtx::new();
+
+	std::fs::write(ctx.topic_path(), "## Jan 01, 2026\nkept <!-- msg:10 ts:1767225600 -->\ndoomed <!-- msg:11 ts:1767225601 -->\n").unwrap();
+	ctx.start_server();
+
+	let out = ctx.delete(11);
+	assert!(out.status.success(), "delete failed: {}", String::from_utf8_lossy(&out.stderr));
+	ctx.wait_topic(|c| !c.contains("doomed"));
+
+	let out = ctx.send("a\nb");
+	assert!(out.status.success(), "send failed: {}", String::from_utf8_lossy(&out.stderr));
+	ctx.wait_topic(|c| c.contains("`````"));
+
+	insta::assert_snapshot!(common::redact(&ctx.read_topic()), @"
+	## [DATE]
+	kept <!-- msg:10 ts:[TS] -->
+	`````md
+	a
+	b
+	`````
+	<!-- msg:1000 [TS] -->
+	");
+}

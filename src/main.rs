@@ -853,8 +853,10 @@ fn aggregate_todos(settings: &LiveSettings) -> Result<PathBuf> {
 					let date = msg_dates.get(msg_id).copied();
 					let include = date.map(|d| d >= cutoff_date).unwrap_or(true);
 					if include {
+						// files pulled before the topic-root filter still carry `reply_to:<root>` tags
 						let reply_context = parsed
 							.reply_to_msg_id
+							.filter(|reply_id| *reply_id as u64 != *topic_id)
 							.map(|reply_id| format_reply_context(reply_id, &messages, &source, &msg_lines, cfg.inline_up_to_chars));
 						todos.push(TodoItem {
 							content: parsed.content.clone(),

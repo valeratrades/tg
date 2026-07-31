@@ -509,10 +509,16 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						_ => None,
 					});
 
-					let reply_to_msg_id = m.reply_to.as_ref().and_then(|r| match r {
-						tl::enums::MessageReplyHeader::Header(h) => h.reply_to_msg_id,
-						_ => None,
-					});
+					// Telegram sets reply_to = topic root on *every* message in a forum topic; that's
+					// topic membership, not a reply.
+					let reply_to_msg_id = m
+						.reply_to
+						.as_ref()
+						.and_then(|r| match r {
+							tl::enums::MessageReplyHeader::Header(h) => h.reply_to_msg_id,
+							_ => None,
+						})
+						.filter(|id| *id != topic_id);
 
 					messages.push(FetchedMessage {
 						id: m.id,

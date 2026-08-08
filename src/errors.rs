@@ -123,6 +123,29 @@ impl fmt::Display for VersionMismatchError {
 
 impl std::error::Error for VersionMismatchError {}
 
+/// The request reached the server but its answer never did. The request itself is not in doubt:
+/// the server reads and acts on it the moment it arrives, so a lost ack says nothing about
+/// whether the work happened.
+#[derive(Clone, Debug, Diagnostic)]
+#[diagnostic(
+	code(tg::server_ack_lost),
+	help(
+		"The request was already handed to the server, so it has most likely gone through — check with `tg last 3` before resending, or you'll duplicate it.\nIf this keeps happening the server is wedged: `systemctl --user status tg-server` and `journalctl --user -u tg-server`."
+	)
+)]
+pub struct AckLostError {
+	pub addr: String,
+	pub waited: std::time::Duration,
+}
+
+impl fmt::Display for AckLostError {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "tg server at {} accepted the request but did not answer within {:?}", self.addr, self.waited)
+	}
+}
+
+impl std::error::Error for AckLostError {}
+
 /// Error when no topic matches the pattern
 #[derive(Clone, Debug, Diagnostic)]
 #[diagnostic(code(tg::topic_not_found), help("Use `tg list` to see available topics, or check your config for group definitions."))]

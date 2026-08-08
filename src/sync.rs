@@ -57,7 +57,10 @@ pub async fn push_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings)
 /// instantly. Success means the message is on disk and the Telegram head was healthy at
 /// accept time — safe to walk away. Returns the queue length.
 pub async fn buffer_via_server(updates: Vec<MessageUpdate>, config: &LiveSettings) -> Result<usize> {
-	let response = request_server(config, &crate::server::ServerRequest::Buffer { updates }, std::time::Duration::from_secs(5)).await?;
+	// Generous, because giving up early is strictly worse than waiting: the server acts on the
+	// request the moment it arrives, so a client-side deadline can only turn a slow success into
+	// an ambiguous failure. Short enough to still surface a wedged server.
+	let response = request_server(config, &crate::server::ServerRequest::Buffer { updates }, std::time::Duration::from_secs(30)).await?;
 
 	if response.success {
 		Ok(response.buffered_count.unwrap_or(0))
@@ -84,7 +87,10 @@ async fn request_server(config: &LiveSettings, request: &crate::server::ServerRe
 	let mut buf = vec![0u8; 65536];
 	let n = tokio::time::timeout(read_timeout, stream.read(&mut buf))
 		.await
-		.map_err(|_| eyre::eyre!("Timed out waiting for server response (server may be reconnecting to Telegram)"))?
+		.map_err(|_| crate::errors::AckLostError {
+			addr: addr.clone(),
+			waited: read_timeout,
+		})?
 		.map_err(|e| eyre::eyre!("Failed to read server response: {e}"))?;
 	if n == 0 {
 		eyre::bail!("Server closed connection without response");

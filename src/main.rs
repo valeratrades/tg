@@ -13,7 +13,7 @@ use v_utils::io::file_open::open;
 
 use crate::{
 	config::{LiveSettings, SettingsFlags, TopicsMetadata},
-	errors::{ConnectionError, JsonParseError, TopicNotFoundError, VersionMismatchError},
+	errors::{AckLostError, ConnectionError, JsonParseError, TopicNotFoundError, VersionMismatchError},
 	sync::PushResults,
 };
 
@@ -194,16 +194,36 @@ struct SinceArgs {
 	#[arg(short, long)]
 	back: Option<v_utils::trades::Timeframe>,
 }
-#[tokio::main]
-async fn main() {
-	// Set up tracing but handle errors ourselves for better miette output
-	v_utils::utils::init_subscriber(
-		v_utils::utils::LogDestination::xdg(env!("CARGO_PKG_NAME"))
-			.stderr_errors(true)
-			.compiled_directives(option_env!("LOG_DIRECTIVES")),
-	);
+fn main() {
+	let cli = Cli::parse();
 
-	if let Err(e) = run().await {
+	// v_utils truncates the log on open, so `.log` can only belong to one process. The server
+	// gets it (one file per daemon lifetime); CLI runs go to `cli.log` so a `tg send` can't wipe
+	// the running server's trace out from under it.
+	let mut log_destination = v_utils::utils::LogDestination::xdg(env!("CARGO_PKG_NAME"))
+		.stderr_errors(true)
+		.compiled_directives(option_env!("LOG_DIRECTIVES"));
+	if !matches!(cli.command, Commands::Server(_)) {
+		log_destination = log_destination.fname("cli");
+	}
+	// Set up tracing but handle errors ourselves for better miette output
+	v_utils::utils::init_subscriber(log_destination);
+
+	let settings = std::sync::Arc::new(LiveSettings::new(cli.settings, std::time::Duration::from_secs(5)).expect("Failed to read config file"));
+	config::init_data_dir();
+
+	// The server owns its own runtimes (one per half, see `server::run`); everything else is a
+	// short-lived command that just needs a runtime to talk to it.
+	let result = match cli.command {
+		Commands::Server(args) => server::run(settings, args.mock),
+		command => tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime")
+			.block_on(run(command, cli.token, settings)),
+	};
+
+	if let Err(e) = result {
 		// Check if it's a miette Diagnostic and print fancy output
 		if let Some(diagnostic) = e.downcast_ref::<ConnectionError>() {
 			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
@@ -212,6 +232,8 @@ async fn main() {
 		} else if let Some(diagnostic) = e.downcast_ref::<VersionMismatchError>() {
 			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
 		} else if let Some(diagnostic) = e.downcast_ref::<TopicNotFoundError>() {
+			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
+		} else if let Some(diagnostic) = e.downcast_ref::<AckLostError>() {
 			eprintln!("{:?}", miette::Report::new(diagnostic.clone()));
 		} else if let Some(diagnostic) = e.downcast_ref::<errors::TelegramApiError>() {
 			// TelegramApiError doesn't impl Clone (reqwest::Error, serde_json::Error),
@@ -231,14 +253,11 @@ async fn main() {
 	}
 }
 
-async fn run() -> Result<()> {
-	use std::{sync::Arc, time::Duration};
+async fn run(command: Commands, token: Option<String>, settings: std::sync::Arc<LiveSettings>) -> Result<()> {
+	use std::sync::Arc;
 
-	let cli = Cli::parse();
-	let settings = Arc::new(LiveSettings::new(cli.settings, Duration::from_secs(5)).expect("Failed to read config file"));
-	config::init_data_dir();
-
-	match cli.command {
+	match command {
+		Commands::Server(_) => unreachable!("dispatched in main, where it can own its own runtimes"),
 		Commands::Send(args) => {
 			let (group_id, topic_id) = resolve_send_destination(&args)?;
 			let update = sync::MessageUpdate::Create {
@@ -251,8 +270,7 @@ async fn run() -> Result<()> {
 			eprintln!("buffered ({pending} pending)");
 		}
 		Commands::SendAlert(args) => {
-			let bot_token = cli
-				.token
+			let bot_token = token
 				.or_else(|| std::env::var("TELEGRAM_MAIN_BOT_TOKEN").ok())
 				.ok_or_else(|| eyre!("TELEGRAM_MAIN_BOT_TOKEN not set (required for send-alert)"))?;
 			let cfg = settings.config()?;
@@ -273,9 +291,6 @@ async fn run() -> Result<()> {
 				let body = res.text().await?;
 				Err(errors::TelegramApiError::from_status(status, body))?;
 			}
-		}
-		Commands::Server(args) => {
-			server::run(Arc::clone(&settings), args.mock).await?;
 		}
 		Commands::Pull(args) => {
 			if args.reset {

@@ -73,7 +73,7 @@ work = "-1002244305221/3"          # specific topic in group
 
 Groups are specified by chat ID (with -100 prefix for supergroups). Append `/topic_id` to target a specific topic.
 
-Example config: ./examples/config.toml
+Example config: examples/config.toml
 
 #### Environment Variables
 ```sh

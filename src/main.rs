@@ -3,6 +3,7 @@ use std::{
 	io::Write as IoWrite,
 	path::PathBuf,
 	process::{Command, Stdio},
+	sync::Arc,
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -209,7 +210,7 @@ fn main() {
 	// Set up tracing but handle errors ourselves for better miette output
 	v_utils::utils::init_subscriber(log_destination);
 
-	let settings = std::sync::Arc::new(LiveSettings::new(cli.settings, std::time::Duration::from_secs(5)).expect("Failed to read config file"));
+	let settings = Arc::new(LiveSettings::new(cli.settings, std::time::Duration::from_secs(5)).expect("Failed to read config file"));
 	config::init_data_dir();
 
 	// The server owns its own runtimes (one per half, see `server::run`); everything else is a
@@ -253,9 +254,7 @@ fn main() {
 	}
 }
 
-async fn run(command: Commands, token: Option<String>, settings: std::sync::Arc<LiveSettings>) -> Result<()> {
-	use std::sync::Arc;
-
+async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSettings>) -> Result<()> {
 	match command {
 		Commands::Server(_) => unreachable!("dispatched in main, where it can own its own runtimes"),
 		Commands::Send(args) => {

@@ -144,6 +144,10 @@ pub fn run(settings: Arc<LiveSettings>, mock: bool) -> Result<()> {
 		telegram_result.and(net_result)
 	})
 }
+/// Format a message append with message ID and sender info
+pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
+	format_message_append(message, last_write_datetime, now, msg_id, sender, false, None)
+}
 /// Connect, serve, reconnect. Publishes the live `PushHandle` on `head` for the net half.
 async fn telegram_loop(
 	settings: &Arc<LiveSettings>,
@@ -213,10 +217,6 @@ async fn telegram_loop(
 			}
 		}
 	}
-}
-/// Format a message append with message ID and sender info
-pub fn format_message_append_with_sender(message: &str, last_write_datetime: Option<Timestamp>, now: Timestamp, msg_id: Option<i32>, sender: Option<&str>) -> String {
-	format_message_append(message, last_write_datetime, now, msg_id, sender, false, None)
 }
 async fn wait_for_telegram() {
 	if crate::connectivity::check_telegram_reachable().await {

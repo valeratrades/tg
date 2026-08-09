@@ -68,48 +68,6 @@ pub async fn buffer_via_server(updates: Vec<MessageUpdate>, config: &LiveSetting
 		eyre::bail!("{}", response.error.unwrap_or_else(|| "unknown error".to_string()))
 	}
 }
-async fn request_server(config: &LiveSettings, request: &crate::server::ServerRequest, read_timeout: std::time::Duration) -> Result<crate::server::ServerResponse> {
-	use tokio::{
-		io::{AsyncReadExt, AsyncWriteExt},
-		net::TcpStream,
-	};
-
-	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
-
-	let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
-		.await
-		.map_err(|_| eyre::eyre!("Timed out connecting to server at {addr}"))?
-		.map_err(|e| crate::errors::ConnectionError::new(addr.clone(), e))?;
-
-	let request_json = serde_json::to_string(request)?;
-	stream.write_all(request_json.as_bytes()).await?;
-
-	let mut buf = vec![0u8; 65536];
-	let n = tokio::time::timeout(read_timeout, stream.read(&mut buf))
-		.await
-		.map_err(|_| crate::errors::AckLostError {
-			addr: addr.clone(),
-			waited: read_timeout,
-		})?
-		.map_err(|e| eyre::eyre!("Failed to read server response: {e}"))?;
-	if n == 0 {
-		eyre::bail!("Server closed connection without response");
-	}
-
-	let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
-	let response: crate::server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| crate::errors::JsonParseError::from_serde(response_str.clone(), e))?;
-
-	let client_version = env!("CARGO_PKG_VERSION");
-	match &response.version {
-		Some(v) if v == client_version => {}
-		other => Err(crate::errors::VersionMismatchError {
-			server_version: other.clone().unwrap_or_else(|| "unknown (no version info)".to_string()),
-			client_version: client_version.to_string(),
-		})?,
-	}
-
-	Ok(response)
-}
 /// Push updates to Telegram and sync local files
 /// - Deletes/edits messages on Telegram via MTProto
 /// - Creates new messages via MTProto
@@ -743,6 +701,49 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 
 	None
 }
+async fn request_server(config: &LiveSettings, request: &crate::server::ServerRequest, read_timeout: std::time::Duration) -> Result<crate::server::ServerResponse> {
+	use tokio::{
+		io::{AsyncReadExt, AsyncWriteExt},
+		net::TcpStream,
+	};
+
+	let addr = format!("127.0.0.1:{}", config.config()?.localhost_port);
+
+	let mut stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(&addr))
+		.await
+		.map_err(|_| eyre::eyre!("Timed out connecting to server at {addr}"))?
+		.map_err(|e| crate::errors::ConnectionError::new(addr.clone(), e))?;
+
+	let request_json = serde_json::to_string(request)?;
+	stream.write_all(request_json.as_bytes()).await?;
+
+	let mut buf = vec![0u8; 65536];
+	let n = tokio::time::timeout(read_timeout, stream.read(&mut buf))
+		.await
+		.map_err(|_| crate::errors::AckLostError {
+			addr: addr.clone(),
+			waited: read_timeout,
+		})?
+		.map_err(|e| eyre::eyre!("Failed to read server response: {e}"))?;
+	if n == 0 {
+		eyre::bail!("Server closed connection without response");
+	}
+
+	let response_str = String::from_utf8_lossy(&buf[..n]).to_string();
+	let response: crate::server::ServerResponse = serde_json::from_str(&response_str).map_err(|e| crate::errors::JsonParseError::from_serde(response_str.clone(), e))?;
+
+	let client_version = env!("CARGO_PKG_VERSION");
+	match &response.version {
+		Some(v) if v == client_version => {}
+		other => Err(crate::errors::VersionMismatchError {
+			server_version: other.clone().unwrap_or_else(|| "unknown (no version info)".to_string()),
+			client_version: client_version.to_string(),
+		})?,
+	}
+
+	Ok(response)
+}
+
 fn has_voice_qualifier(caps: &regex::Captures<'_>) -> bool {
 	caps.get(5).map(|m| m.as_str().split_whitespace().any(|w| w == "voice")).unwrap_or(false)
 }

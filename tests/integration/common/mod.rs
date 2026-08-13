@@ -100,7 +100,18 @@ test = "-100{GROUP_ID}/{TOPIC_ID}"
 	}
 
 	pub fn send(&self, msg: &str) -> Output {
-		self.cmd().args(["send", "-g", &GROUP_ID.to_string(), "-t", &TOPIC_ID.to_string(), msg]).output().unwrap()
+		self.send_with(&[], &[msg])
+	}
+
+	/// `flags` go before the positional message; `message` is a slice so attachment-only sends
+	/// (no positional at all) are expressible.
+	pub fn send_with(&self, flags: &[&str], message: &[&str]) -> Output {
+		self.cmd()
+			.args(["send", "-g", &GROUP_ID.to_string(), "-t", &TOPIC_ID.to_string()])
+			.args(flags)
+			.args(message)
+			.output()
+			.unwrap()
 	}
 
 	pub fn delete(&self, msg_id: i32) -> Output {
@@ -108,6 +119,13 @@ test = "-100{GROUP_ID}/{TOPIC_ID}"
 			.args(["schedule-update", "delete", &GROUP_ID.to_string(), &TOPIC_ID.to_string(), &msg_id.to_string()])
 			.output()
 			.unwrap()
+	}
+
+	/// A file to attach, outside the data dir, returned as the canonical path `tg` will record
+	pub fn write_attachment(&self, name: &str) -> String {
+		let path = self.tmp.path().join(name);
+		std::fs::write(&path, b"not really a png").unwrap();
+		path.canonicalize().unwrap().display().to_string()
 	}
 
 	pub fn topic_path(&self) -> PathBuf {

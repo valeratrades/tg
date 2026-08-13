@@ -329,7 +329,7 @@ async fn drain_buffer(buffer: &crate::buffer::SendBuffer, settings: &LiveSetting
 	info!("Draining {} buffered message(s)", entries.len());
 	let results = crate::sync::push(entries.clone(), settings, telegram).await?;
 	// The buffer only ever holds creates (`tg send`), so results align with entries by index
-	assert!(entries.iter().all(|u| matches!(u, crate::sync::MessageUpdate::Create { .. })), "non-create in send buffer");
+	assert!(entries.iter().all(|u| matches!(u, crate::sync::MessageUpdate::Create(_))), "non-create in send buffer");
 	for (entry, (_, _, op)) in entries.iter().zip(&results.creates) {
 		if !op.success {
 			buffer.dead_letter(entry, &op.message)?;
@@ -359,18 +359,33 @@ async fn network_loop(listener: std::net::TcpListener, net: NetCtx) -> Result<()
 		}
 	}
 }
-/// Send a message (text, or a photo when it's a `![](path)` image) via MTProto.
+/// Send a message via MTProto: its attachments, or — with none — the text, which is still sent as
+/// a photo when it is a `![](path)` image (the only way a file-edit-originated create can carry one).
 /// Returns the message ID assigned by Telegram.
-pub(crate) async fn send_message(telegram: &crate::mtproto::Telegram, group_id: u64, topic_id: u64, text: &str) -> Result<i32> {
-	if let Some((image_path, caption)) = extract_image_path(text) {
-		let full_path = DATA_DIR.get().unwrap().join(&image_path);
-		if full_path.exists() {
-			debug!("Sending photo from {}", full_path.display());
-			return telegram.send_photo(group_id, topic_id, &full_path, caption.as_deref()).await;
+///
+/// ponytail: several attachments become several messages, only the first captioned. `send_album`
+/// would group them, but it wants a `PeerRef` while everything here resolves to a raw `InputPeer`.
+pub(crate) async fn send_message(telegram: &crate::mtproto::Telegram, msg: &crate::sync::CreateMsg) -> Result<i32> {
+	let (group_id, topic_id) = (msg.group_id, msg.topic_id);
+	if msg.documents.is_empty() {
+		if let Some((image_path, caption)) = extract_image_path(&msg.content) {
+			let full_path = DATA_DIR.get().unwrap().join(&image_path);
+			if full_path.exists() {
+				debug!("Sending photo from {}", full_path.display());
+				return telegram.send_media(group_id, topic_id, &full_path, caption.as_deref(), true).await;
+			}
+			warn!("Image file not found: {}, sending as text", full_path.display());
 		}
-		warn!("Image file not found: {}, sending as text", full_path.display());
+		return telegram.send_text_message(group_id, topic_id, &msg.content).await;
 	}
-	telegram.send_text_message(group_id, topic_id, text).await
+
+	let mut first_id = None;
+	for (i, doc) in msg.documents.iter().enumerate() {
+		let caption = (i == 0 && !msg.content.is_empty()).then_some(msg.content.as_str());
+		let id = telegram.send_media(group_id, topic_id, doc, caption, msg.inline).await?;
+		first_id.get_or_insert(id);
+	}
+	Ok(first_id.expect("documents is non-empty"))
 }
 
 pub(crate) fn format_message_append(

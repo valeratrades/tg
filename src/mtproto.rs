@@ -52,10 +52,15 @@ impl Telegram {
 		}
 	}
 
-	pub async fn send_photo(&self, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>) -> Result<i32> {
+	/// `inline` only asks: files Telegram won't accept as a photo go as documents regardless.
+	pub async fn send_media(&self, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>, inline: bool) -> Result<i32> {
+		let as_photo = inline && is_inlinable(path);
 		match self {
-			Self::Real(c) => send_photo(c, group_id, topic_id, path, caption).await,
-			Self::Mock(m) => m.record_create(group_id, topic_id, &format!("[photo:{}] {}", path.display(), caption.unwrap_or(""))),
+			Self::Real(c) => send_media(c, group_id, topic_id, path, caption, as_photo).await,
+			Self::Mock(m) => {
+				let kind = if as_photo { "photo" } else { "document" };
+				m.record_create(group_id, topic_id, &format!("[{kind}:{}] {}", path.display(), caption.unwrap_or("")))
+			}
 		}
 	}
 
@@ -482,70 +487,6 @@ pub async fn send_text_message(client: &Client, group_id: u64, topic_id: u64, te
 	info!("Sent text message {msg_id} to group {group_id} topic {topic_id} via MTProto");
 	Ok(msg_id)
 }
-/// Send a photo with optional caption to a forum topic via MTProto
-/// Returns the message ID assigned by Telegram
-pub async fn send_photo(client: &Client, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>) -> Result<i32> {
-	let chat_id = telegram_chat_id(group_id);
-	let input_peer = get_input_peer(client, chat_id).await?;
-
-	let reply_to = if topic_id != 1 {
-		Some(tl::enums::InputReplyTo::Message(tl::types::InputReplyToMessage {
-			reply_to_msg_id: topic_id as i32,
-			top_msg_id: None,
-			reply_to_peer_id: None,
-			quote_text: None,
-			quote_entities: None,
-			quote_offset: None,
-			monoforum_peer_id: None,
-			todo_item_id: None,
-			poll_option: None,
-		}))
-	} else {
-		None
-	};
-
-	let uploaded = client.upload_file(path).await?;
-
-	let media = tl::enums::InputMedia::UploadedPhoto(tl::types::InputMediaUploadedPhoto {
-		spoiler: false,
-		live_photo: false,
-		file: uploaded.raw,
-		stickers: None,
-		ttl_seconds: None,
-		video: None,
-	});
-
-	let random_id = rand_i64();
-
-	let request = tl::functions::messages::SendMedia {
-		silent: false,
-		background: false,
-		clear_draft: false,
-		noforwards: false,
-		update_stickersets_order: false,
-		invert_media: false,
-		allow_paid_floodskip: false,
-		peer: input_peer,
-		reply_to,
-		media,
-		message: caption.unwrap_or("").to_string(),
-		random_id,
-		reply_markup: None,
-		entities: None,
-		schedule_date: None,
-		schedule_repeat_period: None,
-		send_as: None,
-		quick_reply_shortcut: None,
-		effect: None,
-		allow_paid_stars: None,
-		suggested_post: None,
-	};
-
-	let updates = client.invoke(&request).await?;
-	let msg_id = extract_message_id_from_updates(&updates)?;
-	info!("Sent photo message {msg_id} to group {group_id} topic {topic_id} via MTProto");
-	Ok(msg_id)
-}
 /// Get chat info (title, is_forum) for a group via MTProto dialogs
 pub async fn get_chat_info(client: &Client, group_id: u64) -> Result<(String, bool)> {
 	let chat_id = telegram_chat_id(group_id);
@@ -634,6 +575,98 @@ pub fn extract_channel_id(chat_id: i64) -> i64 {
 	} else {
 		chat_id.abs()
 	}
+}
+/// Telegram only renders a photo for a few formats, and caps them at 10MB; anything else has to
+/// be a document or the send is rejected.
+fn is_inlinable(path: &Path) -> bool {
+	const PHOTO_MAX_BYTES: u64 = 10 * 1024 * 1024;
+	let ext_ok = path
+		.extension()
+		.and_then(|e| e.to_str())
+		.is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp"));
+	ext_ok && std::fs::metadata(path).is_ok_and(|m| m.len() <= PHOTO_MAX_BYTES)
+}
+
+/// Send a file with optional caption to a forum topic via MTProto, as a photo or as a document.
+/// Returns the message ID assigned by Telegram
+async fn send_media(client: &Client, group_id: u64, topic_id: u64, path: &Path, caption: Option<&str>, as_photo: bool) -> Result<i32> {
+	let chat_id = telegram_chat_id(group_id);
+	let input_peer = get_input_peer(client, chat_id).await?;
+
+	let reply_to = if topic_id != 1 {
+		Some(tl::enums::InputReplyTo::Message(tl::types::InputReplyToMessage {
+			reply_to_msg_id: topic_id as i32,
+			top_msg_id: None,
+			reply_to_peer_id: None,
+			quote_text: None,
+			quote_entities: None,
+			quote_offset: None,
+			monoforum_peer_id: None,
+			todo_item_id: None,
+			poll_option: None,
+		}))
+	} else {
+		None
+	};
+
+	let uploaded = client.upload_file(path).await?;
+
+	let media = if as_photo {
+		tl::enums::InputMedia::UploadedPhoto(tl::types::InputMediaUploadedPhoto {
+			spoiler: false,
+			live_photo: false,
+			file: uploaded.raw,
+			stickers: None,
+			ttl_seconds: None,
+			video: None,
+		})
+	} else {
+		let file_name = path.file_name().expect("caller canonicalized the path").to_string_lossy().into_owned();
+		tl::enums::InputMedia::UploadedDocument(tl::types::InputMediaUploadedDocument {
+			nosound_video: false,
+			force_file: true,
+			spoiler: false,
+			file: uploaded.raw,
+			thumb: None,
+			mime_type: mime_guess::from_path(path).first_or_octet_stream().to_string(),
+			attributes: vec![tl::enums::DocumentAttribute::Filename(tl::types::DocumentAttributeFilename { file_name })],
+			stickers: None,
+			video_cover: None,
+			video_timestamp: None,
+			ttl_seconds: None,
+		})
+	};
+
+	let random_id = rand_i64();
+
+	let request = tl::functions::messages::SendMedia {
+		silent: false,
+		background: false,
+		clear_draft: false,
+		noforwards: false,
+		update_stickersets_order: false,
+		invert_media: false,
+		allow_paid_floodskip: false,
+		peer: input_peer,
+		reply_to,
+		media,
+		message: caption.unwrap_or("").to_string(),
+		random_id,
+		reply_markup: None,
+		entities: None,
+		schedule_date: None,
+		schedule_repeat_period: None,
+		send_as: None,
+		quick_reply_shortcut: None,
+		effect: None,
+		allow_paid_stars: None,
+		suggested_post: None,
+	};
+
+	let updates = client.invoke(&request).await?;
+	let msg_id = extract_message_id_from_updates(&updates)?;
+	info!("Sent media message {msg_id} to group {group_id} topic {topic_id} via MTProto");
+	Ok(msg_id)
 }
 /// True when the error means the MTProto connection/session is dead and the whole
 /// session must be torn down and rebuilt — as opposed to a per-request server reply

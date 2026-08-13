@@ -33,6 +33,9 @@ Send a message to a topic:
 ```sh
 tg send journal "Today I'm feeling blue"
 tg send -g 2244305221 -t 7 "direct by IDs"
+tg send -c journal -d shot.png "caption"      # attach a file
+tg send -c journal -i -d shot.png             # -i renders png/jpg/webp ≤10MB as a photo
+tg send -c journal -d a.png -d b.pdf          # one message per attachment
 ```
 
 #### List

@@ -149,8 +149,14 @@ struct SendArgs {
 	/// Direct topic ID (requires --group-id)
 	#[arg(short, long)]
 	topic_id: Option<u64>,
+	/// File to attach. Repeat for several.
+	#[arg(short, long = "document", value_name = "PATH")]
+	documents: Vec<PathBuf>,
+	/// Send inlinable attachments (png/jpg/webp ≤10MB) as photos rather than files
+	#[arg(short, long, requires = "documents")]
+	inline: bool,
 	/// Message to send. Pass '-' to read from stdin.
-	message: MaybeStdin<String>,
+	message: Option<MaybeStdin<String>>,
 }
 #[derive(Args, Clone, Debug)]
 struct SendAlertArgs {
@@ -258,12 +264,25 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 	match command {
 		Commands::Server(_) => unreachable!("dispatched in main, where it can own its own runtimes"),
 		Commands::Send(args) => {
+			let content = args.message.as_ref().map(|m| m.to_string()).unwrap_or_default();
+			if content.is_empty() && args.documents.is_empty() {
+				bail!("Nothing to send: pass a message, an attachment (-d), or both");
+			}
+			// Fail here rather than minutes later in the server's drain worker
+			let documents = args
+				.documents
+				.iter()
+				.map(|p| p.canonicalize().map_err(|e| eyre!("Attachment {}: {e}", p.display())))
+				.collect::<Result<Vec<_>>>()?;
+
 			let (group_id, topic_id) = resolve_send_destination(&args)?;
-			let update = sync::MessageUpdate::Create {
+			let update = sync::MessageUpdate::Create(sync::CreateMsg {
 				group_id,
 				topic_id,
-				content: args.message.to_string(),
-			};
+				content,
+				documents,
+				inline: args.inline,
+			});
 			// Fire-and-forget: exit 0 = buffered on a healthy server, no need to wait for delivery
 			let pending = sync::buffer_via_server(vec![update], &settings).await?;
 			eprintln!("buffered ({pending} pending)");
@@ -465,7 +484,13 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 				}
 				UpdateAction::Create { group_id, topic_id, content } => {
 					eprintln!("Creating message in group {group_id} topic {topic_id}");
-					let update = sync::MessageUpdate::Create { group_id, topic_id, content };
+					let update = sync::MessageUpdate::Create(sync::CreateMsg {
+						group_id,
+						topic_id,
+						content,
+						documents: Vec::new(),
+						inline: false,
+					});
 					let results = sync::push_via_server(vec![update], &settings).await?;
 					display_push_results(&results);
 				}

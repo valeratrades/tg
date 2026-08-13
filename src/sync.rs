@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+	collections::BTreeMap,
+	path::{Path, PathBuf},
+};
 
 use eyre::Result;
 use regex::Regex;
@@ -15,7 +18,31 @@ use crate::{
 pub enum MessageUpdate {
 	Delete { group_id: u64, topic_id: u64, message_id: i32 },
 	Edit { group_id: u64, topic_id: u64, message_id: i32, new_content: String },
-	Create { group_id: u64, topic_id: u64, content: String },
+	Create(CreateMsg),
+}
+/// A message to send. Serializes the same as the old struct variant did, so `send_buffer.jsonl`
+/// entries queued by an older binary still parse.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CreateMsg {
+	pub group_id: u64,
+	pub topic_id: u64,
+	pub content: String,
+	#[serde(default)]
+	pub documents: Vec<PathBuf>,
+	/// Render inlinable attachments (png/jpg/webp ≤10MB) as photos rather than files
+	#[serde(default)]
+	pub inline: bool,
+}
+impl CreateMsg {
+	/// What the topic file shows for this message; media without a caption converges on the
+	/// same placeholder `pull` writes for incoming media.
+	fn file_content(&self) -> &str {
+		match (self.content.is_empty(), self.inline) {
+			(false, _) => &self.content,
+			(true, true) => "[photo]",
+			(true, false) => "[document]",
+		}
+	}
 }
 /// Result of a single operation
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -85,7 +112,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 
 	let delete_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Delete { .. })).count();
 	let edit_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Edit { .. })).count();
-	let create_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Create { .. })).count();
+	let create_count = updates.iter().filter(|u| matches!(u, MessageUpdate::Create(_))).count();
 	let total = updates.len();
 
 	info!("Pushing {total} updates ({delete_count} deletions, {edit_count} edits, {create_count} creates)");
@@ -93,7 +120,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 	// Group deletions by group_id for batch delete
 	let mut deletions_by_group: BTreeMap<u64, Vec<(u64, i32)>> = BTreeMap::new(); // group_id -> [(topic_id, msg_id)]
 	let mut edits: Vec<(u64, u64, i32, String)> = Vec::new(); // (group_id, topic_id, msg_id, new_content)
-	let mut creates: Vec<(u64, u64, String)> = Vec::new(); // (group_id, topic_id, content)
+	let mut creates: Vec<CreateMsg> = Vec::new();
 
 	for update in &updates {
 		match update {
@@ -108,8 +135,8 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 			} => {
 				edits.push((*group_id, *topic_id, *message_id, new_content.clone()));
 			}
-			MessageUpdate::Create { group_id, topic_id, content } => {
-				creates.push((*group_id, *topic_id, content.clone()));
+			MessageUpdate::Create(create) => {
+				creates.push(create.clone());
 			}
 		}
 	}
@@ -193,16 +220,17 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 	}
 
 	// Apply creates - send new messages via MTProto
-	let mut successful_creates: Vec<(u64, u64, String, i32)> = Vec::new(); // (group_id, topic_id, content, msg_id)
+	let mut successful_creates: Vec<(CreateMsg, i32)> = Vec::new();
 
-	for (group_id, topic_id, content) in &creates {
-		match crate::server::send_message(telegram, *group_id, *topic_id, content).await {
+	for create in &creates {
+		let (group_id, topic_id) = (create.group_id, create.topic_id);
+		match crate::server::send_message(telegram, create).await {
 			Ok(msg_id) => {
 				info!(group_id, topic_id, msg_id, "Created message on Telegram");
-				successful_creates.push((*group_id, *topic_id, content.clone(), msg_id));
+				successful_creates.push((create.clone(), msg_id));
 				results.creates.push((
-					*group_id,
-					*topic_id,
+					group_id,
+					topic_id,
 					OpResult {
 						success: true,
 						message: format!("Created with msg_id={msg_id}"),
@@ -215,8 +243,8 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 			Err(e) => {
 				warn!(group_id, topic_id, error = %e, "Failed to create message");
 				results.creates.push((
-					*group_id,
-					*topic_id,
+					group_id,
+					topic_id,
 					OpResult {
 						success: false,
 						message: e.to_string(),
@@ -305,9 +333,9 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 
 		use crate::server::format_message_append_with_sender;
 
-		let mut creates_by_topic: BTreeMap<(u64, u64), Vec<(String, i32)>> = BTreeMap::new();
-		for (group_id, topic_id, content, msg_id) in successful_creates {
-			creates_by_topic.entry((group_id, topic_id)).or_default().push((content, msg_id));
+		let mut creates_by_topic: BTreeMap<(u64, u64), Vec<(CreateMsg, i32)>> = BTreeMap::new();
+		for (create, msg_id) in successful_creates {
+			creates_by_topic.entry((create.group_id, create.topic_id)).or_default().push((create, msg_id));
 		}
 
 		for ((group_id, topic_id), messages) in creates_by_topic {
@@ -327,7 +355,11 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 
 			// Remove untagged lines from the end (the ones we just sent)
 			// We need to be careful to only remove the content we sent
-			for (content, _) in &messages {
+			for (create, _) in &messages {
+				let content = &create.content;
+				if content.is_empty() {
+					continue; // attachment-only send: nothing was ever written to the file
+				}
 				// Try to find and remove the untagged content from the file
 				// The content might have ". " prefix stripped, so check both forms
 				let patterns_to_remove = [format!("\n. {content}"), format!("\n{content}"), content.clone()];
@@ -354,8 +386,8 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 			}
 
 			let now = Timestamp::now();
-			for (content, msg_id) in messages {
-				let formatted = format_message_append_with_sender(&content, last_write, now, Some(msg_id), None);
+			for (create, msg_id) in messages {
+				let formatted = format_message_append_with_sender(create.file_content(), last_write, now, Some(msg_id), None);
 				file_content.push_str(&formatted);
 				last_write = Some(now);
 			}
@@ -616,11 +648,13 @@ pub fn changes_to_updates(changes: &FileChanges, group_id: u64, topic_id: u64) -
 	}
 
 	for content in &changes.created {
-		updates.push(MessageUpdate::Create {
+		updates.push(MessageUpdate::Create(CreateMsg {
 			group_id,
 			topic_id,
 			content: content.clone(),
-		});
+			documents: Vec::new(),
+			inline: false,
+		}));
 	}
 
 	updates

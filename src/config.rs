@@ -3,8 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use tg::TelegramDestination;
 use v_utils::{
+	Timeframe,
 	macros::{LiveSettings, MyConfigPrimitives, Settings},
-	trades::Timeframe,
 };
 
 /// Initialize the data directory (call after config is loaded)

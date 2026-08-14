@@ -1,6 +1,6 @@
 use eyre::{Result, bail};
 use jiff::civil::Date;
-use v_utils::trades::Timeframe;
+use v_utils::Timeframe;
 
 use crate::{
 	config::LiveSettings,

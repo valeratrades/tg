@@ -199,7 +199,7 @@ struct SinceArgs {
 	datetime: Option<String>,
 	/// Show messages from this timeframe back from now (e.g. 3d, 1w, 2h)
 	#[arg(short, long)]
-	back: Option<v_utils::trades::Timeframe>,
+	back: Option<v_utils::Timeframe>,
 }
 fn main() {
 	let cli = Cli::parse();

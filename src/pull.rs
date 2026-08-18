@@ -113,7 +113,6 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 
 	let max_messages = cfg.max_messages_per_chat;
 	let group_ids = cfg.forum_group_ids();
-	let mut transcription_dead = false;
 
 	for group_id in group_ids {
 		let group = match topics_metadata.groups.get(&group_id) {
@@ -175,7 +174,7 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 					info!("Fetched {} messages for topic {topic_name}", messages.len());
 
 					// Merge messages into file
-					merge_mtproto_messages_to_file(client, input_peer, group_id, topic_id, &messages, &topics_metadata, &mut transcription_dead).await?;
+					merge_mtproto_messages_to_file(client, input_peer, group_id, topic_id, &messages, &topics_metadata).await?;
 				}
 			}
 
@@ -865,38 +864,8 @@ fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
 
 	result
 }
-/// OpenAI answers 429 both for throttling and for an empty balance. Only `error.type` in the body
-/// separates them — the human-readable `message` is not part of their contract.
-#[derive(Debug)]
-enum WhisperErr {
-	/// Terminal until the account is topped up: every further call this run would fail identically.
-	NoCredits,
-	/// Transient — the same audio is worth another attempt.
-	RateLimited,
-	Failed(eyre::Report),
-}
-impl std::fmt::Display for WhisperErr {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			Self::NoCredits => write!(f, "no OpenAI credits"),
-			Self::RateLimited => write!(f, "rate limited"),
-			Self::Failed(e) => write!(f, "{e}"),
-		}
-	}
-}
-fn classify_whisper_error(status: reqwest::StatusCode, body: &str) -> WhisperErr {
-	let err_type = match serde_json::from_str::<serde_json::Value>(body) {
-		Ok(j) => j["error"]["type"].as_str().map(str::to_owned),
-		Err(_) => None, // gateways and proxies answer 429/5xx in plain text; those fall through to `Failed`
-	};
-	match err_type.as_deref() {
-		Some("insufficient_quota") => WhisperErr::NoCredits,
-		Some("requests" | "tokens") => WhisperErr::RateLimited,
-		_ => WhisperErr::Failed(eyre::eyre!("Whisper {status}: {body}")),
-	}
-}
-/// Download a voice document and transcribe via OpenAI Whisper.
-async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> Result<String, WhisperErr> {
+/// Download a voice document and transcribe it locally.
+async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> Result<String> {
 	// Wrapper to implement Downloadable for raw tl::types::Document
 	struct RawDoc<'a>(&'a tl::types::Document);
 	impl grammers_client::media::Downloadable for RawDoc<'_> {
@@ -913,42 +882,13 @@ async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> 
 		}
 	}
 
-	let exchange: eyre::Result<(reqwest::StatusCode, String)> = async {
-		let mut download = client.iter_download(&RawDoc(doc));
-		let mut bytes = Vec::new();
-		while let Some(chunk) = download.next().await? {
-			bytes.extend_from_slice(&chunk);
-		}
-
-		let api_key = std::env::var("OPENAI_API_KEY")
-			.or_else(|_| std::env::var("OPENAI_KEY"))
-			.map_err(|_| eyre::eyre!("OPENAI_API_KEY not set"))?;
-
-		let part = reqwest::multipart::Part::bytes(bytes).file_name("voice.ogg").mime_str("audio/ogg")?;
-		let form = reqwest::multipart::Form::new().text("model", "whisper-1").part("file", part);
-
-		let resp = reqwest::Client::new()
-			.post("https://api.openai.com/v1/audio/transcriptions")
-			.bearer_auth(api_key)
-			.multipart(form)
-			.send()
-			.await?;
-
-		let status = resp.status();
-		Ok((status, resp.text().await?))
-	}
-	.await;
-
-	let (status, body) = exchange.map_err(WhisperErr::Failed)?;
-	if !status.is_success() {
-		return Err(classify_whisper_error(status, &body));
+	let mut download = client.iter_download(&RawDoc(doc));
+	let mut ogg = tempfile::Builder::new().suffix(".ogg").tempfile()?;
+	while let Some(chunk) = download.next().await? {
+		std::io::Write::write_all(&mut ogg, &chunk)?;
 	}
 
-	let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| WhisperErr::Failed(eyre::eyre!("Whisper body not JSON: {e}: {body}")))?;
-	match json["text"].as_str() {
-		Some(t) => Ok(t.to_string()),
-		None => Err(WhisperErr::Failed(eyre::eyre!("No text in Whisper response: {json}"))),
-	}
+	ask_llm::transcribe(ogg.path()).await
 }
 /// Merge MTProto messages into a topic file
 async fn merge_mtproto_messages_to_file(
@@ -958,7 +898,6 @@ async fn merge_mtproto_messages_to_file(
 	topic_id: u64,
 	messages: &[FetchedMessage],
 	metadata: &TopicsMetadata,
-	transcription_dead: &mut bool,
 ) -> Result<()> {
 	ensure_topic_dir(group_id, metadata)?;
 	let chat_filepath = topic_filepath(group_id, topic_id, metadata);
@@ -1018,18 +957,12 @@ async fn merge_mtproto_messages_to_file(
 		let sender = if msg.is_outgoing { "user" } else { "bot" };
 
 		if let Some(doc) = msg.voice.as_ref() {
-			let transcript = match transcription_dead {
-				true => "[transcription skipped: no OpenAI credits]".to_string(),
-				false => match download_and_transcribe(client, doc).await {
-					Ok(t) => t,
-					Err(e) => {
-						warn!(msg_id = msg.id, error = %e, "Voice transcription failed");
-						if matches!(e, WhisperErr::NoCredits) {
-							*transcription_dead = true;
-						}
-						format!("[transcription failed: {e}]")
-					}
-				},
+			let transcript = match download_and_transcribe(client, doc).await {
+				Ok(t) => t,
+				Err(e) => {
+					warn!(msg_id = msg.id, error = %e, "Voice transcription failed");
+					format!("[transcription failed: {e}]")
+				}
 			};
 			let content = format!("[voice] {transcript}");
 			let formatted = crate::server::format_message_append(&content, last_write, msg_time, Some(msg.id), Some(sender), msg.is_forwarded, msg.reply_to_msg_id);
@@ -1209,18 +1142,6 @@ fn cleanup_tagless_messages(file_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	/// Both payloads are verbatim 429s from api.openai.com — the status alone cannot tell them apart.
-	#[test]
-	fn whisper_429_quota_vs_throttle() {
-		let status = reqwest::StatusCode::TOO_MANY_REQUESTS;
-		let no_credits = r#"{"error":{"message":"You have no credits remaining.","type":"insufficient_quota","param":null,"code":"credit_balance_exhausted"}}"#;
-		let throttled = r#"{"error":{"message":"Rate limit reached for whisper-1","type":"requests","param":null,"code":"rate_limit_exceeded"}}"#;
-
-		assert!(matches!(classify_whisper_error(status, no_credits), WhisperErr::NoCredits));
-		assert!(matches!(classify_whisper_error(status, throttled), WhisperErr::RateLimited));
-		assert!(matches!(classify_whisper_error(status, "<html>502 bad gateway</html>"), WhisperErr::Failed(_)));
-	}
 
 	#[test]
 	fn test_sanitize_topic_name() {

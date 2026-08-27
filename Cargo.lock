@@ -123,9 +123,9 @@ checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "ask_llm"
-version = "3.1.0"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d3fcd7fa70d7df2932f23dc64b283a22a6b9fe4c862b1e6c14ea217be6cb0cf"
+checksum = "3d74724e73fabd526f0eb2bd6908ed08b814522a3b60a66a733bf47d3686fefb"
 dependencies = [
  "base64",
  "bytes",

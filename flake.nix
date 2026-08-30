@@ -124,12 +124,6 @@
               description = "The package to use.";
             };
 
-            token = mkOption {
-              type = path;
-              description = "Path to the file containing the Telegram token for LoadCredential.";
-              example = "config.sops.secrets.telegram_token_main.path";
-            };
-
             apiHash = mkOption {
               type = nullOr path;
               default = null;
@@ -165,11 +159,11 @@
 
               Service = {
                 Type = "simple";
-                LoadCredential = [
-                  "tg_token:${cfg.token}"
-                ] ++ lib.optional (cfg.apiHash != null) "tg_api_hash:${cfg.apiHash}"
+                LoadCredential = lib.optional (cfg.apiHash != null) "tg_api_hash:${cfg.apiHash}"
                 ++ lib.optional (cfg.phone != null) "tg_phone:${cfg.phone}"
                 ++ lib.optional (cfg.alertsChannel != null) "tg_alerts_channel:${cfg.alertsChannel}";
+                # credentials reach the config's `{ env = ... }` indirection via the environment, never argv:
+                # /proc/PID/environ is 0400, /proc/PID/cmdline is world-readable.
                 ExecStart =
                   let
                     envSetup = lib.concatStringsSep " " (
@@ -179,7 +173,7 @@
                     );
                   in
                   ''
-                    /bin/sh -c '${envSetup} ${cfg.package}/bin/${pname} --token "$(cat %d/tg_token)" server'
+                    /bin/sh -c '${envSetup} ${cfg.package}/bin/${pname} server'
                   '';
                 Restart = "always";
                 RestartSec = 5;

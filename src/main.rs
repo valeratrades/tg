@@ -79,11 +79,13 @@ enum Commands {
 	/// tg schedule-update edit 2244305221 1 2645 "new message text"
 	/// ```
 	ScheduleUpdate(ScheduleUpdateArgs),
-	/// Show the N most recent messages across all topics
+	/// Show the N most recent messages across all topics, or everything within a timeframe
 	/// Ex:
 	/// ```sh
 	/// tg last 10
 	/// tg last 3
+	/// tg last 3d
+	/// tg last 2h
 	/// ```
 	Last(LastArgs),
 	/// Show all messages since a given date (or timeframe back from now)
@@ -190,8 +192,8 @@ struct ScheduleUpdateArgs {
 }
 #[derive(Args, Clone, Debug)]
 struct LastArgs {
-	/// Number of most recent messages to show
-	count: usize,
+	/// Message count (`10`) or a timeframe back from now (`3d`, `2h`)
+	target: LastTarget,
 }
 #[derive(Args, Clone, Debug)]
 struct SinceArgs {
@@ -257,6 +259,22 @@ fn main() {
 			eprintln!("Error: {e:?}");
 		}
 		std::process::exit(1);
+	}
+}
+#[derive(Clone, Debug)]
+enum LastTarget {
+	Count(usize),
+	Back(v_utils::Timeframe),
+}
+impl std::str::FromStr for LastTarget {
+	type Err = eyre::Report;
+
+	/// Bare integers parse as Timeframe minutes upstream, so counts must be tried first.
+	fn from_str(s: &str) -> eyre::Result<Self> {
+		match s.parse::<usize>() {
+			Ok(n) => Ok(Self::Count(n)),
+			Err(_) => Ok(Self::Back(s.parse()?)),
+		}
 	}
 }
 
@@ -452,9 +470,10 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 			let has_alerts_channel = settings.config().map(|c| c.alerts_channel.is_some()).unwrap_or(false);
 			shell_init::output(args, has_alerts_channel);
 		}
-		Commands::Last(args) => {
-			last::run(args.count, &settings).await?;
-		}
+		Commands::Last(args) => match args.target {
+			LastTarget::Count(n) => last::run(n, &settings).await?,
+			LastTarget::Back(tf) => since::run(None, Some(tf), &settings).await?,
+		},
 		Commands::Since(args) => {
 			since::run(args.datetime, args.back, &settings).await?;
 		}

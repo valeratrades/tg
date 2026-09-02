@@ -8,20 +8,20 @@ use crate::{
 };
 
 pub async fn run(datetime: Option<String>, back: Option<Timeframe>, config: &LiveSettings) -> Result<()> {
-	let today = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date();
+	let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).datetime();
 
-	let cutoff_date = match (datetime, back) {
+	let cutoff = match (datetime, back) {
 		(Some(_), Some(_)) => bail!("Cannot specify both a datetime and --back"),
 		(None, None) => bail!("Must specify either a datetime or --back"),
-		(None, Some(tf)) => {
-			let span = jiff::Span::try_from(tf.duration())?;
-			today.checked_sub(span)?
-		}
-		(Some(dt_str), None) => parse_partial_date(&dt_str, today)?,
+		(None, Some(tf)) => now.checked_sub(jiff::SignedDuration::try_from(tf.duration())?)?,
+		(Some(dt_str), None) => parse_partial_date(&dt_str, now.date())?.to_datetime(jiff::civil::Time::midnight()),
 	};
 
 	let mut messages = load_all_messages();
-	messages.retain(|m| m.date >= cutoff_date);
+	messages.retain(|m| match m.time {
+		Some(t) => m.date.to_datetime(t) >= cutoff,
+		None => m.date >= cutoff.date(), // legacy messages carry no time-of-day
+	});
 	messages.sort_by(|a, b| a.date.cmp(&b.date).then_with(|| a.message_id.cmp(&b.message_id)));
 
 	if !confirm_large_output(messages.len(), config)? {

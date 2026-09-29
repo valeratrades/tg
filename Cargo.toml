@@ -11,45 +11,86 @@ repository = "https://github.com/valeratrades/tg"
 ignored = ["color-eyre"]
 rand = "0.8.5"
 
-[dependencies]
+[workspace]
+members = ["tg_types"]
+
+[workspace.lints.rust]
+unused_features = "allow"
+
+[workspace.dependencies]
 ask_llm = { version = "3.1.1", default-features = false }
-clap = { version = "4.5.54", features = ["derive"] }
+clap = "4.5.54"
 clap-stdin = "0.8"
 clap_complete = "4"
 color-eyre = "0.6.5"
 config = "0.15.19"
 derive-new = "0.7.0"
-derive_more = { version = "2", features = ["display", "from_str"] }
+derive_more = "2"
 dirs = "6.0.0"
-eyre = "^0.6.12"
+eyre = "0.6.12"
 futures = "0.3.31"
-futures-util = "^0.3.31"
+futures-util = "0.3.31"
 grammers-client = "=0.10.0"
 grammers-mtsender = "=0.10.0"
 grammers-session = "=0.10.0"
 grammers-tl-types = "=0.10.0"
+insta = "1.46.1"
 jiff = "0.2"
-miette = { version = "7", features = ["fancy"] }
+miette = "7"
 mime_guess = "2"
 regex = "1"
-reqwest = { version = "0.13.1", features = ["rustls", "form", "json"], default-features = false }
-serde = "^1.0.228"
-serde_json = "^1.0.149"
+reqwest = { version = "0.13.1", default-features = false }
+serde = "1.0.228"
+serde_json = "1.0.149"
 tempfile = "3"
+tg_types = { version = "0.1.0", path = "tg_types" }
 thiserror = "2.0.18"
-tokio = { version = "^1.49.0", features = ["full"] }
-toml = "^0.9.11"
-tracing = "^0.1.44"
-v_utils = { version = "^2.17.6", features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
+tokio = "1.49.0"
+toml = "0.9.11"
+tracing = "0.1.44"
+v_utils = "2.17.6"
 xattr = "1.6.1"
+
+[dependencies]
+ask_llm = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+clap-stdin = { workspace = true }
+clap_complete = { workspace = true }
+color-eyre = { workspace = true }
+config = { workspace = true }
+derive-new = { workspace = true }
+derive_more = { workspace = true, features = ["display", "from_str"] }
+dirs = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+grammers-client = { workspace = true }
+grammers-mtsender = { workspace = true }
+grammers-session = { workspace = true }
+grammers-tl-types = { workspace = true }
+jiff = { workspace = true }
+miette = { workspace = true, features = ["fancy"] }
+mime_guess = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true, features = ["rustls", "form", "json"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tg_types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+tracing = { workspace = true }
+v_utils = { workspace = true, features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
+xattr = { workspace = true }
 
 #[patch.crates-io]
 #v_utils = { path = "/home/v/s/v_utils/v_utils" }
 #v_utils_macros = { path = "/home/v/s/v_utils/v_utils_macros" }
 
 [dev-dependencies]
-insta = "1.46.1"
-tempfile = "3"
+insta = { workspace = true }
+tempfile = { workspace = true }
 
 [lints.rust]
 unused_features = "allow"

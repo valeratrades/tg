@@ -3615,12 +3615,24 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tg_types",
  "thiserror 2.0.18",
  "tokio",
  "toml 0.9.11+spec-1.1.0",
  "tracing",
  "v_utils",
  "xattr",
+]
+
+[[package]]
+name = "tg_types"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "insta",
+ "serde",
+ "serde_json",
+ "toml 0.9.11+spec-1.1.0",
 ]
 
 [[package]]

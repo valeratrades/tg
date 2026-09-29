@@ -1,0 +1,17 @@
+[package]
+name = "tg_types"
+version = "0.1.0"
+edition = "2024"
+authors = ["Valeriy Sakharov <valeratrades@gmail.com>"]
+description = "Telegram destination types (channel / group / forum topic) shared by tg and its consumers"
+license = "BlueOak-1.0.0"
+repository = "https://github.com/valeratrades/tg"
+
+[dependencies]
+eyre = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }

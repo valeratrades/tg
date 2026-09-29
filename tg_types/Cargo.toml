@@ -12,6 +12,6 @@ eyre = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-insta = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
+insta.workspace = true
+serde_json.workspace = true
+toml.workspace = true

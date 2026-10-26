@@ -17,6 +17,9 @@ members = ["tg_types"]
 [workspace.lints.rust]
 unused_features = "allow"
 
+[workspace.lints.cargo]
+non_kebab_case_bins = "allow"
+
 [workspace.dependencies]
 ask_llm = { version = "3.1.1", default-features = false }
 clap = "4.5.54"

@@ -40,7 +40,7 @@
             inherit pkgs pname;
             lastSupportedVersion = "nightly-1.92";
             rootDir = ./.;
-            licenses = [{ license = v_flakes.files.licenses.nsfw; }];
+            licenses = [{ license = v_flakes.files.licenses.gl; }];
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];
           };
 

@@ -104,7 +104,7 @@ Example config: examples/config.toml
 
 ##### Environment Variables
 ```sh
-export TELEGRAM_MAIN_BOT_TOKEN="your_bot_token"  # for send/bot-info
+export TELEGRAM_BOT_KEY="your_bot_token"  # for send/bot-info
 export TELEGRAM_API_HASH="your_api_hash"         # alternative to config
 export PHONE_NUMBER_FR="+1234567890"             # alternative to config
 ```

@@ -307,8 +307,8 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 		}
 		Commands::SendAlert(args) => {
 			let bot_token = token
-				.or_else(|| std::env::var("TELEGRAM_MAIN_BOT_TOKEN").ok())
-				.ok_or_else(|| eyre!("TELEGRAM_MAIN_BOT_TOKEN not set (required for send-alert)"))?;
+				.or_else(|| std::env::var("TELEGRAM_BOT_KEY").ok())
+				.ok_or_else(|| eyre!("TELEGRAM_BOT_KEY not set (required for send-alert)"))?;
 			let cfg = settings.config()?;
 			let alerts_channel = cfg.alerts_channel.as_ref().ok_or_else(|| eyre!("alerts_channel not configured"))?;
 			let (group_id, topic_id) = alerts_channel.as_group_topic().ok_or_else(|| eyre!("alerts_channel must be a numeric group/topic ID"))?;

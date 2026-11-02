@@ -53,6 +53,7 @@ toml = "0.9.11"
 tracing = "0.1.44"
 v_utils = "2.17.6"
 xattr = "1.6.1"
+zbus = { version = "5.9.0", default-features = false }
 
 [dependencies]
 ask_llm = { workspace = true }
@@ -86,6 +87,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 v_utils = { workspace = true, features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
 xattr = { workspace = true }
+zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 
 #[patch.crates-io]
 #v_utils = { path = "/home/v/s/v_utils/v_utils" }

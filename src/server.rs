@@ -285,6 +285,15 @@ async fn worker_loop(
 	let mut alerts_timer = tokio::time::interval(cfg.alerts_interval.duration());
 	alerts_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+	let notifications = match (&cfg.alerts_channel, telegram.real()) {
+		(Some(_), Some(_)) => Some(crate::alerts::NotificationsProxy::new(&zbus::Connection::session().await?).await?),
+		_ => None,
+	};
+	let mut notification_closed = match &notifications {
+		Some(n) => n.receive_notification_closed().await?.left_stream(),
+		None => futures_util::stream::pending().right_stream(),
+	};
+
 	//LOOP: serial worker
 	loop {
 		tokio::select! {
@@ -303,10 +312,16 @@ async fn worker_loop(
 				debug!("Pull completed successfully");
 			}
 			_ = alerts_timer.tick() => {
-				if let Some(client) = telegram.real() {
-					crate::alerts::check_alerts(client, settings).await?;
+				if let (Some(client), Some(notifications)) = (telegram.real(), &notifications) {
+					crate::alerts::check_alerts(client, settings, notifications).await?;
 					debug!("Alerts check completed successfully");
 				}
+			}
+			closed = notification_closed.next() => {
+				let closed = closed.ok_or_else(|| eyre::eyre!("notification daemon connection closed"))?;
+				let args = closed.args()?;
+				let client = telegram.real().expect("stream is pending without a real client");
+				crate::alerts::on_notification_closed(client, settings, args.id, args.reason).await?;
 			}
 		}
 	}

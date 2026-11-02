@@ -1,7 +1,7 @@
 //! Alerts channel monitoring - shows desktop notifications for unread messages.
 //!
 //! Persists notification state to avoid re-notifying for the same messages.
-//! Spawns `notify-send` with no timeout for unread alerts, kills them when read.
+//! Notifications never expire: they close once the message is read elsewhere, and a user dismissal marks it read.
 
 use std::{collections::HashMap, path::PathBuf};
 
@@ -11,14 +11,41 @@ use grammers_tl_types as tl;
 use serde::{Deserialize, Serialize};
 use tg::telegram_chat_id;
 use tracing::{debug, info, warn};
+use zbus::zvariant::Value;
 
 use crate::{config::LiveSettings, mtproto};
+
+#[zbus::proxy(
+	interface = "org.freedesktop.Notifications",
+	default_service = "org.freedesktop.Notifications",
+	default_path = "/org/freedesktop/Notifications"
+)]
+pub trait Notifications {
+	#[allow(clippy::too_many_arguments)] // fixed by the freedesktop spec
+	fn notify(
+		&self,
+		app_name: &str,
+		replaces_id: u32,
+		app_icon: &str,
+		summary: &str,
+		body: &str,
+		actions: &[&str],
+		hints: HashMap<&str, Value<'_>>,
+		expire_timeout: i32,
+	) -> zbus::Result<u32>;
+	fn close_notification(&self, id: u32) -> zbus::Result<()>;
+	#[zbus(signal)]
+	fn notification_closed(&self, id: u32, reason: u32) -> zbus::Result<()>;
+}
+
+/// `NotificationClosed` reason per the freedesktop spec; expiry is 1, `CloseNotification` is 3.
+const DISMISSED_BY_USER: u32 = 2;
 
 /// Persisted state for alerts channel notifications
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AlertsState {
-	/// Maps message_id -> PID of the notify-send process showing it
-	pub notified_pids: HashMap<i32, u32>,
+	/// message_id -> notification id
+	notified: HashMap<i32, u32>,
 }
 
 impl AlertsState {
@@ -26,7 +53,7 @@ impl AlertsState {
 		v_utils::xdg_state_file!("alerts_channel.json")
 	}
 
-	pub fn load() -> Self {
+	fn load() -> Self {
 		let path = Self::file_path();
 		if !path.exists() {
 			return Self::default();
@@ -41,7 +68,7 @@ impl AlertsState {
 		}
 	}
 
-	pub fn save(&self) -> Result<()> {
+	fn save(&self) -> Result<()> {
 		let path = Self::file_path();
 		let content = serde_json::to_string_pretty(self)?;
 		std::fs::write(&path, content)?;
@@ -52,10 +79,12 @@ impl AlertsState {
 	pub fn clear() -> Result<()> {
 		let path = Self::file_path();
 		if path.exists() {
-			// Kill any existing notification processes before clearing
 			let state = Self::load();
-			for (msg_id, pid) in &state.notified_pids {
-				kill_notification(*pid, *msg_id);
+			if !state.notified.is_empty() {
+				let notifications = NotificationsProxyBlocking::new(&zbus::blocking::Connection::session()?)?;
+				for id in state.notified.values() {
+					notifications.close_notification(*id)?;
+				}
 			}
 			std::fs::remove_file(&path)?;
 		}
@@ -63,47 +92,52 @@ impl AlertsState {
 	}
 }
 
-/// Check alerts channel and show/dismiss notifications as needed
-pub async fn check_alerts(client: &Client, settings: &LiveSettings) -> Result<()> {
+/// `(group_id, topic_id)` of the configured alerts channel; `topic_id` is `None` for a plain channel or the General topic
+fn alerts_peer(settings: &LiveSettings) -> Result<Option<(u64, Option<u64>)>> {
 	let cfg = settings.config()?;
-	let alerts_channel = match &cfg.alerts_channel {
-		Some(c) => c,
-		None => return Ok(()), // No alerts channel configured
+	let Some(alerts_channel) = &cfg.alerts_channel else {
+		return Ok(None);
 	};
-
-	let (group_id, topic_id) = match alerts_channel.as_group_topic() {
-		Some((g, t)) => (g, if t == 1 { None } else { Some(t) }),
+	match alerts_channel.as_group_topic() {
+		Some((g, t)) => Ok(Some((g, if t == 1 { None } else { Some(t) }))),
 		None => {
 			warn!("alerts_channel must be a numeric ID, not a username");
-			return Ok(());
+			Ok(None)
 		}
+	}
+}
+
+/// Check alerts channel and show/dismiss notifications as needed
+pub async fn check_alerts(client: &Client, settings: &LiveSettings, notifications: &NotificationsProxy<'_>) -> Result<()> {
+	let Some((group_id, topic_id)) = alerts_peer(settings)? else {
+		return Ok(());
 	};
 
 	debug!("Checking alerts channel: group_id={group_id}, topic_id={topic_id:?}");
 
-	// Fetch unread messages
 	let unread = fetch_unread_message_ids(client, group_id, topic_id).await?;
 	let unread_ids: std::collections::HashSet<i32> = unread.iter().map(|(id, _)| *id).collect();
 
-	// Load current state
 	let mut state = AlertsState::load();
 
-	// Kill notifications for messages that are now read
-	let to_remove: Vec<i32> = state.notified_pids.keys().filter(|id| !unread_ids.contains(id)).copied().collect();
+	let to_remove: Vec<i32> = state.notified.keys().filter(|id| !unread_ids.contains(id)).copied().collect();
 
 	for msg_id in to_remove {
-		if let Some(pid) = state.notified_pids.remove(&msg_id) {
-			kill_notification(pid, msg_id);
+		if let Some(id) = state.notified.remove(&msg_id) {
+			match notifications.close_notification(id).await {
+				Ok(()) => info!("Closed notification for msg:{msg_id} (id {id})"),
+				Err(e) => warn!("Failed to close notification for msg:{msg_id} (id {id}): {e}"),
+			}
 		}
 	}
 
-	// Spawn notifications for new unread messages
 	for (msg_id, text) in &unread {
-		if !state.notified_pids.contains_key(msg_id) {
-			match spawn_notification("Telegram Alert", text) {
-				Ok(pid) => {
-					info!("Spawned notification for msg:{msg_id} (pid {pid})");
-					state.notified_pids.insert(*msg_id, pid);
+		if !state.notified.contains_key(msg_id) {
+			let hints = HashMap::from([("urgency", Value::U8(2))]); // critical
+			match notifications.notify("tg", 0, "", "Telegram Alert", text, &[], hints, 0).await {
+				Ok(id) => {
+					info!("Spawned notification for msg:{msg_id} (id {id})");
+					state.notified.insert(*msg_id, id);
 				}
 				Err(e) => {
 					warn!("Failed to spawn notification for msg:{msg_id}: {e}");
@@ -112,37 +146,47 @@ pub async fn check_alerts(client: &Client, settings: &LiveSettings) -> Result<()
 		}
 	}
 
-	// Save updated state
 	state.save()?;
 
 	Ok(())
 }
-/// Kill a notification process by PID
-fn kill_notification(pid: u32, msg_id: i32) {
-	match std::process::Command::new("kill").arg(pid.to_string()).output() {
-		Ok(output) => {
-			if output.status.success() {
-				info!("Killed notification for msg:{msg_id} (pid {pid})");
-			} else {
-				// Process already dead - this is fine
-				info!("Notification for msg:{msg_id} (pid {pid}) already dismissed");
-			}
+/// Mark the alert as read in telegram if the user dismissed its notification; expiry and our own closes are ignored.
+pub async fn on_notification_closed(client: &Client, settings: &LiveSettings, id: u32, reason: u32) -> Result<()> {
+	if reason != DISMISSED_BY_USER {
+		return Ok(());
+	}
+	let mut state = AlertsState::load();
+	let Some(msg_id) = state.notified.iter().find_map(|(m, n)| (*n == id).then_some(*m)) else {
+		return Ok(()); // not one of ours
+	};
+	state.notified.remove(&msg_id);
+	state.save()?;
+
+	let (group_id, topic_id) = alerts_peer(settings)?.expect("notifications are only spawned for a configured alerts channel");
+	let input_peer = mtproto::get_input_peer(client, telegram_chat_id(group_id)).await?;
+	match topic_id {
+		Some(topic_id) => {
+			client
+				.invoke(&tl::functions::messages::ReadDiscussion {
+					peer: input_peer,
+					msg_id: topic_id as i32,
+					read_max_id: msg_id,
+				})
+				.await?;
 		}
-		Err(e) => {
-			info!("Could not kill notification pid {pid}: {e}");
+		None => {
+			let tl::enums::InputPeer::Channel(c) = input_peer else {
+				eyre::bail!("alerts channel {group_id} resolved to a non-channel peer");
+			};
+			let channel = tl::enums::InputChannel::Channel(tl::types::InputChannel {
+				channel_id: c.channel_id,
+				access_hash: c.access_hash,
+			});
+			client.invoke(&tl::functions::channels::ReadHistory { channel, max_id: msg_id }).await?;
 		}
 	}
-}
-/// Spawn a desktop notification that stays until dismissed
-fn spawn_notification(title: &str, body: &str) -> Result<u32> {
-	let child = std::process::Command::new("notify-send")
-		.arg("--urgency=critical")
-		.arg("--expire-time=0") // 0 = never expire
-		.arg(title)
-		.arg(body)
-		.spawn()?;
-
-	Ok(child.id())
+	info!("Marked msg:{msg_id} read after its notification was dismissed");
+	Ok(())
 }
 /// Fetch unread message IDs from the alerts channel
 async fn fetch_unread_message_ids(client: &Client, group_id: u64, topic_id: Option<u64>) -> Result<Vec<(i32, String)>> {

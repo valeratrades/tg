@@ -15,10 +15,15 @@ rand = "0.8.5"
 members = ["tg_types"]
 
 [workspace.lints.rust]
+stable_features = "allow"
 unused_features = "allow"
 
 [workspace.lints.cargo]
 non_kebab_case_bins = "allow"
+
+[workspace.lints.clippy]
+if_not_else = "warn"
+integer_division = "warn"
 
 [workspace.dependencies]
 ask_llm = { version = "3.1.1", default-features = false }

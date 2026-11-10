@@ -29,12 +29,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -151,12 +159,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Cache packages
         run: |
           # Pre-fetch packages into nix store so they're cached for dependent jobs
@@ -188,12 +204,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -280,6 +304,7 @@ jobs:
         with:
           name: modified-cargo-files
       - run: nix-shell -p mold pkg-config openssl.out openssl.dev git --command "export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A mold --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A pkg-config --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.out --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.dev --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && rm -f \"\$GITHUB_WORKSPACE/.cargo/config.toml\" \"\$GITHUB_WORKSPACE/.cargo/config\""
+      - uses: Swatinem/rust-cache@v2
       - run: nix-shell -p mold pkg-config openssl.out openssl.dev git --command "export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A mold --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A pkg-config --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.out --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.dev --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && cargo clippy --workspace --all-targets -- -Dwarnings"
     timeout-minutes: 45
   rust-doc:
@@ -309,12 +334,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -402,6 +435,7 @@ jobs:
           name: modified-cargo-files
       - uses: dtolnay/install@cargo-docs-rs
       - run: nix-shell -p mold pkg-config openssl.out openssl.dev git --command "export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A mold --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A pkg-config --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.out --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.dev --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && rm -f \"\$GITHUB_WORKSPACE/.cargo/config.toml\" \"\$GITHUB_WORKSPACE/.cargo/config\""
+      - uses: Swatinem/rust-cache@v2
       - run: |-
           nix-shell -p mold pkg-config openssl.out openssl.dev git --command "export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A mold --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A pkg-config --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.out --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && export LD_LIBRARY_PATH=\"\$(nix-build '<nixpkgs>' -A openssl.dev --no-out-link)/lib\${LD_LIBRARY_PATH:+:}\$LD_LIBRARY_PATH\" && for p in \$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select([.targets[].kind[]] | any(. == \"lib\" or . == \"proc-macro\")) | .name'); do
             cargo docs-rs -p \"\$p\"
@@ -430,12 +464,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -541,12 +583,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -662,12 +712,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="
@@ -783,12 +841,20 @@ jobs:
             extra-substituters = file:///tmp/nix-lean-cache
             extra-trusted-substituters = file:///tmp/nix-lean-cache
             require-sigs = false
-      - name: Lean nix cache (built-only paths)
+      - if: github.ref_name != github.event.repository.default_branch
+        name: Restore lean nix cache
+        uses: actions/cache/restore@v5
+        with:
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
+          path: /tmp/nix-lean-cache
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
+      - if: github.ref_name == github.event.repository.default_branch
+        name: Lean nix cache (built-only paths)
         uses: actions/cache@v5
         with:
-          key: nix-lean-${{ runner.os }}-${{ github.run_id }}
+          key: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-${{ github.run_id }}
           path: /tmp/nix-lean-cache
-          restore-keys: nix-lean-${{ runner.os }}-
+          restore-keys: nix-lean-${{ runner.os }}-${{ hashFiles('flake.lock') }}-
       - name: Debug nix environment
         run: |
           echo "=== NIX ENVIRONMENT DEBUG ==="

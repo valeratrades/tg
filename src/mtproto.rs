@@ -64,6 +64,18 @@ impl Telegram {
 		}
 	}
 
+	/// Into Saved Messages, always as a document so the file arrives byte-identical.
+	pub async fn save_file(&self, path: &Path) -> Result<i32> {
+		match self {
+			Self::Real(c) => upload_and_send(c, tl::enums::InputPeer::PeerSelf, None, path, None, false).await,
+			Self::Mock(m) => {
+				let msg_id = m.next_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+				m.record(serde_json::json!({"op": "save", "path": path, "msg_id": msg_id}))?;
+				Ok(msg_id)
+			}
+		}
+	}
+
 	pub async fn delete_messages(&self, group_id: u64, message_ids: &[i32]) -> Result<usize> {
 		match self {
 			Self::Real(c) => delete_messages(c, group_id, message_ids).await,
@@ -609,6 +621,11 @@ async fn send_media(client: &Client, group_id: u64, topic_id: u64, path: &Path, 
 		None
 	};
 
+	let msg_id = upload_and_send(client, input_peer, reply_to, path, caption, as_photo).await?;
+	info!("Sent media message {msg_id} to group {group_id} topic {topic_id} via MTProto");
+	Ok(msg_id)
+}
+async fn upload_and_send(client: &Client, peer: tl::enums::InputPeer, reply_to: Option<tl::enums::InputReplyTo>, path: &Path, caption: Option<&str>, as_photo: bool) -> Result<i32> {
 	let uploaded = client.upload_file(path).await?;
 
 	let media = if as_photo {
@@ -647,7 +664,7 @@ async fn send_media(client: &Client, group_id: u64, topic_id: u64, path: &Path, 
 		update_stickersets_order: false,
 		invert_media: false,
 		allow_paid_floodskip: false,
-		peer: input_peer,
+		peer,
 		reply_to,
 		media,
 		message: caption.unwrap_or("").to_string(),
@@ -664,9 +681,7 @@ async fn send_media(client: &Client, group_id: u64, topic_id: u64, path: &Path, 
 	};
 
 	let updates = client.invoke(&request).await?;
-	let msg_id = extract_message_id_from_updates(&updates)?;
-	info!("Sent media message {msg_id} to group {group_id} topic {topic_id} via MTProto");
-	Ok(msg_id)
+	extract_message_id_from_updates(&updates)
 }
 /// True when the error means the MTProto connection/session is dead and the whole
 /// session must be torn down and rebuilt — as opposed to a per-request server reply

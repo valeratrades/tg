@@ -23,6 +23,7 @@ mod buffer;
 pub mod config;
 mod connectivity;
 mod errors;
+mod file_picker;
 mod last;
 mod mtproto;
 pub mod pull;
@@ -54,6 +55,10 @@ enum Commands {
 	/// Send a message directly to the configured alerts channel (no server needed)
 	#[command(name = "send-alert")]
 	SendAlert(SendAlertArgs),
+	/// Send files to your Saved Messages through the running server's session.
+	/// With no paths, opens the desktop file chooser.
+	#[command(name = "save-file")]
+	SaveFile(SaveFileArgs),
 	/// Start a telegram server, syncing messages from configured forum groups
 	Server(ServerArgs),
 	/// Open a topic file with $EDITOR. Uses fzf for pattern matching.
@@ -164,6 +169,10 @@ struct SendArgs {
 struct SendAlertArgs {
 	/// Message to send. Pass '-' to read from stdin.
 	message: MaybeStdin<String>,
+}
+#[derive(Args, Clone, Debug)]
+struct SaveFileArgs {
+	paths: Vec<PathBuf>,
 }
 #[derive(Args, Clone, Debug)]
 struct OpenArgs {
@@ -304,6 +313,22 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 			// Fire-and-forget: exit 0 = buffered on a healthy server, no need to wait for delivery
 			let pending = sync::buffer_via_server(vec![update], &settings).await?;
 			eprintln!("buffered ({pending} pending)");
+		}
+		Commands::SaveFile(args) => {
+			// Before the chooser, so nothing gets picked for a server that isn't there
+			sync::request_server(&settings, &server::ServerRequest::Ping, std::time::Duration::from_secs(5)).await?;
+			let paths = match args.paths.is_empty() {
+				true => file_picker::pick_files("Save to Telegram").await?,
+				false => args.paths,
+			};
+			if paths.is_empty() {
+				return Ok(());
+			}
+			let paths = paths.iter().map(|p| p.canonicalize().map_err(|e| eyre!("{}: {e}", p.display()))).collect::<Result<Vec<_>>>()?;
+			let response = sync::request_server(&settings, &server::ServerRequest::Save { paths }, std::time::Duration::from_secs(600)).await?;
+			if !response.success {
+				bail!("{}", response.error.expect("failure responses carry an error"));
+			}
 		}
 		Commands::SendAlert(args) => {
 			let bot_token = token

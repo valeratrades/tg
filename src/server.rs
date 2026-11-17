@@ -19,14 +19,20 @@ use crate::{config::LiveSettings, pull};
 /// Handle to send push requests to the MTProto worker
 #[derive(Clone)]
 pub struct PushHandle {
-	tx: mpsc::Sender<PushRequest>,
+	tx: mpsc::Sender<WorkerRequest>,
 }
 
 impl PushHandle {
 	pub async fn push(&self, updates: Vec<crate::sync::MessageUpdate>) -> Result<crate::sync::PushResults> {
 		let (response_tx, response_rx) = oneshot::channel();
-		self.tx.send(PushRequest { updates, response_tx }).await.map_err(|_| eyre::eyre!("Push channel closed"))?;
+		self.tx.send(WorkerRequest::Push { updates, response_tx }).await.map_err(|_| eyre::eyre!("Push channel closed"))?;
 		response_rx.await.map_err(|_| eyre::eyre!("Push response channel closed"))?
+	}
+
+	pub async fn save(&self, paths: Vec<PathBuf>) -> Result<()> {
+		let (response_tx, response_rx) = oneshot::channel();
+		self.tx.send(WorkerRequest::Save { paths, response_tx }).await.map_err(|_| eyre::eyre!("Push channel closed"))?;
+		response_rx.await.map_err(|_| eyre::eyre!("Save response channel closed"))?
 	}
 }
 
@@ -41,6 +47,8 @@ pub enum ServerRequest {
 	/// Accepted only while the Telegram head is healthy — a success response means the
 	/// message is on disk and all but guaranteed to go out.
 	Buffer { updates: Vec<crate::sync::MessageUpdate> },
+	/// Send files to the account's Saved Messages, waiting for the result
+	Save { paths: Vec<PathBuf> },
 	/// Ping to check server version
 	Ping,
 }
@@ -158,7 +166,7 @@ async fn telegram_loop(
 ) -> Result<()> {
 	if mock {
 		let telegram = crate::mtproto::Telegram::Mock(crate::mtproto::MockTelegram::new());
-		let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+		let (push_tx, push_rx) = mpsc::channel::<WorkerRequest>(32);
 		let push = PushHandle { tx: push_tx };
 		// Tests flip connectivity by creating/removing this flag file
 		let offline_flag = DATA_DIR.get().unwrap().join("mock_offline");
@@ -242,7 +250,7 @@ async fn run_with_session(
 	drain_rx: &mut mpsc::Receiver<()>,
 ) -> Result<()> {
 	let crate::mtproto::MtprotoSession { client, runner } = session;
-	let (push_tx, push_rx) = mpsc::channel::<PushRequest>(32);
+	let (push_tx, push_rx) = mpsc::channel::<WorkerRequest>(32);
 	let telegram = crate::mtproto::Telegram::Real(client.clone());
 
 	let serve = async {
@@ -266,7 +274,7 @@ async fn run_with_session(
 async fn worker_loop(
 	settings: &LiveSettings,
 	telegram: &crate::mtproto::Telegram,
-	mut push_rx: mpsc::Receiver<PushRequest>,
+	mut push_rx: mpsc::Receiver<WorkerRequest>,
 	drain_rx: &mut mpsc::Receiver<()>,
 	buffer: &Arc<crate::buffer::SendBuffer>,
 ) -> Result<()> {
@@ -300,10 +308,21 @@ async fn worker_loop(
 			biased;
 			// On-demand pushes win over periodic ticks so interactive sends aren't delayed.
 			// ponytail: a continuous push flood could starve pull; not a concern for a personal CLI.
-			Some(req) = push_rx.recv() => {
-				let result = crate::sync::push(req.updates, settings, telegram).await;
-				let _ = req.response_tx.send(result);
-			}
+			Some(req) = push_rx.recv() => match req {
+				WorkerRequest::Push { updates, response_tx } => {
+					let _ = response_tx.send(crate::sync::push(updates, settings, telegram).await);
+				}
+				WorkerRequest::Save { paths, response_tx } => {
+					let result = async {
+						for p in &paths {
+							telegram.save_file(p).await?;
+						}
+						Ok(())
+					}
+					.await;
+					let _ = response_tx.send(result);
+				}
+			},
 			Some(()) = drain_rx.recv() => {
 				drain_buffer(buffer, settings, telegram).await?; // fatal connection-dead → tears session down, buffer intact
 			}
@@ -462,10 +481,16 @@ pub(crate) fn format_message_append(
 	let prefix = if date_header.is_some() || needs_dot_prefix { "\n" } else { "" };
 	format!("{}{prefix}{formatted}\n", date_header.unwrap_or_default())
 }
-/// A push request sent through the channel to the MTProto worker
-struct PushRequest {
-	updates: Vec<crate::sync::MessageUpdate>,
-	response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
+/// Work sent through the channel to the MTProto worker
+enum WorkerRequest {
+	Push {
+		updates: Vec<crate::sync::MessageUpdate>,
+		response_tx: oneshot::Sender<Result<crate::sync::PushResults>>,
+	},
+	Save {
+		paths: Vec<PathBuf>,
+		response_tx: oneshot::Sender<Result<()>>,
+	},
 }
 /// Read one request from a client, forward it to the serial worker, and write back the result.
 /// Runs concurrently with other connections; the worker it calls into is what serializes the work.
@@ -512,6 +537,16 @@ async fn handle_connection(mut socket: TcpStream, net: NetCtx) {
 						}
 					}
 					Err(e) => ServerResponse::err(format!("Failed to write send buffer: {e}")),
+				},
+			},
+			Ok(ServerRequest::Save { paths }) => match head {
+				None => ServerResponse::err("Server is reconnecting to Telegram, try again shortly"),
+				Some(push) => match push.save(paths).await {
+					Ok(()) => ServerResponse::ok(),
+					Err(e) => {
+						error!("Save failed: {e}");
+						ServerResponse::err(e.to_string())
+					}
 				},
 			},
 			Ok(ServerRequest::Ping) => ServerResponse::ok(),

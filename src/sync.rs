@@ -735,7 +735,7 @@ pub fn resolve_topic_ids_from_path(path: &Path) -> Option<(u64, u64)> {
 
 	None
 }
-async fn request_server(config: &LiveSettings, request: &crate::server::ServerRequest, read_timeout: std::time::Duration) -> Result<crate::server::ServerResponse> {
+pub(crate) async fn request_server(config: &LiveSettings, request: &crate::server::ServerRequest, read_timeout: std::time::Duration) -> Result<crate::server::ServerResponse> {
 	use tokio::{
 		io::{AsyncReadExt, AsyncWriteExt},
 		net::TcpStream,

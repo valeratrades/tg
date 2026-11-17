@@ -46,6 +46,7 @@ insta = "1.46.1"
 jiff = "0.2"
 miette = "7"
 mime_guess = "2"
+percent-encoding = "2.3.2"
 regex = "1"
 reqwest = { version = "0.13.1", default-features = false }
 serde = "1.0.228"
@@ -80,6 +81,7 @@ grammers-tl-types = { workspace = true }
 jiff = { workspace = true }
 miette = { workspace = true, features = ["fancy"] }
 mime_guess = { workspace = true }
+percent-encoding = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true, features = ["rustls", "form", "json"] }
 serde = { workspace = true }

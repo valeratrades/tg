@@ -3881,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "tg"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "ask_llm",
  "clap",

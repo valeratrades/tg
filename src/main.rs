@@ -31,6 +31,7 @@ mod server;
 mod shell_init;
 mod since;
 mod sync;
+mod voice;
 
 #[derive(Clone, Debug, Parser)]
 #[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"), about, long_about = None)]

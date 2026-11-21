@@ -261,7 +261,7 @@ pub async fn push(updates: Vec<MessageUpdate>, _config: &LiveSettings, telegram:
 	}
 
 	let metadata = TopicsMetadata::load();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: (\d{2}:\d{2}:\d{2}))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = &*MSG_TAG_RE;
 
 	for (group_id, items) in &successful_deletions {
 		// Group by topic_id
@@ -424,7 +424,7 @@ pub struct ParsedMessage {
 /// Returns a map of message_id -> ParsedMessage
 pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 	let mut messages = BTreeMap::new();
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: (\d{2}:\d{2}:\d{2}))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = &*MSG_TAG_RE;
 
 	let lines: Vec<&str> = content.lines().collect();
 	let mut i = 0;
@@ -451,7 +451,7 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 						&& let Some(caps) = msg_id_re.captures(lines[i])
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
-						let is_voice = has_voice_qualifier(&caps);
+						let is_voice = has_qualifier(&caps, "voice");
 						let reply_to_msg_id = extract_reply_to(&caps);
 						let time = extract_time(&caps);
 						let msg_content = block_content.join("\n");
@@ -472,7 +472,7 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 					if let Some(caps) = msg_id_re.captures(next_line)
 						&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 					{
-						let is_voice = has_voice_qualifier(&caps);
+						let is_voice = has_qualifier(&caps, "voice");
 						let reply_to_msg_id = extract_reply_to(&caps);
 						let time = extract_time(&caps);
 						let msg_content = block_content.join("\n");
@@ -500,7 +500,7 @@ pub fn parse_file_messages(content: &str) -> BTreeMap<i32, ParsedMessage> {
 		if let Some(caps) = msg_id_re.captures(line)
 			&& let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>()
 		{
-			let is_voice = has_voice_qualifier(&caps);
+			let is_voice = has_qualifier(&caps, "voice");
 			let reply_to_msg_id = extract_reply_to(&caps);
 			let time = extract_time(&caps);
 			// Extract content by removing the message ID marker
@@ -534,7 +534,7 @@ pub struct FileContentInfo {
 }
 /// Parse file content and track line positions for new message detection
 pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
-	let msg_id_re = Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: (\d{2}:\d{2}:\d{2}))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap();
+	let msg_id_re = &*MSG_TAG_RE;
 
 	let mut info = FileContentInfo {
 		last_tagged_line: None,
@@ -545,7 +545,7 @@ pub fn parse_file_with_positions(content: &str) -> FileContentInfo {
 	for (line_num, line) in content.lines().enumerate() {
 		if let Some(caps) = msg_id_re.captures(line) {
 			if let Ok(id) = caps.get(1).unwrap().as_str().parse::<i32>() {
-				let is_voice = has_voice_qualifier(&caps);
+				let is_voice = has_qualifier(&caps, "voice");
 				let reply_to_msg_id = extract_reply_to(&caps);
 				let time = extract_time(&caps);
 				let msg_content = msg_id_re.replace(line, "").trim().to_string();
@@ -778,13 +778,15 @@ pub(crate) async fn request_server(config: &LiveSettings, request: &crate::serve
 	Ok(response)
 }
 
-fn has_voice_qualifier(caps: &regex::Captures<'_>) -> bool {
-	caps.get(5).map(|m| m.as_str().split_whitespace().any(|w| w == "voice")).unwrap_or(false)
+pub(crate) static MSG_TAG_RE: std::sync::LazyLock<Regex> =
+	std::sync::LazyLock::new(|| Regex::new(r"<!-- (?:forwarded )?msg:(\d+)(?: ts:(\d+))?(?: (\d{2}:\d{2}:\d{2}))?(?: reply_to:(\d+))?((?:\s+\w+)*) -->").unwrap());
+pub(crate) fn has_qualifier(caps: &regex::Captures<'_>, qualifier: &str) -> bool {
+	caps.get(5).is_some_and(|m| m.as_str().split_whitespace().any(|w| w == qualifier))
 }
 fn extract_reply_to(caps: &regex::Captures<'_>) -> Option<i32> {
 	caps.get(4).and_then(|m| m.as_str().parse().ok())
 }
-fn extract_time(caps: &regex::Captures<'_>) -> Option<jiff::civil::Time> {
+pub(crate) fn extract_time(caps: &regex::Captures<'_>) -> Option<jiff::civil::Time> {
 	if let Some(m) = caps.get(2) {
 		// legacy `ts:<unix seconds>` tags
 		let ts: i64 = m.as_str().parse().expect("regex-matched digits");

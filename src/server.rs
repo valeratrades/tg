@@ -580,7 +580,7 @@ fn needs_markdown_wrapping(message: &str) -> bool {
 	message.contains('\n') || message.contains("```") || message.trim().starts_with('#') || message.trim().starts_with(". ")
 }
 /// Find the longest sequence of backticks in a message
-fn max_backtick_run(message: &str) -> usize {
+pub(crate) fn max_backtick_run(message: &str) -> usize {
 	let mut max = 0;
 	let mut current = 0;
 	for c in message.chars() {

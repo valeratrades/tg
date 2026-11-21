@@ -113,6 +113,8 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 
 	let max_messages = cfg.max_messages_per_chat;
 	let group_ids = cfg.forum_group_ids();
+	let interpreter = crate::voice::Interpreter::from(telegram);
+	let mut interpreted = false; // one model call per pull, so a backlog of runs can't stall the serial worker
 
 	for group_id in group_ids {
 		let group = match topics_metadata.groups.get(&group_id) {
@@ -175,6 +177,13 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 
 					// Merge messages into file
 					merge_mtproto_messages_to_file(client, input_peer, group_id, topic_id, &messages, &topics_metadata).await?;
+				}
+			}
+
+			if !interpreted && file_path.exists() {
+				match crate::voice::interpret_voice_runs(&file_path, topic_name, &interpreter).await {
+					Ok(attempted) => interpreted = attempted,
+					Err(e) => warn!("Failed to interpret voice notes in {}: {e}", file_path.display()),
 				}
 			}
 
@@ -413,7 +422,7 @@ fn backfill_file_date_headers(file_path: &Path) -> Result<()> {
 /// Extract the last date header from file content and parse it as a date
 /// Date headers look like `## Dec 25, 2024` or `## Jan 03`
 /// Only returns dates from headers WITH explicit years (after backfill)
-fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
+pub(crate) fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 	use regex::Regex;
 
 	// Only match date headers with explicit years

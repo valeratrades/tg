@@ -35,7 +35,7 @@ Output the markdown only: no preamble, no code fence around it.";
 
 pub(crate) enum Interpreter<'a> {
 	Llm {
-		llm: ask_llm::Client,
+		llm: &'a ask_llm::Client,
 		telegram: &'a Client,
 		peer: &'a tl::enums::InputPeer,
 	},

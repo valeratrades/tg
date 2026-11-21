@@ -113,6 +113,7 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 
 	let max_messages = cfg.max_messages_per_chat;
 	let group_ids = cfg.forum_group_ids();
+	let llm = ask_llm::Client::default().model(ask_llm::Model::Medium);
 	let mut interpreted = false; // one model call per pull, so a backlog of runs can't stall the serial worker
 
 	for group_id in group_ids {
@@ -141,11 +142,7 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 			None => None,
 		};
 		let interpreter = match &client_and_peer {
-			Some((client, peer)) => crate::voice::Interpreter::Llm {
-				llm: ask_llm::Client::default().model(ask_llm::Model::Medium),
-				telegram: client,
-				peer,
-			},
+			Some((client, peer)) => crate::voice::Interpreter::Llm { llm: &llm, telegram: client, peer },
 			None => crate::voice::Interpreter::Mock,
 		};
 

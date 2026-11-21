@@ -15,3 +15,6 @@ serde = { workspace = true, features = ["derive"] }
 insta.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+
+[lints]
+workspace = true

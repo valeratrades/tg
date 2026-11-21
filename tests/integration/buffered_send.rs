@@ -10,9 +10,9 @@ fn buffered_send_drains_to_telegram() {
 	let out = ctx.send("fire and forget");
 	assert!(out.status.success(), "send failed: {}", String::from_utf8_lossy(&out.stderr));
 
-	let content = ctx.wait_topic(|c| c.contains("fire and forget <!-- msg:"));
+	ctx.wait_topic(|c| c.contains("fire and forget <!-- msg:"));
 	assert!(ctx.mock_sent().contains("fire and forget"), "not sent to telegram: {}", ctx.mock_sent());
-	assert_eq!(ctx.buffered_count(), "0", "buffer not drained; topic file:\n{content}");
+	ctx.wait_buffer_drained();
 }
 
 /// The buffer endpoint rejects instantly while the Telegram head is offline (health flag is
@@ -119,5 +119,5 @@ fn seeded_buffer_drains_on_startup() {
 
 	ctx.wait_topic(|c| c.contains("survived a restart <!-- msg:"));
 	assert!(ctx.mock_sent().contains("survived a restart"));
-	assert_eq!(ctx.buffered_count(), "0");
+	ctx.wait_buffer_drained();
 }

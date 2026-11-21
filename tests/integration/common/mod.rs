@@ -150,6 +150,17 @@ test = "-100{GROUP_ID}/{TOPIC_ID}"
 		std::fs::read_to_string(self.tmp.path().join("state/tg/buffered_count")).unwrap_or_default().trim().to_string()
 	}
 
+	/// The drain writes the topic file before it pops the buffer, so the count lags the file
+	pub fn wait_buffer_drained(&self) {
+		for _ in 0..100 {
+			if self.buffered_count() == "0" {
+				return;
+			}
+			std::thread::sleep(Duration::from_millis(50));
+		}
+		panic!("buffer not drained, count {}; topic file:\n{}", self.buffered_count(), self.read_topic());
+	}
+
 	/// Flip the mock server's simulated Telegram connectivity (watched at 50ms granularity)
 	pub fn set_offline(&self, offline: bool) {
 		let flag = self.tmp.path().join("state/tg/mock_offline");

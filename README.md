@@ -116,7 +116,7 @@ export PHONE_NUMBER_FR="+1234567890"             # alternative to config
 
 <br>
 
-<sup>Links for devs:</sup>
+#### Dev links
 - <sup><a href="./docs/ARCHITECTURE.md">architecture</a></sup>
 - <sup><a href="https://github.com/EV-Main/.github/blob/main/code/STYLE.md">style</a></sup>
 - <sup><a href="https://github.com/EV-Main/.github/tree/main/code/conventions">conventions</a></sup>

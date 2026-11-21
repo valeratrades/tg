@@ -26,7 +26,7 @@ if_not_else = "warn"
 integer_division = "warn"
 
 [workspace.dependencies]
-ask_llm = { version = "3.11", default-features = false }
+ask_llm = { version = "3.12", default-features = false }
 clap = "4.5.54"
 clap-stdin = "0.8"
 clap_complete = "4"

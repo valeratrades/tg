@@ -113,7 +113,6 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 
 	let max_messages = cfg.max_messages_per_chat;
 	let group_ids = cfg.forum_group_ids();
-	let interpreter = crate::voice::Interpreter::from(telegram);
 	let mut interpreted = false; // one model call per pull, so a backlog of runs can't stall the serial worker
 
 	for group_id in group_ids {
@@ -140,6 +139,14 @@ pub async fn pull(config: &LiveSettings, telegram: &mtproto::Telegram) -> Result
 				}
 			},
 			None => None,
+		};
+		let interpreter = match &client_and_peer {
+			Some((client, peer)) => crate::voice::Interpreter::Llm {
+				llm: ask_llm::Client::default().model(ask_llm::Model::Medium),
+				telegram: client,
+				peer,
+			},
+			None => crate::voice::Interpreter::Mock,
 		};
 
 		for (&topic_id, topic_name) in &group.topics {
@@ -422,7 +429,7 @@ fn backfill_file_date_headers(file_path: &Path) -> Result<()> {
 /// Extract the last date header from file content and parse it as a date
 /// Date headers look like `## Dec 25, 2024` or `## Jan 03`
 /// Only returns dates from headers WITH explicit years (after backfill)
-pub(crate) fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
+fn extract_last_date_from_content(content: &str) -> Option<jiff::civil::Date> {
 	use regex::Regex;
 
 	// Only match date headers with explicit years
@@ -501,22 +508,7 @@ async fn fetch_topic_messages(client: &Client, input_peer: &tl::enums::InputPeer
 						_ => None,
 					});
 
-					// Extract voice document if present
-					let voice = m.media.as_ref().and_then(|media| match media {
-						tl::enums::MessageMedia::Document(d) => d.document.as_ref().and_then(|doc| match doc {
-							tl::enums::Document::Document(d) => {
-								let is_voice = d.attributes.iter().any(|a| {
-									matches!(
-										a,
-										tl::enums::DocumentAttribute::Audio(audio) if audio.voice
-									)
-								});
-								if is_voice { Some(d.clone()) } else { None }
-							}
-							_ => None,
-						}),
-						_ => None,
-					});
+					let voice = m.media.as_ref().and_then(voice_document);
 
 					// Telegram sets reply_to = topic root on *every* message in a forum topic; that's
 					// topic membership, not a reply.
@@ -872,6 +864,43 @@ fn tag_forwarded_in_content(content: &str, forwarded_ids: &[i32]) -> String {
 	result.push_str(&content[last_end..]);
 
 	result
+}
+fn voice_document(media: &tl::enums::MessageMedia) -> Option<tl::types::Document> {
+	match media {
+		tl::enums::MessageMedia::Document(d) => match d.document.as_ref()? {
+			tl::enums::Document::Document(d) if d.attributes.iter().any(|a| matches!(a, tl::enums::DocumentAttribute::Audio(audio) if audio.voice)) => Some(d.clone()),
+			_ => None,
+		},
+		_ => None,
+	}
+}
+/// Transcribe the voice notes behind `ids` again from their audio; ids whose message no longer carries a voice note are absent.
+pub(crate) async fn transcribe_voices(client: &Client, input_peer: &tl::enums::InputPeer, ids: &[i32]) -> Result<std::collections::HashMap<i32, String>> {
+	let tl::enums::InputPeer::Channel(c) = input_peer else {
+		eyre::bail!("voice notes live in forum groups, got peer {input_peer:?}");
+	};
+	let request = tl::functions::channels::GetMessages {
+		channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+			channel_id: c.channel_id,
+			access_hash: c.access_hash,
+		}),
+		id: ids.iter().map(|&id| tl::enums::InputMessage::Id(tl::types::InputMessageId { id })).collect(),
+	};
+	let messages = match client.invoke(&request).await? {
+		tl::enums::messages::Messages::Messages(m) => m.messages,
+		tl::enums::messages::Messages::Slice(m) => m.messages,
+		tl::enums::messages::Messages::ChannelMessages(m) => m.messages,
+		tl::enums::messages::Messages::NotModified(_) => eyre::bail!("GetMessages by id answered NotModified"),
+	};
+	let mut transcripts = std::collections::HashMap::new();
+	for msg in messages {
+		if let tl::enums::Message::Message(m) = msg
+			&& let Some(doc) = m.media.as_ref().and_then(voice_document)
+		{
+			transcripts.insert(m.id, download_and_transcribe(client, &doc).await?);
+		}
+	}
+	Ok(transcripts)
 }
 /// Download a voice document and transcribe it locally.
 async fn download_and_transcribe(client: &Client, doc: &tl::types::Document) -> Result<String> {

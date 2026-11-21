@@ -23,7 +23,7 @@ fn followed_run_interpreted_fresh_run_kept() {
 	insta::assert_snapshot!(common::redact(&ctx.read_topic()), @"
 	## [DATE]
 	`````md
-	interpreted: so the the first thing | and the second thing
+	interpreted: retranscribed 10 | retranscribed 11
 	`````
 	<!-- msg:10 [TS] user voice interpreted -->
 	<!-- msg:11 [TS] user voice interpreted -->
@@ -46,9 +46,31 @@ fn idle_trailing_run_interpreted() {
 	insta::assert_snapshot!(common::redact(&ctx.read_topic()), @"
 	## [DATE]
 	`````md
-	interpreted: alone at the end
+	interpreted: retranscribed 10
 	`````
 	<!-- msg:10 [TS] user voice interpreted -->
 	");
 	assert_eq!(ctx.mock_sent(), "", "interpretation must not reach Telegram");
+}
+
+/// Transcripts from the multilingual model are interpreted as they are, without fetching the audio again.
+#[test]
+fn multilingual_era_run_keeps_its_transcript() {
+	let mut ctx = common::TestCtx::with_config_extra("pull_interval = \"1s\"");
+	std::fs::write(
+		ctx.topic_path(),
+		"## Dec 01, 2026\n[voice] already multilingual <!-- msg:10 01:00:00 user voice -->\na reply <!-- msg:11 01:02:00 user -->\n",
+	)
+	.unwrap();
+	ctx.start_server();
+
+	ctx.wait_topic(|c| c.contains("interpreted -->"));
+	insta::assert_snapshot!(common::redact(&ctx.read_topic()), @"
+	## [DATE]
+	`````md
+	interpreted: already multilingual
+	`````
+	<!-- msg:10 [TS] user voice interpreted -->
+	a reply <!-- msg:11 [TS] user -->
+	");
 }

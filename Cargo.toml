@@ -32,11 +32,8 @@ clap-stdin = "0.8"
 clap_complete = "4"
 color-eyre = "0.6.5"
 config = "0.15.19"
-derive-new = "0.7.0"
 derive_more = "2"
-dirs = "6.0.0"
 eyre = "0.6.12"
-futures = "0.3.31"
 futures-util = "0.3.31"
 grammers-client = "=0.10.0"
 grammers-mtsender = "=0.10.0"
@@ -71,11 +68,8 @@ clap-stdin = { workspace = true }
 clap_complete = { workspace = true }
 color-eyre = { workspace = true }
 config = { workspace = true }
-derive-new = { workspace = true }
 derive_more = { workspace = true, features = ["display", "from_str"] }
-dirs = { workspace = true }
 eyre = { workspace = true }
-futures = { workspace = true }
 futures-util = { workspace = true }
 grammers-client = { workspace = true }
 grammers-mtsender = { workspace = true }
@@ -93,7 +87,6 @@ tempfile = { workspace = true }
 tg_types = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-toml = { workspace = true }
 tracing = { workspace = true }
 v_utils = { workspace = true, features = ["io", "async-io", "distributions", "macros", "cli", "xdg"] }
 xattr = { workspace = true }
@@ -106,6 +99,7 @@ zbus = { workspace = true, features = ["tokio", "blocking-api"] }
 [dev-dependencies]
 insta = { workspace = true }
 tempfile = { workspace = true }
+toml = { workspace = true }
 
 [lints.rust]
 unused_features = "allow"

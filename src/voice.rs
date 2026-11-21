@@ -23,8 +23,9 @@ Do:
 Never:
 - add ideas, conclusions, advice or a summary
 - drop or soften a claim, number, plan, doubt or open question
-- change the person (keep the speaker's first person), the language or the tone
+- change the person (keep the speaker's first person) or the tone
 
+Write in English, translating whatever was said in another language.
 A guessed term or a fragment you cannot recover: `[?: what was heard → best guess]`.
 Output the markdown only: no preamble, no code fence around it.";
 
@@ -142,7 +143,8 @@ fn first_finished_run(lines: &[&str], now: Timestamp) -> Option<Vec<Note>> {
 				&& has_qualifier(caps, "voice")
 				&& !has_qualifier(caps, "interpreted")
 				&& !caps[0].starts_with("<!-- forwarded")
-				&& !raw.starts_with("[transcription failed");
+				&& !raw.starts_with("[transcription failed")
+				&& !raw.contains("(speaking in foreign language)"); // what an English-only whisper model leaves of other languages; the audio needs re-transcribing
 			eligible.then(|| Note {
 				start,
 				end: *end,

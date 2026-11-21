@@ -96,6 +96,9 @@ pub(crate) async fn interpret_voice_runs(path: &Path, topic: &str, interpreter: 
 			}
 		},
 	};
+	if let Some(lost) = stale.iter().find(|id| !retranscribed.contains_key(id)) {
+		warn!(path = %path.display(), msg_id = lost, "Voice note's audio is gone from Telegram; interpreting its old transcript");
+	}
 	let raws: Vec<&str> = run
 		.iter()
 		.map(|n| match retranscribed.get(&n.id) {
@@ -122,7 +125,7 @@ pub(crate) async fn interpret_voice_runs(path: &Path, topic: &str, interpreter: 
 		return Ok(true);
 	}
 	std::fs::write(path, fresh.replacen(&span, &block, 1))?;
-	info!(path = %path.display(), notes = run.len(), "Interpreted voice run");
+	info!(path = %path.display(), notes = run.len(), retranscribed = retranscribed.len(), "Interpreted voice run");
 	Ok(true)
 }
 

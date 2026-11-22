@@ -346,6 +346,7 @@ async fn run(command: Commands, token: Option<String>, settings: Arc<LiveSetting
 				params.push(("message_thread_id", topic_id.to_string()));
 			}
 
+			let _ = rustls::crypto::ring::default_provider().install_default(); // Err: a provider is already installed
 			let client = reqwest::Client::new();
 			let res = client.post(&url).form(&params).send().await?;
 			if !res.status().is_success() {

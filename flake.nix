@@ -23,6 +23,7 @@
             inherit pkgs rust;
             build.enable = true;
           };
+          oldestSupportedVersion = "nightly-${v_flakes.rs.nightly_version}";
           github =
             let
               jobDeps = { packages = [ "mold" ]; debug = true; };
@@ -31,7 +32,7 @@
               inherit pkgs pname rs;
               enable = true;
               publishCachix = "valeratrades";
-              lastSupportedVersion = "nightly-${v_flakes.rs.nightly_version}";
+              inherit oldestSupportedVersion;
               jobs = {
                 default = true;
                 warnings.install = jobDeps;
@@ -39,7 +40,7 @@
             };
           readme = v_flakes.readme-fw {
             inherit pkgs pname;
-            lastSupportedVersion = "nightly-1.92";
+            inherit oldestSupportedVersion;
             rootDir = ./.;
             licenses = [{ license = v_flakes.files.licenses.gl; }];
             badges = [ "msrv" "crates_io" "docs_rs" "loc" "ci" ];

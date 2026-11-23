@@ -249,7 +249,7 @@ jobs:
         name: Drop older lean nix caches
         run: gh cache list -R "$GITHUB_REPOSITORY" -L 100 --key "$FAMILY" --json id,key -q 'if any(.[]; .key == $ENV.KEY) then .[] | select(.key != $ENV.KEY) | .id else empty end' | xargs -r -n1 gh cache delete -R "$GITHUB_REPOSITORY"
     timeout-minutes: 90
-  rust-tests-release:
+  rust-tests-release-oldest:
     if: needs.pre_ci.outputs.continue && startsWith(github.ref, 'refs/tags/v')
     name: Rust nightly-2026-06-29
     needs: pre_ci
